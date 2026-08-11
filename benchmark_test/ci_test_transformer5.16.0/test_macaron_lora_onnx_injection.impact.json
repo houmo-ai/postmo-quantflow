@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "macaron-v1-tall-lora-onnx-injection-contract",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/lora_adapter_overlay.py",
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/lora_constant_bundle.py",
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/lora_export_pipeline.py",
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/lora_export_plan.py",
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/lora_quantization.py",
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/lora_weights.py",
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/non_routed_lora_injection.py",
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/routed_expert_lora_injection.py"
+      ]
+    }
+  ]
+}

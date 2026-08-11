@@ -289,6 +289,8 @@ class BaseLLMModel(XHBaseModel):
         self.frontend_type = "TorchFX"
 
         self._default_pad_token_id = None
+        # Export metadata may resolve padding before the HF model is wrapped.
+        self._tokenizer: PreTrainedTokenizer | None = None
         self._inference_model = None
         self._data_processor: Optional[BaseLLMInputProcessor] = None
         self._kvcache_mixin = KVCacheMixin(self.kvcache_config)
