@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-dynamic-prune-acep",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe_dynamic_prune/**",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_dynamic_prune.yaml",
+        "examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_*.py"
+      ]
+    }
+  ]
+}

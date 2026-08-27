@@ -91,6 +91,13 @@ def dump_dynamic_prune_golden(
         return workflow.dump_golden(export_result, device, input_messages)
 
 
+def _acep_coverage(value: str) -> float:
+    coverage = float(value)
+    if not 0.0 < coverage <= 1.0:
+        raise argparse.ArgumentTypeError(f"ACEP coverage must be in (0, 1], got {coverage}")
+    return coverage
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Qwen3.5-MoE dynamic-prune workflow.")
     parser.add_argument("--model-dir", required=True, help="HF model directory.")
@@ -101,7 +108,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dump-golden", action="store_true")
     parser.add_argument("--quick-test", action="store_true")
-    parser.add_argument("--threshold", type=float, default=None, help="Override dynamic pruning threshold.")
+    parser.add_argument(
+        "--coverage",
+        "--threshold",
+        dest="threshold",
+        type=_acep_coverage,
+        default=None,
+        help=(
+            "Override ACEP Top-P cumulative proxy-probability coverage. "
+            "The legacy --threshold spelling is retained as an alias."
+        ),
+    )
     parser.add_argument("--s-scalar-path", default=None, help="Optional .pt/.json expert score file.")
     parser.add_argument(
         "--auto-s-scalar",

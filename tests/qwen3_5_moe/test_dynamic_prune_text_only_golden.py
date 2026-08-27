@@ -101,6 +101,45 @@ def test_dynamic_prune_cli_accepts_both_gdr_fusion_switches(monkeypatch):
     assert args.enable_fuse_gdr_block_recurrent_ops is True
 
 
+def test_dynamic_prune_cli_accepts_acep_coverage_alias(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qwen3_5_dynamic_prune_workflow.py",
+            "--model-dir",
+            "model",
+            "--config-path",
+            "workflow.yaml",
+            "--coverage",
+            "0.85",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.threshold == 0.85
+
+
+def test_dynamic_prune_cli_rejects_invalid_acep_coverage(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qwen3_5_dynamic_prune_workflow.py",
+            "--model-dir",
+            "model",
+            "--config-path",
+            "workflow.yaml",
+            "--coverage",
+            "0",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        parse_args()
+
+
 def test_dynamic_prune_generate_cli_has_conversation_validation_defaults():
     args = build_generate_parser().parse_args(["--config", "export-dir"])
 

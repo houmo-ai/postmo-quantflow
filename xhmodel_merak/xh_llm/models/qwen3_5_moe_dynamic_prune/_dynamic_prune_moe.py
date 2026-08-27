@@ -14,9 +14,9 @@ class Qwen35MoeDynamicPruneBlock(_Qwen3_5MoeSparseMoeBlock):
 
     def _setup(self, cfg=None):
         super()._setup(cfg)
-        threshold = 0.0
+        threshold = 0.85
         if cfg is not None:
-            threshold = float(cfg.get("dynamic_prune_threshold", 0.0))
+            threshold = float(cfg.get("dynamic_prune_threshold", 0.85))
         expert_device = self.moeblock.expert_gate_proj_weight.device
         self.moeblock.prune_threshold = threshold
         expert_count = self.moeblock.expert_gate_proj_weight.shape[0]

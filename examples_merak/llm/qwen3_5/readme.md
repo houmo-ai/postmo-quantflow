@@ -164,9 +164,47 @@ Qwen3.8 的 Base/MTP 同样使用上面的流程，换成 `qwen3_8_27b_full*.yam
 DFlash2 的 8K 与 256K 配置分别为 `qwen3_8_27b_full_dflash2_8k.yaml`、
 `qwen3_8_27b_full_dflash2_256k_fa.yaml`，不要只改目录名来切换上下文。
 
-动态剪枝使用 [独立 workflow](qwen3_5_dynamic_prune_workflow.py)，
-`--auto-s-scalar` 可从原始 HF 权重计算并缓存 expert scalar。
-完整导出不要加 `--only-first-block`。
+动态剪枝使用 [独立 workflow](qwen3_5_dynamic_prune_workflow.py) 和
+`qwen3_6_35b_a3b_dynamic_prune.yaml`。默认 ACEP Top-P 覆盖率为 `0.85`，
+可用 `--coverage`（旧名 `--threshold`）覆盖。`--auto-s-scalar` 可从原始
+HF 权重计算并缓存 expert scalar。完整导出不要加 `--only-first-block`。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 USE_TRITON_MATMUL=0 python \
+  examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_workflow.py \
+  --model-dir /data01/datasets/Qwen3.6-35B-A3B/ \
+  --config-path \
+    configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_dynamic_prune.yaml \
+  --export-output-dir \
+    work_dirs/qwen3_6_35b_a3b_dynamic_prune_acep_topp85_export \
+  --model-name \
+    qwen3_6_35b_a3b_dynamic_prune_acep_topp85 \
+  --context-max-length 262144 \
+  --coverage 0.85 \
+  --auto-s-scalar \
+  --enable-fuse-gdr-ops \
+  --enable-fuse-gdr-block-recurrent-ops \
+  --dump-golden \
+  --overwrite
+```
+
+导出完成后可用 text-only runtime 做连续生成验证：
+
+```bash
+CUDA_VISIBLE_DEVICES=5 USE_TRITON_MATMUL=0 python \
+  examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_hmonnx_generate.py \
+  --config work_dirs/qwen3_6_35b_a3b_dynamic_prune_acep_topp85_export \
+  --device 0 \
+  --prompt "用中文简单介绍 Qwen3.5。" \
+  --max-new-tokens 64 \
+  --min-output-tokens 8
+```
+
+`USE_TRITON_MATMUL=0` 只绕开通用 Linear Triton kernel 的编译兼容问题，
+不改变 ACEP Top-P 剪枝逻辑。`MoeBlock` 把 `gate_score * s_scalar`
+归一化成代理概率，降序累计并保留使累计概率首次达到覆盖率的最短专家前缀，
+同时始终保留 Router Top-1 专家。`--auto-s-scalar` 首次会把 Method1
+expert scalar 缓存在导出目录旁的 `*_method1_s_scalar.pt`，后续同目录重跑会复用。
 
 ## 验证产物
 

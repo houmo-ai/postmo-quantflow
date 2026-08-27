@@ -54,7 +54,7 @@ class Qwen35DynamicPruneWorkflow(Qwen35Workflow):
         merged_overrides = dict(config_overrides or {})
         merged_overrides.update(
             {
-                "export.model.dynamic_prune_threshold": float(prune_cfg.get("threshold", 0.0)),
+                "export.model.dynamic_prune_threshold": float(prune_cfg.get("threshold", 0.85)),
                 "export.model.dynamic_prune_s_scalar_path": scalar_path,
             }
         )

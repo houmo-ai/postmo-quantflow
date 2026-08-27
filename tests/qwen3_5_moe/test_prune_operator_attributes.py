@@ -12,7 +12,7 @@ def test_wrapper_uses_merged_moeblock_prune_attributes():
     source = MODEL.read_text()
 
     assert "from xhquant.nn.modules.moeblock import MoeBlock" in source
-    assert "prune_threshold=0.0" in source
+    assert "prune_threshold=0.85" in source
     assert "self.moeblock(hidden_states, routing_weights)" in source
     assert "dynamic_prune_threshold" not in source
     assert "PruningRouter" not in source
