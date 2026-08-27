@@ -8,6 +8,7 @@ from typing import Any
 from xhmodel_merak.xh_other_model.workflows.base import BaseOtherModelWorkflow
 from xhmodel_merak.xh_other_model.workflows.result import ExportResult, QuantResult
 
+from .evaluation import build_padded_chat_input_ids, build_representative_prompt
 from .hy_mt2_convert_config import HyMT2ConvertConfig
 from .hy_mt2_converter import HyMT2ConverterXH2a
 
@@ -64,6 +65,7 @@ class HyMT2Workflow(BaseOtherModelWorkflow):
         input_messages: Any = None,
     ) -> str:
         import torch
+
         from xhquant.api import CacheTensor
 
         work_dir = Path(export_result.work_dir)
@@ -74,16 +76,28 @@ class HyMT2Workflow(BaseOtherModelWorkflow):
         meta = root_meta["hy_mt2"]
         torch_device = _select_torch_device(device)
         embedding = torch.load(work_dir / meta["token_embedding_file"], map_location="cpu", weights_only=True)["weight"]
-        hidden_size = int(embedding.shape[1])
         prefill_len = int(meta["wrap_cfg"]["input_sequence_length"])
         kv_cache_shape = tuple(int(dim) for dim in meta["kv_cache"]["shape"])
         num_layers = int(meta["kv_cache"]["num_decoder_layers"])
 
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(work_dir / meta["hf_config"], trust_remote_code=True)
+        if input_messages is None:
+            prompt = str(meta.get("calibration", {}).get("prompt") or build_representative_prompt())
+        elif isinstance(input_messages, str):
+            prompt = input_messages
+        else:
+            raise TypeError("Hy-MT2 golden input_messages must be a complete prompt string or None")
+        input_ids, token_count = build_padded_chat_input_ids(tokenizer, prompt, prefill_len)
+        token_embedding = torch.nn.Embedding.from_pretrained(embedding.to(torch.float16))
+        representative_embeds = token_embedding(input_ids).to(torch_device)
+
         prefill_path = work_dir / meta["prefill_onnx"]
         prefill_inputs = _build_llm_hmonnx_inputs(
-            torch.randn((1, prefill_len, hidden_size), dtype=torch.float16, device=torch_device),
+            representative_embeds,
             past_seq_length=0,
-            current_input_length=prefill_len,
+            current_input_length=token_count,
             kv_cache_shape=kv_cache_shape,
             num_hidden_layers=num_layers,
             torch_device=torch_device,
@@ -91,18 +105,17 @@ class HyMT2Workflow(BaseOtherModelWorkflow):
         )
         prefill_golden = prefill_path.parent / "golden"
         _reset_golden_dir(prefill_golden)
-        _run_hmonnx_golden(prefill_path, prefill_golden, torch_device, prefill_inputs)
+        prefill_logits = _run_hmonnx_golden(prefill_path, prefill_golden, torch_device, prefill_inputs)
 
         decode_path = work_dir / meta["decode_onnx"]
-        decode_inputs = _build_llm_hmonnx_inputs(
-            torch.randn((1, 1, hidden_size), dtype=torch.float16, device=torch_device),
-            past_seq_length=prefill_len,
-            current_input_length=1,
-            kv_cache_shape=kv_cache_shape,
-            num_hidden_layers=num_layers,
-            torch_device=torch_device,
-            cache_tensor_cls=CacheTensor,
-        )
+        next_token_ids = torch.argmax(prefill_logits, dim=-1).to("cpu")
+        decode_embeds = token_embedding(next_token_ids).to(torch_device)
+        decode_inputs = [
+            decode_embeds,
+            torch.tensor([token_count], dtype=torch.int32, device=torch_device),
+            torch.ones((1,), dtype=torch.int32, device=torch_device),
+            *prefill_inputs[3:],
+        ]
         decode_golden = decode_path.parent / "golden"
         _reset_golden_dir(decode_golden)
         _run_hmonnx_golden(decode_path, decode_golden, torch_device, decode_inputs)
@@ -142,12 +155,18 @@ def _build_llm_hmonnx_inputs(
 
     past_seq_length_tensor = torch.tensor([past_seq_length], dtype=torch.int32, device=torch_device)
     current_input_length_tensor = torch.tensor([current_input_length], dtype=torch.int32, device=torch_device)
-    past_key_caches = [cache_tensor_cls(torch.zeros(kv_cache_shape, dtype=torch.float16, device=torch_device)) for _ in range(num_hidden_layers)]
-    past_value_caches = [cache_tensor_cls(torch.zeros(kv_cache_shape, dtype=torch.float16, device=torch_device)) for _ in range(num_hidden_layers)]
+    past_key_caches = [
+        cache_tensor_cls(torch.zeros(kv_cache_shape, dtype=torch.float16, device=torch_device))
+        for _ in range(num_hidden_layers)
+    ]
+    past_value_caches = [
+        cache_tensor_cls(torch.zeros(kv_cache_shape, dtype=torch.float16, device=torch_device))
+        for _ in range(num_hidden_layers)
+    ]
     return [inputs_embeds, past_seq_length_tensor, current_input_length_tensor, *past_key_caches, *past_value_caches]
 
 
-def _run_hmonnx_golden(hmonnx_file: Path, golden_dir: Path, device: str, inputs: Sequence[Any]) -> None:
+def _run_hmonnx_golden(hmonnx_file: Path, golden_dir: Path, device: str, inputs: Sequence[Any]) -> Any:
     from xhquant.api import HMONNXGoldenInference
 
     session = HMONNXGoldenInference(str(hmonnx_file))
@@ -155,7 +174,7 @@ def _run_hmonnx_golden(hmonnx_file: Path, golden_dir: Path, device: str, inputs:
     session.save_golden = True
     session.golden_dir = str(golden_dir)
     session.step = 0
-    session(*inputs)
+    return session(*inputs)
 
 
 def _reset_golden_dir(path: Path) -> None:

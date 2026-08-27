@@ -20,6 +20,7 @@ from transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense import (
     HunYuanDenseV1RMSNorm,
     HunYuanDenseV1RotaryEmbedding,
 )
+
 from xhquant import nn as xhnn
 from xhquant.api import ConfigDict
 from xhquant.nn import LLMCache, MaskedSoftmax, RMSNorm

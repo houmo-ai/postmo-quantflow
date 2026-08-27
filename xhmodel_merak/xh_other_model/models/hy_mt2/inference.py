@@ -10,9 +10,10 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from transformers import AutoTokenizer
+
 from xhquant.api import CacheTensor, GoldenMixin, HMONNXInference
 
-from ....utils import DeviceDtypeMixin
+from ...device_dtype_mixin import DeviceDtypeMixin
 
 
 def decode_next_token(tokenizer, logits: torch.Tensor):
@@ -28,9 +29,11 @@ class HyMT2Inference(DeviceDtypeMixin):
         fast_mode=True,
         device: str = "cuda",
         execution_device: str = "cuda",
+        retain_sessions: bool = False,
     ):
         super().__init__()
         self.fast_mode = fast_mode
+        self.retain_sessions = retain_sessions
         self._device = torch.device(device)
         self.set_exec_device(torch.device(execution_device))
 
@@ -75,11 +78,12 @@ class HyMT2Inference(DeviceDtypeMixin):
         if prefill:
             if self.prefill_session is None:
                 self.init_prefill()
-                self.input_sequence_length = self.prefill_input_sequence_length
+            self.input_sequence_length = self.prefill_input_sequence_length
         else:
-            self.prefill_session = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if not self.retain_sessions:
+                self.prefill_session = None
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             if self.decode_session is None:
                 self.init_decode()
             self.input_sequence_length = 1
@@ -90,7 +94,7 @@ class HyMT2Inference(DeviceDtypeMixin):
         self.prefill_session = HMONNXInference(self.prefill_onnx_file)
         if self.fast_mode:
             self.prefill_session.to_fast_mode()
-        self.prefill_session.exec_device = self.execution_device
+        self.prefill_session.exec_device = self.exec_device
         self.prefill_session.to(self._device)
 
     def init_decode(self):
@@ -99,7 +103,7 @@ class HyMT2Inference(DeviceDtypeMixin):
         self.decode_session = HMONNXInference(self.decode_onnx_file)
         if self.fast_mode:
             self.decode_session.to_fast_mode()
-        self.decode_session.exec_device = self.execution_device
+        self.decode_session.exec_device = self.exec_device
         self.decode_session.to(self._device)
 
     def get_input_sequence_length(self):
@@ -114,21 +118,25 @@ class HyMT2Inference(DeviceDtypeMixin):
         input_ids = data["input_ids"]
         assert input_ids.shape[0] == 1, "Batch size should be 1 in inference mode."
         seq_length = input_ids.shape[1]
-        input_ids = input_ids.to(self.execution_device)
+        input_ids = input_ids.to(self.exec_device)
         assert seq_length <= input_sequence_length, (
-            f"Input sequence length is too long. max input sequence length is {input_sequence_length} but got {seq_length}"
+            "Input sequence length is too long. "
+            f"max input sequence length is {input_sequence_length} but got {seq_length}"
         )
         if input_sequence_length > seq_length:
             padding_input_ids = torch.full(
-                (1, input_sequence_length - seq_length), self.pad_token_id, dtype=torch.long, device=self.execution_device
+                (1, input_sequence_length - seq_length),
+                self.pad_token_id,
+                dtype=torch.long,
+                device=self.exec_device,
             )
             input_ids = torch.cat([input_ids, padding_input_ids], dim=-1)
-        inputs_embeds = self.token_embedding.to(self.execution_device)(input_ids)
+        inputs_embeds = self.token_embedding.to(self.exec_device)(input_ids)
         past_seq_length = data["past_seq_length"]
         return (
-            inputs_embeds.to(self.execution_device),
-            torch.tensor([past_seq_length], dtype=torch.int32).to(self.execution_device),
-            torch.tensor([seq_length], dtype=torch.int32).to(self.execution_device),
+            inputs_embeds.to(self.exec_device),
+            torch.tensor([past_seq_length], dtype=torch.int32).to(self.exec_device),
+            torch.tensor([seq_length], dtype=torch.int32).to(self.exec_device),
             self.past_key_caches,
             self.past_value_caches,
         )

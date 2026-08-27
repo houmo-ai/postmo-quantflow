@@ -11,11 +11,14 @@ from typing import Any, Dict, Optional
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense import HunYuanDenseV1ForCausalLM
+
 from xhquant.api import CacheTensor
 
-from .._legacy_base_converter import BaseConverter, HFTransfromersConverter
 from ...builder import wrap_llm_model
+from ._export_utils import load_quant_weight, xh1_hmonnx_compatible
+from .evaluation import build_padded_chat_input_ids, build_representative_prompt
 from .hy_mt2_convert_config import HyMT2ConvertConfig
+
 
 from xhquant.api import (  # type: ignore # isort:skip
     Config,
@@ -29,11 +32,10 @@ from xhquant.api import (  # type: ignore # isort:skip
 )
 
 
-class HyMT2ConverterXH2a(HFTransfromersConverter):
+class HyMT2ConverterXH2a:
     target_device = DeviceType.XH2a
 
     def __init__(self, config: HyMT2ConvertConfig):
-        super().__init__()
         self.config = config
         self.hf_model_path: Optional[str] = None
         self.output_dir: Optional[str] = None
@@ -44,12 +46,7 @@ class HyMT2ConverterXH2a(HFTransfromersConverter):
             f"The model is not HunYuanDenseV1ForCausalLM, but {type(native_model)}"
         )
 
-        if native_model.config.tie_word_embeddings:
-            old_torchscript = native_model.config.torchscript
-            native_model.config.torchscript = True
-            native_model.tie_weights()
-            native_model.config.tie_word_embeddings = False
-            native_model.config.torchscript = old_torchscript
+        _untie_word_embeddings_for_export(native_model)
 
         self.hf_model_path = hf_model_dir
         return native_model
@@ -61,7 +58,7 @@ class HyMT2ConverterXH2a(HFTransfromersConverter):
 
         resume_from = self.config.quant_weight
         if resume_from is not None:
-            self.load_quant_weight(resume_from, native_model)
+            load_quant_weight(resume_from, native_model)
         lm_head = native_model.lm_head
         if not hasattr(lm_head, "quant_weight"):
             config.quant_scheme.nodes["lm_head"] = "w8a8h1_sefp"
@@ -140,17 +137,21 @@ class HyMT2ConverterXH2a(HFTransfromersConverter):
             past_key_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
             past_value_caches.append(CacheTensor(torch.zeros(kv_cache_shape, dtype=torch.float16)))
 
-        input_ids = []
-        current_input_length = []
-        for _ in range(1):
-            input_id = torch.randint(0, 1000, (input_sequence_length,), dtype=torch.long)
-            current_input_length.append(input_id.shape[0])
-            input_ids.append(input_id.unsqueeze(0))
-
-        input_ids_t = torch.cat(input_ids, dim=0)
+        tokenizer = AutoTokenizer.from_pretrained(hf_model_path, trust_remote_code=True)
+        calibration_prompt = build_representative_prompt()
+        input_ids_t, calibration_token_count = build_padded_chat_input_ids(
+            tokenizer,
+            calibration_prompt,
+            input_sequence_length,
+        )
+        meta_info["calibration"] = {
+            "prompt": calibration_prompt,
+            "token_count": calibration_token_count,
+            "sequence_length": input_sequence_length,
+        }
         inputs_embeds = token_embedding(input_ids_t)
         past_seq_length_t = torch.tensor([0], dtype=torch.int32)
-        current_input_length_t = torch.tensor(current_input_length, dtype=torch.int32)
+        current_input_length_t = torch.tensor([calibration_token_count], dtype=torch.int32)
 
         inputs = (
             inputs_embeds,
@@ -182,38 +183,46 @@ class HyMT2ConverterXH2a(HFTransfromersConverter):
                 target_device,
                 quant_config=quant_config,
             )
-            input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
+            input_names = xh1_hmonnx_compatible(input_names)
             convert_quanted_model_to_hmonnx(quanted_model, inputs, str(prefill_onnx_file), input_names, output_names)
             logger.info(f"Export Prefill model to {prefill_onnx_file}")
 
         logger.info("********************* start export decode model *********************")
         decode_inputs = (
-            inputs_embeds[:, :1, :],
+            inputs_embeds[:, calibration_token_count - 1 : calibration_token_count, :],
             past_seq_length_t,
             torch.ones_like(current_input_length_t),
             past_key_caches,
             past_value_caches,
         )
         wrap_cfg.input_sequence_length = 1
-        if quanted_model is None:
-            quanted_model = convert_fx_model_to_quanted_model(
-                wraped_model,
-                inputs,
-                target_device,
-                quant_config=quant_config,
-            )
-        quanted_model.update_cfg(wrap_cfg)
-
         decode_onnx_file = work_dir / "hmonnx" / "decode" / f"{prefix}_decoder.onnx"
         decode_onnx_file.parent.mkdir(exist_ok=True, parents=True)
         meta_info["decode_onnx"] = str(decode_onnx_file.relative_to(work_dir))
-        input_names = BaseConverter.xh1_hmonnx_compatible(input_names)
         if decode_onnx_file.exists():
             logger.warning(f"{decode_onnx_file} already exists, skip export")
         else:
-            convert_quanted_model_to_hmonnx(quanted_model, decode_inputs, str(decode_onnx_file), input_names, output_names)
+            if quanted_model is None:
+                quanted_model = convert_fx_model_to_quanted_model(
+                    wraped_model,
+                    inputs,
+                    target_device,
+                    quant_config=quant_config,
+                )
+            quanted_model.update_cfg(wrap_cfg)
+            input_names = xh1_hmonnx_compatible(input_names)
+            convert_quanted_model_to_hmonnx(
+                quanted_model,
+                decode_inputs,
+                str(decode_onnx_file),
+                input_names,
+                output_names,
+            )
             logger.info(f"Export decode model to {decode_onnx_file}")
-        json.dump(meta_info, open(work_dir / "meta.json", "w"), indent=4)
+        (work_dir / "meta.json").write_text(
+            json.dumps(meta_info, ensure_ascii=False, indent=4),
+            encoding="utf-8",
+        )
 
     @classmethod
     def convert(cls, hf_model_path: str, config: HyMT2ConvertConfig, output_dir: str):
@@ -224,3 +233,19 @@ class HyMT2ConverterXH2a(HFTransfromersConverter):
             if not hasattr(hf_config, "quantization_config"):
                 assert config.quant_weight is not None and Path(config.quant_weight).exists()
         HyMT2ConverterXH2a(config)._convert(hf_model_path, output_dir)
+
+
+def _untie_word_embeddings_for_export(model: Any) -> None:
+    """Clone tied output weights because HMONNX exports each parameter independently."""
+    if not bool(getattr(model.config, "tie_word_embeddings", False)):
+        return
+    model.tie_weights()
+    output_embeddings = model.get_output_embeddings()
+    if output_embeddings is None or not hasattr(output_embeddings, "weight"):
+        raise ValueError("tie_word_embeddings is enabled but the model has no output embedding weight")
+    original_weight = output_embeddings.weight
+    output_embeddings.weight = torch.nn.Parameter(
+        original_weight.detach().clone(),
+        requires_grad=original_weight.requires_grad,
+    )
+    model.config.tie_word_embeddings = False

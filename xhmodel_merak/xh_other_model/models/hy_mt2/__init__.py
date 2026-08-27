@@ -8,6 +8,7 @@ from .hy_mt2_hf_compatible import HyMT2HFCompatible
 from .inference import HyMT2Inference
 from .model import XHHyMT2Model
 
+
 __all__ = [
     "HyMT2ConvertConfig",
     "HyMT2ConverterXH2a",

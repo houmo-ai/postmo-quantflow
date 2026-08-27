@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "hy-mt2-hmonnx-workflow",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/hy_mt2/**",
+        "examples_merak/llm/hy_mt2/**",
+        "configs_merak/workflows/xh2a/other_models/hy_mt2/**"
+      ]
+    }
+  ]
+}

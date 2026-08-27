@@ -9,10 +9,16 @@ from accelerate import init_empty_weights
 from transformers import AutoConfig, AutoModelForCausalLM, DynamicCache, GenerationMixin
 from transformers.cache_utils import Cache
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from transformers.modeling_utils import no_init_weights
 from transformers.models.hunyuan_v1_dense.modeling_hunyuan_v1_dense import HunYuanDenseV1ForCausalLM
 
+
+try:
+    from transformers.initialization import no_init_weights
+except ImportError:  # Transformers 4.x
+    from transformers.modeling_utils import no_init_weights
+
 from .inference import HyMT2Inference
+
 
 T = TypeVar("T", bound=HunYuanDenseV1ForCausalLM)
 
@@ -31,7 +37,7 @@ def get_empty_hf_model(hf_model_dir, device_map="cpu", **kwargs) -> HunYuanDense
 
 class HyMT2HFCompatible(HunYuanDenseV1ForCausalLM):
     def setup(self, llm_model: HyMT2Inference, embed_tokens: torch.nn.Module):
-        self._prefill = False
+        self._is_prefill = False
         self._past_seq_length = 0
         self._embed_tokens = embed_tokens
         self._llm_model = llm_model
@@ -58,7 +64,9 @@ class HyMT2HFCompatible(HunYuanDenseV1ForCausalLM):
         **kwargs,
     ) -> CausalLMOutputWithPast:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -90,7 +98,9 @@ class HyMT2HFCompatible(HunYuanDenseV1ForCausalLM):
         if self._llm_model is None:
             raise ValueError("llm_model is not initialized")
         input_sequence_length = self._llm_model.get_input_sequence_length()
-        pad_input_seq_length = ((seq_length + input_sequence_length - 1) // input_sequence_length) * input_sequence_length
+        pad_input_seq_length = (
+            (seq_length + input_sequence_length - 1) // input_sequence_length
+        ) * input_sequence_length
         input_data = dict(input_ids=input_ids, past_seq_length=self._past_seq_length)
         (
             inputs_embeds,
@@ -131,11 +141,11 @@ class HyMT2HFCompatible(HunYuanDenseV1ForCausalLM):
 
     @property
     def prefill(self):
-        return self._prefill
+        return self._is_prefill
 
     @prefill.setter
     def prefill(self, prefill: bool):
-        self._prefill = prefill
+        self._is_prefill = prefill
         if self._llm_model is not None and hasattr(self._llm_model, "set_phase_prefill"):
             self._llm_model.set_phase_prefill(prefill)
 
