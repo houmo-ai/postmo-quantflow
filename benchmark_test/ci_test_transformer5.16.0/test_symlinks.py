@@ -1,3 +1,5 @@
+"""Repository symlink guards."""
+
 import os
 from pathlib import Path
 import fnmatch
