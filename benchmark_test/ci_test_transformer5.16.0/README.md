@@ -117,6 +117,67 @@ declarations. Mappings to tests outside this CI directory have been removed. Thi
 one-time selector/policy refactor itself triggers full CI; subsequent model
 onboarding and declaration edits remain incremental.
 
+### Test design: complete coverage with small cases
+
+All new tests belong in this directory, including lightweight unit contracts,
+operator/structure regressions and model exports. Do not add cases to `tests/`,
+`test/` or another benchmark lane. Extend an existing focused case when it
+already owns the behavior; add an adjacent impact declaration for a new case.
+
+Prefer the smallest real implementation that exercises the changed behavior:
+
+| Behavior under test | Preferred fixture |
+| --- | --- |
+| Configuration, preprocessing or input ABI | Small tensors and the real loader/factory; no checkpoint or HMONNX session |
+| Attention, norm, MoE or cache semantics | A minimal model built from a small config and deterministic weights; keep the actual affected layers |
+| Graph lowering or export regression | A minimal model/subgraph through the real export path, with graph and output assertions appropriate to the bug |
+| Checkpoint/quantized-weight compatibility | The existing immutable block artifact and shared export harness when synthetic weights cannot reproduce the format |
+
+Small means less computation, not fewer semantics. Preserve the head grouping,
+rotary dimensions, expert routing, layer kinds or cache transitions that make
+the case meaningful. A hybrid model may need both attention kinds; a shared
+cache bug may need multiple layers. Do not replace the operation being checked
+with a mock, set zero layers, or shrink away the failing condition. Stub only
+unrelated expensive boundaries, and state what the test does not cover.
+
+Cover all affected behavior with compact parameterized cases: a valid baseline,
+relevant shape/dtype boundaries, invalid inputs, and state transitions where
+applicable (prefill, decode, continuation, reset, accepted/rejected verify).
+Use distinguishable deterministic values so layout/expert-order errors remain
+visible. Reuse fixtures and compare against a reference or public contract;
+avoid repeated large-model setup, redundant cases and a Cartesian product of
+unrelated dimensions. Full coverage means the changed contracts are exercised,
+not that every model size is exported.
+
+Keep PR CI fast: no new default full-model download, re-quantization or golden
+generation. Reuse the block harness for a necessary real export; retain the
+existing BGE compatibility exception. A new expensive requirement should have
+a concrete regression it catches that the smaller layers cannot. Markers
+describe categories; the selector and impact declarations determine execution.
+Do not make a required case silently pass by skipping unavailable dependencies.
+
+Confirm selection with the actual patchset (or repeat `--changed-file` for a
+small selection probe), then run the CI entrypoint from the repository root:
+
+```bash
+python benchmark_test/ci_test_transformer5.16.0/select_tests.py --format report
+./benchmark_test/ci_test_transformer5.16.0/run.sh
+```
+
+For focused debugging, preserve the runner's pytest isolation. For example,
+the selector-policy suite itself is a small test with no model dependencies:
+
+```bash
+python -m pytest \
+  -c benchmark_test/ci_test_transformer5.16.0/pytest.ini \
+  --confcutdir=benchmark_test/ci_test_transformer5.16.0 \
+  benchmark_test/ci_test_transformer5.16.0/test_ci_impact_selector.py
+```
+
+Use the configured CI environment for model/SDK cases. A focused run is useful
+for debugging but does not replace the selected patchset suite. Report selected
+tests, outcomes, elapsed time and any unexecuted coverage separately.
+
 ### Design references
 
 The implementation is repository-specific, standard-library-only code; no
@@ -172,6 +233,13 @@ checks YAML-to-recipe translation, Python signatures, generated command parser
 compatibility, and the public workflow `quant()` / `export()` interface. The
 selector maps shared family code to both representative block exports and
 model-specific workflow YAML to only that model's export.
+
+These contracts verify integration, not quantization accuracy or the effect of
+every accepted argument. Algorithm and producer-side save/reload tests belong
+in GPTQModel; new ModelZoo consumer tests stay in this directory. For an external
+GPTQModel interface/dependency update, explicitly run the relevant contracts and
+consumer tests: this repository's selector cannot detect another repository's
+changes. See [development responsibilities](../../docs/architecture/quantization-boundary.md).
 
 MiniCPM-V-4.6 has a CPU-only text-preprocessing interface contract in
 `test_minicpm_v_4_6_preprocess_contract.py`. It calls the real export/runtime

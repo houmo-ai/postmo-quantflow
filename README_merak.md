@@ -2,6 +2,13 @@
 
 ## M50采用天璇架构(merak),适用于XH2a/YueHui系列芯片
 
+## 开发设计与验证
+
+- [Merak 架构与扩展边界](docs/architecture/merak.md)：职责、配置/产物契约与新模型/新芯片的落点。
+- [算子、结构与目标设备知识](docs/modeling/README.md)：具体写法、适用条件和验证证据。
+- [当前 CI 规格](benchmark_test/ci_test_transformer5.16.0/README.md)：新增测试的唯一归属目录，
+  最小模型设计、impact 声明与执行方式。
+
 ## 安装
 
 ```bash

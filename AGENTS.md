@@ -1,64 +1,37 @@
-<!-- code-review-graph MCP tools -->
+# xh2modelzoo
 
-## MCP Tools: code-review-graph
+## 仓库约定
 
-**IMPORTANT: This project has a knowledge graph. ALWAYS use the
-code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
-the codebase.** The graph is faster, cheaper (fewer tokens), and gives
-you structural context (callers, dependents, test coverage) that file
-scanning cannot.
+- 当前实现、配置、示例分别在 `xhmodel_merak/`、`configs_merak/`、`examples_merak/`。
+  历史根目录由 [CI policy](benchmark_test/ci_test_transformer5.16.0/impact_policy.json) 冻结。
+- 修改 Merak 的入口、分层或模型接入时，先读 [Merak 架构](docs/architecture/merak.md)。
+  保持 workflow 编排、模型语义、图表达和 runtime 的职责边界。
+- 涉及量化接入或权重格式时，遵循 [ModelZoo / GPTQModel 开发边界](docs/architecture/quantization-boundary.md)。
+- 算子、结构和芯片适配知识从 [建模知识索引](docs/modeling/README.md) 按需读取；
+  设备支持结论必须带适用配置和验证证据，不能由芯片名称或单个模型类推。
+- **新增测试统一写到 `benchmark_test/ci_test_transformer5.16.0/`，不向 `tests/`、
+  `test/` 或其他测试目录增加用例。** 补充已有行为的回归也遵循此约定。
+  先读该目录的 [AGENTS.md](benchmark_test/ci_test_transformer5.16.0/AGENTS.md) 和
+  [CI 设计及接入规格](benchmark_test/ci_test_transformer5.16.0/README.md)。
+- 引入第三方实现遵守 [CONTRIBUTING.md](CONTRIBUTING.md)。
+- 测试覆盖完整、执行快：优先最小真实模型和小 tensor，保留触发条件，覆盖相关契约与边界。
 
-### When to use graph tools FIRST
+## 验证与审查
 
-- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
-- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
-- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
-- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
-- **Architecture questions**: `get_architecture_overview` + `list_communities`
+CI 入口：`./benchmark_test/ci_test_transformer5.16.0/run.sh`。
+先用同目录 `select_tests.py --format report` 确认用例及选择原因；
+新增用例同时维护同名 `.impact.json`，不要靠修改全局 policy 扩大或绕过覆盖边界。
 
-Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
+存在 `.codegraph/` 时，先用可用的 CodeGraph 工具定位代码及影响范围；
+未覆盖的源码、配置和文档再用 `rg` / 直接读取。MCP 安装和本机配置由使用者管理。
+代码 review 使用 `ocr`，带 `--audience agent` 和实际需求背景；
+范围不明确先 `--preview`。审查提交可用 `ocr review --repo . --commit HEAD --audience agent`。
+复核工具结论，报告实际验证范围、失败原因和未执行项。
 
-### Key Tools
+提交遵守 [飞书提交规范](https://houmo.feishu.cn/wiki/B7Yeww5MKixxaSkqaJ7cOlF5n2c)。
 
-| Tool                        | Use when                                               |
-| --------------------------- | ------------------------------------------------------ |
-| `detect_changes`            | Reviewing code changes — gives risk-scored analysis    |
-| `get_review_context`        | Need source snippets for review — token-efficient      |
-| `get_impact_radius`         | Understanding blast radius of a change                 |
-| `get_affected_flows`        | Finding which execution paths are impacted             |
-| `query_graph`               | Tracing callers, callees, imports, tests, dependencies |
-| `semantic_search_nodes`     | Finding functions/classes by name or keyword           |
-| `get_architecture_overview` | Understanding high-level codebase structure            |
-| `refactor_tool`             | Planning renames, finding dead code                    |
+## 维护这些指引
 
-### Workflow
-
-1. The graph auto-updates on file changes (via hooks).
-2. Use `detect_changes` for code review.
-3. Use `get_affected_flows` to understand impact.
-4. Use `query_graph` pattern="tests_for" to check coverage.
-
-## 代码审查（OpenCodeReview）
-
-进行任何代码 review 时，必须使用本机安装的 OpenCodeReview CLI，可执行命令为 `ocr`（不是 `opencode-review`）。
-
-### 命令选择
-
-- 审查当前工作区的 staged、unstaged 和 untracked 变更：`ocr review --repo <repo-root> --audience agent`
-- 审查分支差异：`ocr review --repo <repo-root> --from <base-ref> --to <target-ref> --audience agent`
-- 审查单个 commit：`ocr review --repo <repo-root> --commit <commit> --audience agent`
-- 仅在没有 Git diff、需要审查完整文件或目录时使用：`ocr scan --repo <repo-root> --path <repo-relative-path> --audience agent`
-- 需要确认某文件命中的 review rule 时使用：`ocr rules check --repo <repo-root> <repo-relative-file>`
-
-### 执行规则
-
-1. 先按上文的 CodeGraph 流程了解变更及影响范围，再执行 `ocr`。
-2. 范围不明确时，先使用相同参数加 `--preview` 确认待审查文件，再移除 `--preview` 执行实际 review。
-3. 有需求、设计或业务背景时，`ocr review` 通过 `--background <text>` 或 `--background-file <markdown-file>` 传入，两者可以同时使用；`ocr scan` 仅使用 `--background <text>`。
-4. 面向 Agent 执行时使用 `--audience agent`；需要结构化结果时另加 `--format json`。
-5. 必须根据实际代码、调用关系和测试复核 `ocr` 的结论；只报告可复现、可定位且对正确性有实际影响的问题。
-6. 审查结果中说明实际执行的 `ocr` 命令和审查范围；若 `ocr` 无法执行，明确报告原因，不得声称已使用。
-
-## 代码提交
-
-commit时候应该遵守规则：https://houmo.feishu.cn/wiki/B7Yeww5MKixxaSkqaJ7cOlF5n2c
+`AGENTS.md` 只保留仓库特有约定与阅读入口，工具专属文件只指向它。
+架构决策写入架构文档，算子/结构/目标差异写入建模知识，具体使用命令留在对应 README。
+重构时同步更新受影响的链接和结论，不把通用编程流程、旧迁移步骤或整份 skill 复制进指令。
