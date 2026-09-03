@@ -2,28 +2,56 @@ from typing import Optional
 
 import torch
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.models.qwen3_5.modeling_qwen3_5 import (
-    Qwen3_5Attention,
-    Qwen3_5DecoderLayer,
-    Qwen3_5ForCausalLM,
-    Qwen3_5ForConditionalGeneration,
-    Qwen3_5GatedDeltaNet,
-    Qwen3_5MLP,
-    Qwen3_5Model,
-    Qwen3_5RMSNorm,
-    Qwen3_5RMSNormGated,
-    Qwen3_5TextModel,
-    Qwen3_5TextRotaryEmbedding,
-    Qwen3_5VisionAttention,
-    Qwen3_5VisionBlock,
-    Qwen3_5VisionMLP,
-    Qwen3_5VisionModel,
-    Qwen3_5VisionPatchEmbed,
-    Qwen3_5VisionPatchMerger,
-    Qwen3_5VisionRotaryEmbedding,
-)
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs
+
+
+try:
+    from transformers.models.qwen3_5.modeling_qwen3_5 import (
+        Qwen3_5Attention,
+        Qwen3_5DecoderLayer,
+        Qwen3_5ForCausalLM,
+        Qwen3_5ForConditionalGeneration,
+        Qwen3_5GatedDeltaNet,
+        Qwen3_5MLP,
+        Qwen3_5Model,
+        Qwen3_5RMSNorm,
+        Qwen3_5RMSNormGated,
+        Qwen3_5TextModel,
+        Qwen3_5TextRotaryEmbedding,
+        Qwen3_5VisionAttention,
+        Qwen3_5VisionBlock,
+        Qwen3_5VisionMLP,
+        Qwen3_5VisionModel,
+        Qwen3_5VisionPatchEmbed,
+        Qwen3_5VisionPatchMerger,
+        Qwen3_5VisionRotaryEmbedding,
+    )
+except ModuleNotFoundError as exc:
+    missing_module = exc.name or ""
+    official_module = "transformers.models.qwen3_5.modeling_qwen3_5"
+    if not (official_module == missing_module or official_module.startswith(missing_module + ".")):
+        raise
+    from .modeling_qwen3_5 import (
+        Qwen3_5Attention,
+        Qwen3_5DecoderLayer,
+        Qwen3_5ForCausalLM,
+        Qwen3_5ForConditionalGeneration,
+        Qwen3_5GatedDeltaNet,
+        Qwen3_5MLP,
+        Qwen3_5Model,
+        Qwen3_5RMSNorm,
+        Qwen3_5RMSNormGated,
+        Qwen3_5TextModel,
+        Qwen3_5TextRotaryEmbedding,
+        Qwen3_5VisionAttention,
+        Qwen3_5VisionBlock,
+        Qwen3_5VisionMLP,
+        Qwen3_5VisionModel,
+        Qwen3_5VisionPatchEmbed,
+        Qwen3_5VisionPatchMerger,
+        Qwen3_5VisionRotaryEmbedding,
+    )
 
 from xhquant.api import get_xhquant_logger
 

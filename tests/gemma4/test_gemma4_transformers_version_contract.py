@@ -36,9 +36,9 @@ def test_gemma4_architectures_route_to_version_scoped_model_classes():
     assert unified_cls.transformers_min_version == "5.13.0"
 
 
-def test_gemma4_12b_does_not_raise_the_project_transformers_pin():
+def test_project_metadata_advertises_worker_compatible_transformers_range():
     pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
     requirements = Path("requirements/requirements.txt").read_text(encoding="utf-8")
 
-    assert "transformers (>=4.57.0,<4.58.0)" in pyproject
+    assert "transformers (>=4.57.0,<5.17.0)" in pyproject
     assert "transformers==4.57.1" in requirements

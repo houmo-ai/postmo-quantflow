@@ -104,7 +104,7 @@ internal:
       required: false
       description: 模型输出张量或后处理前的输出参数。
   workflow:
-    config_path: configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_full.yaml
+    config_path: configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b_autoround.yaml
     model_dir: /data01/datasets/gemma-4-31b-it
     class: auto
     actions:

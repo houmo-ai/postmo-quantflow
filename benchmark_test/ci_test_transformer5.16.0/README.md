@@ -32,8 +32,8 @@ compact summary, including whether selection is incremental or full and the
 reason for any full-suite fallback.
 
 An explicitly supplied empty changed-path file means a known empty diff: only
-the fast policy gate runs. An absent diff and unavailable Git history mean an
-unknown diff: the registered suite runs in full. Invalid refs and unreadable
+the fast policy and recipe-onboarding gates run. An absent diff and unavailable
+Git history mean an unknown diff: the registered suite runs in full. Invalid refs and unreadable
 path lists fail with an error, rather than quietly running a different diff.
 Changed-file lists must include both old and new paths for renames. Local Git
 discovery disables rename collapsing to preserve both paths.
@@ -70,6 +70,11 @@ evidence of CI coverage. Put required CI coverage in the active directory.
 
 ### Onboard a model
 
+First register a real `ModelRecipe` with a valid Workflow in
+`xhmodel_merak/model_integrations/<family>/plugin.py`; a lower-level model
+registration or standalone export script is not sufficient. Follow the
+[integration checklist and complete example](../../xhmodel_merak/model_integrations/README.md#新模型怎样才算接入完成).
+
 Add a runnable test, e.g. `test_new_model_export.py`, and an adjacent
 `test_new_model_export.impact.json` (example placeholders below):
 
@@ -81,6 +86,7 @@ Add a runnable test, e.g. `test_new_model_export.py`, and an adjacent
       "id": "new-model-export",
       "patterns": [
         "xhmodel_merak/xh_llm/models/new_model/**",
+        "xhmodel_merak/model_integrations/new_model/**",
         "configs_merak/workflows/**/new_model/**",
         "examples_merak/llm/new_model/**"
       ]
@@ -98,7 +104,7 @@ one owner. Both `test_*.py` and `*_test.py` names are supported.
 
 | Change | Selected tests |
 | --- | --- |
-| New model + test + declaration | New target and policy gate |
+| New model + recipe + test + declaration | New target and both always-run gates |
 | Edit declaration inputs | Its owner, even without a source change |
 | Delete declaration | Its surviving owner; other unmapped source changes still fail closed |
 | Rename declarations | Surviving owners at both old and new paths |
@@ -116,6 +122,29 @@ input-to-test edges targeting the active suite have been migrated into test-loca
 declarations. Mappings to tests outside this CI directory have been removed. This
 one-time selector/policy refactor itself triggers full CI; subsequent model
 onboarding and declaration edits remain incremental.
+
+### Recipe onboarding gate
+
+`test_recipe_coverage.py` is always selected, including for documentation-only
+and known-empty diffs. It enumerates model packages and uses the production AST
+scanners to enumerate master model types, then follows every discovered recipe's
+Workflow YAML back to those types. This catches a new implementation with no
+recipe even when it has an export test and a valid impact declaration. Missing
+Workflow files, unknown/auxiliary targets and dynamic registration also fail.
+No model imports, weights, GPU, network or Git history are needed.
+
+`recipe_legacy_gaps.json` records the pre-gate backlog at its `frozen_at` revision:
+`family/package/` is an uncovered directory, `family/package:Type` is an uncovered
+master type. All entries are exact, never wildcard exemptions. Do not extend this
+inventory for new work. Resolving or removing an old model requires deleting its
+stale entries; CI checks that the remaining inventory matches the actual gaps.
+
+The gate checks registration completeness, not numerical correctness or whether
+a new checkpoint using an existing architecture deserves a new public model ID.
+Those require the model's functional tests. Its impact declaration deliberately
+does **not** cover `models/**` or all Workflow YAML: such a rule would suppress
+functional import/family fallback. Do not use this cheap gate as functional
+coverage. Model-specific onboarding still never changes global policy.
 
 ### Test design: complete coverage with small cases
 
@@ -180,7 +209,7 @@ tests, outcomes, elapsed time and any unexecuted coverage separately.
 
 ### Design references
 
-The implementation is repository-specific, standard-library-only code; no
+The selector is repository-specific, standard-library-only code; no
 external CI action or build system is required. The design borrows these ideas:
 
 - [dorny/paths-filter](https://github.com/dorny/paths-filter): named path filters,
@@ -201,10 +230,10 @@ including when `CI_TEST_FORCE_ALL=1`. Existing tests may still execute frozen
 code as a compatibility contract; that does not authorize changes in those
 directories.
 
-Documentation-only changes still run the fast selector-policy test, so the CI
-status is reported instead of disappearing. The removed `ci_test` and
+Documentation-only changes still run the fast selector-policy and
+recipe-onboarding tests, so the CI status is reported instead of disappearing. The removed `ci_test` and
 `ci_test_transformer5.5.0` trees are kept as explicit tombstones in the impact
-rules. Their deletion paths run only the fast selector-policy test, which also
+rules. Their deletion paths run both fast gates; the selector-policy test also
 rejects any later recreation of either retired directory. Other deleted
 guarded production/config files remain fail-closed.
 

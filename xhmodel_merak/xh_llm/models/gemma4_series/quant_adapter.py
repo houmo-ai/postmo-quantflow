@@ -430,6 +430,12 @@ def _default_autoround_repo_root() -> Path:
     return Path("third_party/auto-round")
 
 
+def autoround_mode1_available() -> bool:
+    """Return whether the external Gemma4 AutoRound worker script is installed."""
+
+    return (_autoround_repo_root({}) / "scripts_gemma4" / "quantize.py").is_file()
+
+
 def _resolve_calibration_jsonl(topology: str, calibration_cfg: Mapping[str, Any]) -> str | None:
     explicit = calibration_cfg.get("jsonl") or calibration_cfg.get("calibration_jsonl")
     if explicit:
@@ -517,7 +523,6 @@ def _repo_resource_candidates(relative_path: str) -> list[Path]:
     if env_root:
         candidates.append(Path(env_root).expanduser() / relative_path)
 
-    candidates.append(Path.cwd() / relative_path)
     candidates.append(_repo_root() / relative_path)
     return candidates
 
@@ -690,6 +695,7 @@ def _normalize_path(path: str | os.PathLike[str]) -> str:
 __all__ = [
     "DEFAULT_DENSE_CALIBRATION_JSONL",
     "DEFAULT_MOE_CALIBRATION_JSONL",
+    "autoround_mode1_available",
     "build_autoround_mode1_command",
     "build_gptqmodel_recipe_kwargs",
     "quantize_with_autoround_mode1",

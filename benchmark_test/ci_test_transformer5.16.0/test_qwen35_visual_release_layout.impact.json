@@ -4,6 +4,8 @@
     {
       "id": "qwen35-visual-release-layout",
       "patterns": [
+        "xhmodel_merak/model_integrations/autoregressive/vision.py",
+        "xhmodel_merak/model_artifact/files.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_vision_model.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py",

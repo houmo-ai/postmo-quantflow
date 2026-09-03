@@ -302,7 +302,7 @@ def finalize_lora_metadata(
 ) -> None:
     """Write one complete, loadable model view for every exported adapter."""
 
-    root_dir = Path(exported_info.exported_dir)
+    root_dir = _resolved_directory(Path(exported_info.exported_dir), "LoRA export root")
     root_entries = []
     for adapter, adapter_export in exported_adapters:
         graph_meta = adapter_export.meta
@@ -312,10 +312,16 @@ def finalize_lora_metadata(
             "prefill_hmonnx_md5",
             "decode_hmonnx",
             "decode_hmonnx_md5",
+            "quant_embedding",
+            "quant_embedding_md5",
         ):
             setattr(child_meta, field, getattr(graph_meta, field))
 
-        adapter_dir = Path(adapter_export.exported_dir)
+        adapter_dir = _confined_directory(
+            Path(adapter_export.exported_dir),
+            root_dir,
+            "LoRA adapter export directory",
+        )
         _materialize_lora_shared_artifacts(child_meta, root_dir, adapter_dir)
         child_meta.prefill_onnx = child_meta.prefill_hmonnx
         child_meta.decode_onnx = child_meta.decode_hmonnx
@@ -335,19 +341,30 @@ def finalize_lora_metadata(
         if child_lora_config is not None:
             child_lora_config.path = [adapter.source_path]
 
-        with (adapter_dir / "adapter_config.json").open("w", encoding="utf-8") as fout:
-            json.dump(adapter.adapter_config, fout, ensure_ascii=False, indent=2)
-        with (adapter_dir / "golden_meta_info.json").open("w", encoding="utf-8") as fout:
-            json.dump(child_meta.to_dict(), fout, ensure_ascii=False, indent=4)
+        _write_new_json_artifact(
+            adapter_dir / "adapter_config.json",
+            adapter.adapter_config,
+            adapter_dir,
+            indent=2,
+        )
+        _write_new_json_artifact(
+            adapter_dir / "golden_meta_info.json",
+            child_meta.to_dict(),
+            adapter_dir,
+            indent=4,
+        )
 
+        _validate_symlink_free_artifact(adapter_dir)
         relative_dir = adapter_dir.relative_to(root_dir)
+        prefill_hmonnx = _relative_export_path(graph_meta.prefill_hmonnx, "prefill_hmonnx")
+        decode_hmonnx = _relative_export_path(graph_meta.decode_hmonnx, "decode_hmonnx")
         root_entries.append(
             {
                 "name": adapter.name,
                 "source_path": adapter.source_path,
                 "meta_file": str((relative_dir / "golden_meta_info.json").as_posix()),
-                "prefill_hmonnx": str((relative_dir / graph_meta.prefill_hmonnx).as_posix()),
-                "decode_hmonnx": str((relative_dir / graph_meta.decode_hmonnx).as_posix()),
+                "prefill_hmonnx": str((relative_dir / prefill_hmonnx).as_posix()),
+                "decode_hmonnx": str((relative_dir / decode_hmonnx).as_posix()),
                 "rank": adapter.rank,
                 "alpha": adapter.alpha,
                 "scale": adapter.scale,
@@ -365,25 +382,46 @@ def _materialize_lora_shared_artifacts(
     root_dir: Path,
     adapter_dir: Path,
 ) -> None:
-    """Mirror shared artifacts under an adapter without duplicating model weights."""
+    """Materialize shared artifacts while preserving adapter-exported files."""
 
     hf_config = _relative_export_path(meta_info.hf_config, "hf_config")
-    _copy_artifact_tree(root_dir / hf_config, adapter_dir / hf_config)
+    _materialize_artifact_tree(
+        root_dir / hf_config,
+        adapter_dir / hf_config,
+        source_root=root_dir,
+        destination_root=adapter_dir,
+    )
 
     quant_embedding = _relative_export_path(meta_info.quant_embedding, "quant_embedding")
-    _symlink_artifact_file(root_dir / quant_embedding, adapter_dir / quant_embedding)
+    _materialize_artifact_file(
+        root_dir / quant_embedding,
+        adapter_dir / quant_embedding,
+        source_root=root_dir,
+        destination_root=adapter_dir,
+    )
 
     component_dirs = _shared_hmonnx_component_dirs(meta_info)
     for component_dir in component_dirs:
-        _mirror_artifact_tree(root_dir / component_dir, adapter_dir / component_dir)
+        _materialize_artifact_tree(
+            root_dir / component_dir,
+            adapter_dir / component_dir,
+            source_root=root_dir,
+            destination_root=adapter_dir,
+            skip_step_dirs=True,
+        )
 
     # Flat visual_m* stages share a root-level manifest outside their trees.
-    # Only link it separately when it was not already mirrored with a component.
+    # Materialize it separately when it is not already inside a component tree.
     gear_manifest = getattr(getattr(meta_info, "visual_config", None), "gear_manifest", None)
     if gear_manifest:
         manifest = _relative_export_path(gear_manifest, "gear_manifest")
         if not any(manifest.is_relative_to(component_dir) for component_dir in component_dirs):
-            _symlink_artifact_file(root_dir / manifest, adapter_dir / manifest)
+            _materialize_artifact_file(
+                root_dir / manifest,
+                adapter_dir / manifest,
+                source_root=root_dir,
+                destination_root=adapter_dir,
+            )
 
 
 def _shared_hmonnx_component_dirs(meta_info: VLLMModelMeta) -> list[Path]:
@@ -423,43 +461,177 @@ def _relative_export_path(value: str | None, field_name: str) -> Path:
     return path
 
 
-def _copy_artifact_tree(source: Path, destination: Path) -> None:
-    if not source.is_dir():
+def _materialize_artifact_tree(
+    source: Path,
+    destination: Path,
+    *,
+    source_root: Path,
+    destination_root: Path,
+    skip_step_dirs: bool = False,
+    ancestors: frozenset[Path] = frozenset(),
+) -> None:
+    if not destination_root.is_relative_to(source_root):
+        raise ValueError("LoRA adapter directory must be inside the export root")
+    source_dir = _confined_source(source, source_root, "Shared artifact directory")
+    if not source_dir.is_dir():
         raise FileNotFoundError(f"Shared artifact directory does not exist: {source}")
-    if os.path.lexists(destination):
-        raise FileExistsError(f"LoRA child artifact already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source, destination, symlinks=False)
+    if source_dir in ancestors:
+        raise ValueError(f"Shared artifact directory contains a symlink cycle: {source}")
+    if source_dir.is_relative_to(destination_root) or destination_root.is_relative_to(source_dir):
+        raise ValueError(f"Shared artifact source overlaps the LoRA adapter directory: {source}")
+
+    _ensure_confined_directory(destination, destination_root)
+    next_ancestors = ancestors | {source_dir}
+    for source_path in sorted(source_dir.iterdir(), key=lambda path: path.name):
+        resolved_source = _confined_source(source_path, source_root, "Shared artifact")
+        if resolved_source.is_dir():
+            if skip_step_dirs and source_path.name.startswith("step_"):
+                continue
+            _materialize_artifact_tree(
+                source_path,
+                destination / source_path.name,
+                source_root=source_root,
+                destination_root=destination_root,
+                skip_step_dirs=skip_step_dirs,
+                ancestors=next_ancestors,
+            )
+        elif resolved_source.is_file():
+            _materialize_artifact_file(
+                source_path,
+                destination / source_path.name,
+                source_root=source_root,
+                destination_root=destination_root,
+            )
+        else:
+            raise ValueError(f"Shared artifact is not a regular file or directory: {source_path}")
 
 
-def _mirror_artifact_tree(source: Path, destination: Path) -> None:
-    if not source.is_dir():
-        raise FileNotFoundError(f"Shared model component directory does not exist: {source}")
-    if os.path.lexists(destination):
-        raise FileExistsError(f"LoRA child component already exists: {destination}")
-    destination.mkdir(parents=True)
-
-    def _mirror_directory(source_dir: Path, destination_dir: Path) -> None:
-        for source_path in sorted(source_dir.iterdir(), key=lambda path: path.name):
-            if source_path.is_dir():
-                if source_path.name.startswith("step_"):
-                    continue
-                child_dir = destination_dir / source_path.name
-                child_dir.mkdir()
-                _mirror_directory(source_path, child_dir)
-            else:
-                _symlink_artifact_file(source_path, destination_dir / source_path.name)
-
-    _mirror_directory(source, destination)
-
-
-def _symlink_artifact_file(source: Path, destination: Path) -> None:
-    if not source.is_file():
+def _materialize_artifact_file(
+    source: Path,
+    destination: Path,
+    *,
+    source_root: Path,
+    destination_root: Path,
+) -> None:
+    if not destination_root.is_relative_to(source_root):
+        raise ValueError("LoRA adapter directory must be inside the export root")
+    source_file = _confined_source(source, source_root, "Shared artifact file")
+    if not source_file.is_file():
         raise FileNotFoundError(f"Shared artifact file does not exist: {source}")
+    if source_file.is_relative_to(destination_root):
+        raise ValueError(f"Shared artifact source is inside the LoRA adapter directory: {source}")
+
+    _ensure_confined_directory(destination.parent, destination_root)
+    _validate_destination(destination, destination_root)
     if os.path.lexists(destination):
-        raise FileExistsError(f"LoRA child artifact already exists: {destination}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.symlink_to(Path(os.path.relpath(source, destination.parent)))
+        return
+
+    try:
+        os.link(source_file, destination)
+        return
+    except OSError:
+        if os.path.lexists(destination):
+            _validate_destination(destination, destination_root)
+            return
+
+    created = False
+    try:
+        with source_file.open("rb") as source_stream, destination.open("xb") as destination_stream:
+            created = True
+            shutil.copyfileobj(source_stream, destination_stream)
+        shutil.copystat(source_file, destination)
+    except Exception:
+        if created:
+            destination.unlink(missing_ok=True)
+        raise
+
+
+def _resolved_directory(path: Path, label: str) -> Path:
+    try:
+        resolved = path.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"{label} is unavailable: {path}") from error
+    if not resolved.is_dir():
+        raise ValueError(f"{label} is not a directory: {path}")
+    return resolved
+
+
+def _confined_directory(path: Path, root: Path, label: str) -> Path:
+    candidate = path.expanduser()
+    if ".." in candidate.parts:
+        raise ValueError(f"{label} must be confined to {root}: {path}")
+    try:
+        relative = candidate.absolute().relative_to(root)
+    except ValueError as error:
+        raise ValueError(f"{label} must be confined to {root}: {path}") from error
+    cursor = root
+    for part in relative.parts:
+        cursor /= part
+        if cursor.is_symlink():
+            raise ValueError(f"{label} must not contain symlinks: {path}")
+    resolved = _resolved_directory(candidate, label)
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"{label} escapes {root}: {path}")
+    return resolved
+
+
+def _confined_source(path: Path, root: Path, label: str) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise FileNotFoundError(f"{label} does not exist: {path}") from error
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"{label} escapes the export root: {path}")
+    return resolved
+
+
+def _ensure_confined_directory(path: Path, root: Path) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise ValueError(f"LoRA child destination escapes its adapter directory: {path}") from error
+    if ".." in relative.parts:
+        raise ValueError(f"LoRA child destination escapes its adapter directory: {path}")
+    cursor = root
+    for part in relative.parts:
+        cursor /= part
+        if os.path.lexists(cursor):
+            if cursor.is_symlink() or not cursor.is_dir():
+                raise ValueError(f"LoRA child destination is not a regular directory: {cursor}")
+        else:
+            cursor.mkdir()
+
+
+def _validate_destination(path: Path, root: Path) -> None:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as error:
+        raise ValueError(f"LoRA child destination escapes its adapter directory: {path}") from error
+    if ".." in relative.parts:
+        raise ValueError(f"LoRA child destination escapes its adapter directory: {path}")
+    if os.path.lexists(path) and (path.is_symlink() or not path.is_file()):
+        raise ValueError(f"LoRA child destination is not a regular file: {path}")
+
+
+def _write_new_json_artifact(path: Path, value: Any, root: Path, *, indent: int) -> None:
+    _ensure_confined_directory(path.parent, root)
+    _validate_destination(path, root)
+    if os.path.lexists(path):
+        raise FileExistsError(f"LoRA child metadata already exists: {path}")
+    with path.open("x", encoding="utf-8") as output:
+        json.dump(value, output, ensure_ascii=False, indent=indent)
+
+
+def _validate_symlink_free_artifact(root: Path) -> None:
+    symlinks = []
+    for directory, directory_names, file_names in os.walk(root, followlinks=False):
+        for name in (*directory_names, *file_names):
+            path = Path(directory) / name
+            if path.is_symlink():
+                symlinks.append(path.relative_to(root).as_posix())
+    symlinks.sort()
+    if symlinks:
+        raise ValueError(f"LoRA child artifact must not contain symlinks: {symlinks}")
 
 
 def _validate_peft_config(config: Mapping[str, Any], config_path: Path) -> None:

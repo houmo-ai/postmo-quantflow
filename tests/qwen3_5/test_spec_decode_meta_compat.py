@@ -546,7 +546,7 @@ def test_dense_qwen3_5_gdr_split_flags_keep_chunk_scan_io_contract():
     shared_gdn_src = MERAK_MODEL.with_name("_hybrid_gated_delta_net.py").read_text()
     hmonnx_src = MERAK_HMONNX_INFERENCE.read_text()
 
-    assert "fuse_gdr_block_recurrent_ops: bool = False" in config_src
+    assert "fuse_gdr_block_recurrent_ops: bool = True" in config_src
     assert "self.fuse_gdr_block_recurrent_ops = fuse_gdr_block_recurrent_ops" in config_src
     assert 'self.wrap_cfg["fuse_gdr_block_recurrent_ops"] = self.config.fuse_gdr_block_recurrent_ops' in merak_model_src
 

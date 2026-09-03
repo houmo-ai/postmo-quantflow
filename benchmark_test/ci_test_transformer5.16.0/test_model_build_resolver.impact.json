@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test-model-build-resolver",
+      "patterns": [
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_integrations/__init__.py",
+        "xhmodel_merak/model_integrations/*/plugin.py",
+        "xhmodel_merak/model_integrations/_shared.py",
+        "xhmodel_merak/model_build/**",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5*/**",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_next/**",
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/**",
+        "configs_merak/workflows/xh2a/llm_models/ling_3_flash/**",
+        "configs_merak/workflows/xh2a/other_models/pi05/**",
+        "configs_merak/workflows/xh2a/other_models/kokoro/**",
+        "xhmodel_merak/model_integrations/qwen/planning.py",
+        "xhmodel_merak/xh_llm/workflows/config.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/quant_adapter.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/visual_token_gears.py",
+        "data/calib_data/**",
+        "xhmodel_merak/_requirements.py",
+        "xhmodel_merak/_environment.py",
+        "pyproject.toml",
+        "benchmark_test/ci_test_transformer5.16.0/test_model_build_resolver.py",
+        "xhmodel_merak/errors.py",
+        "xhmodel_merak/model_artifact/**"
+      ]
+    }
+  ]
+}

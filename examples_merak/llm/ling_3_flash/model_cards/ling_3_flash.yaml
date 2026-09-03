@@ -65,7 +65,7 @@ internal:
       required: false
       description: 模型输出张量或后处理前的输出参数。
   workflow:
-    config_path: configs_merak/workflows/xh2a/llm_models/ling_3_flash/ling_3_flash_gptq.yaml
+    config_path: configs_merak/workflows/xh2a/llm_models/ling_3_flash/ling_3_flash_autoround.yaml
     model_dir: <model_dir>
     class: auto
     actions:

@@ -23,6 +23,8 @@ from examples_merak.llm.qwen3_5.debug_scripts.validate_hm_release_layout import 
     ensure_step_artifact_links,
     validate_release_layout,
 )
+from xhmodel_merak.errors import ErrorCode, ModelError
+from xhmodel_merak.model_integrations.autoregressive.vision import validate_dynamic_vision
 from xhmodel_merak.xh_llm.models.qwen3_5.lora import (
     XHQwen3_5LoRAConfig,
     finalize_lora_metadata,
@@ -249,6 +251,10 @@ def test_visual_export_metadata_resolves_flat_gears_after_relocation(tmp_path, m
     assert manifest["gears"] == metadata["gears"]
     assert metadata["hmonnx"] == expected_paths[-1]
     assert metadata["gear_manifest"] == "visual_gears.json"
+    checked = validate_dynamic_vision(
+        relocated, metadata, model_id="fixture", vision_profile="fixture", vision_gears=GEARS
+    )
+    assert [gear["hmonnx"] for gear in checked["gears"]] == expected_paths
     expected_dirs = {f"visual_m{gear}" for gear in GEARS}
     if not standalone:
         expected_dirs.update({"prefill", "decode"})
@@ -267,7 +273,11 @@ def flat_visual_release(tmp_path):
     (export_dir / "hf_config" / "config.json").write_text("{}")
     (export_dir / "quant_embedding.pt").write_bytes(b"embedding")
     gears = [
-        {"image_token_capacity": gear, "hmonnx": f"visual_m{gear}/{prefix}_visual_m{gear}_with_act.onnx"}
+        {
+            "image_token_capacity": gear,
+            "patch_token_capacity": gear * 4,
+            "hmonnx": f"visual_m{gear}/{prefix}_visual_m{gear}_with_act.onnx",
+        }
         for gear in GEARS
     ]
     for stage in ["prefill", "decode", *(f"visual_m{gear}" for gear in GEARS)]:
@@ -279,11 +289,72 @@ def flat_visual_release(tmp_path):
                 "quant_embedding": "quant_embedding.pt",
                 "prefill_hmonnx": f"prefill/{prefix}_prefill_with_act.onnx",
                 "decode_hmonnx": f"decode/{prefix}_decode_with_act.onnx",
-                "visual_config": {"hmonnx": gears[-1]["hmonnx"], "gears": gears},
+                "visual_config": {
+                    "hmonnx": gears[-1]["hmonnx"],
+                    "gears": gears,
+                    "visual_input_mode": "patches",
+                    "spatial_merge_size": 2,
+                    "image_token_capacity": GEARS[-1],
+                    "image_token_gears": list(GEARS),
+                    "routing_policy": "smallest_fit",
+                    "gear_manifest": "visual_gears.json",
+                },
+            }
+        )
+    )
+    (export_dir / "visual_gears.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "visual_input_mode": "patches",
+                "token_unit": "post_spatial_merge",
+                "routing_policy": "smallest_fit",
+                "overflow_policy": "reject",
+                "gears": gears,
             }
         )
     )
     return export_dir
+
+
+@pytest.mark.parametrize("directory", ["visual/m96", "m96", "visual", "visual_m196", "visual_m96/nested"])
+def test_public_artifact_contract_rejects_existing_non_flat_gear_graphs(flat_visual_release, directory):
+    root = flat_visual_release
+    metadata = json.loads((root / "golden_meta_info.json").read_text())["visual_config"]
+    manifest_file = root / "visual_gears.json"
+    manifest = json.loads(manifest_file.read_text())
+    graph = f"{directory}/other_with_act.onnx"
+    _write_graph(root / graph, "other_external_data")
+    metadata["gears"][0]["hmonnx"] = graph
+    manifest["gears"][0]["hmonnx"] = graph
+    manifest_file.write_text(json.dumps(manifest))
+
+    with pytest.raises(ModelError, match="visual_m96/ at the Artifact root") as error:
+        validate_dynamic_vision(root, metadata, model_id="fixture", vision_profile="fixture", vision_gears=GEARS)
+    assert error.value.code == ErrorCode.ARTIFACT_VALIDATION_FAILED
+
+
+@pytest.mark.parametrize("defect", ["manifest_path", "manifest_graph", "default_graph", "standalone_marker"])
+def test_public_artifact_contract_rejects_inconsistent_vision_metadata(flat_visual_release, defect):
+    root = flat_visual_release
+    metadata = json.loads((root / "golden_meta_info.json").read_text())["visual_config"]
+    manifest_file = root / "visual_gears.json"
+    if defect == "manifest_path":
+        target = root / "visual" / "visual_gears.json"
+        target.parent.mkdir()
+        manifest_file.rename(target)
+        metadata["gear_manifest"] = "visual/visual_gears.json"
+    elif defect == "manifest_graph":
+        manifest = json.loads(manifest_file.read_text())
+        manifest["gears"][0]["hmonnx"] = metadata["gears"][1]["hmonnx"]
+        manifest_file.write_text(json.dumps(manifest))
+    elif defect == "default_graph":
+        metadata["hmonnx"] = metadata["gears"][0]["hmonnx"]
+    else:
+        (root / "visual_meta_info.json").write_text("{}")
+    with pytest.raises(ModelError) as error:
+        validate_dynamic_vision(root, metadata, model_id="fixture", vision_profile="fixture", vision_gears=GEARS)
+    assert error.value.code == ErrorCode.ARTIFACT_VALIDATION_FAILED
 
 
 def test_release_layout_validates_and_repairs_every_flat_visual_gear(flat_visual_release, tmp_path):
@@ -368,7 +439,8 @@ def _write_adapter(adapter_dir):
     )
 
 
-def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path):
+@pytest.mark.parametrize("child_has_embedding", [False, True])
+def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path, child_has_embedding):
     visual_dirs = ("visual_m96", "visual_m1536")
     adapter_dir = tmp_path / "source-adapter"
     _write_adapter(adapter_dir)
@@ -377,6 +449,11 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path):
     root_dir = tmp_path / "hmquant-model"
     child_dir = root_dir / "lora" / adapter.name
     child_dir.mkdir(parents=True)
+    for stage in ("prefill", "decode"):
+        (child_dir / stage).mkdir()
+        (child_dir / stage / "adapter.onnx").write_bytes(f"adapter-{stage}".encode())
+    if child_has_embedding:
+        (child_dir / "quant_embedding.pt").write_bytes(b"adapter-embedding")
     (root_dir / "hf_config").mkdir()
     (root_dir / "hf_config" / "config.json").write_text("{}", encoding="utf-8")
     (root_dir / "quant_embedding.pt").write_bytes(b"embedding")
@@ -410,6 +487,8 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path):
         prefill_hmonnx_md5="prefill-md5",
         decode_hmonnx="decode/adapter.onnx",
         decode_hmonnx_md5="decode-md5",
+        quant_embedding="quant_embedding.pt",
+        quant_embedding_md5="adapter-embedding-md5" if child_has_embedding else None,
     )
     exported_info = ExportData()
     exported_info.exported_dir = str(root_dir)
@@ -428,6 +507,8 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path):
     assert child_meta["prefill_hmonnx"] == "prefill/adapter.onnx"
     assert child_meta["decode_hmonnx"] == "decode/adapter.onnx"
     assert child_meta["quant_embedding"] == "quant_embedding.pt"
+    if child_has_embedding:
+        assert child_meta["quant_embedding_md5"] == "adapter-embedding-md5"
     assert child_meta["hf_config"] == "hf_config"
     assert child_meta["visual_config"]["hmonnx"] == f"{visual_dirs[-1]}/visual.onnx"
     assert child_meta["mtp_prefill_config"]["hmonnx"] == "mtp_draft_prefill/mtp.onnx"
@@ -436,19 +517,25 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path):
     assert (child_dir / "hf_config").is_dir()
     assert not (child_dir / "hf_config").is_symlink()
     assert not (child_dir / "hf_config" / "config.json").is_symlink()
-    assert (child_dir / "quant_embedding.pt").is_symlink()
+    expected_embedding = b"adapter-embedding" if child_has_embedding else b"embedding"
+    assert (child_dir / "quant_embedding.pt").read_bytes() == expected_embedding
+    assert not (child_dir / "quant_embedding.pt").is_symlink()
+    for stage in ("prefill", "decode"):
+        assert (child_dir / stage / "adapter.onnx").read_bytes() == f"adapter-{stage}".encode()
     for visual_dir in visual_dirs:
         assert (child_dir / visual_dir).is_dir()
         assert not (child_dir / visual_dir).is_symlink()
-        assert (child_dir / visual_dir / "visual.onnx").is_symlink()
-        assert (child_dir / visual_dir / "visual_external_data").is_symlink()
+        for name in ("visual.onnx", "visual_external_data"):
+            assert (child_dir / visual_dir / name).read_bytes() == (root_dir / visual_dir / name).read_bytes()
+            assert not (child_dir / visual_dir / name).is_symlink()
         assert not (child_dir / visual_dir / "step_0").exists()
     manifest_path = child_dir / child_meta["visual_config"]["gear_manifest"]
-    assert manifest_path.is_symlink()
+    assert not manifest_path.is_symlink()
     manifest = json.loads(manifest_path.read_text())
     assert manifest["gears"] == child_meta["visual_config"]["gears"]
     assert all((child_dir / gear["hmonnx"]).is_file() for gear in manifest["gears"])
-    assert (child_dir / "mtp_draft_prefill" / "mtp.onnx").is_symlink()
+    assert (child_dir / "mtp_draft_prefill" / "mtp.onnx").read_bytes() == b"mtp"
+    assert not any(path.is_symlink() for path in child_dir.rglob("*"))
     assert root_meta.quant_embedding == "quant_embedding.pt"
     assert root_meta.lora_adapters[0]["meta_file"] == f"lora/{adapter.name}/golden_meta_info.json"
 
@@ -459,8 +546,8 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path):
         child_visual_step = child_dir / visual_dir / "step_0"
         assert (child_visual_step / "visual.onnx").is_symlink()
         assert (child_visual_step / "visual_external_data").is_symlink()
-        assert (child_visual_step / "visual.onnx").resolve() == root_dir / visual_dir / "visual.onnx"
-        assert (child_visual_step / "visual_external_data").resolve() == root_dir / visual_dir / "visual_external_data"
+        assert (child_visual_step / "visual.onnx").resolve() == child_dir / visual_dir / "visual.onnx"
+        assert (child_visual_step / "visual_external_data").resolve() == child_dir / visual_dir / "visual_external_data"
 
     relocated_root = root_dir.rename(tmp_path / "relocated-model")
     relocated_child = relocated_root / child_dir.relative_to(root_dir)

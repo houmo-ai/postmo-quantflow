@@ -101,9 +101,11 @@ class BaseLLMWorkflow:
 
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         work_dir_path = Path(output_dir)
-        if work_dir_path.exists():
-            raise FileExistsError(f"{str(work_dir_path)} already exists!")
-        work_dir_path.mkdir(parents=True)
+        if work_dir_path.exists() or work_dir_path.is_symlink():
+            if work_dir_path.is_symlink() or not work_dir_path.is_dir() or any(work_dir_path.iterdir()):
+                raise FileExistsError(f"{str(work_dir_path)} already exists and is not an empty directory!")
+        else:
+            work_dir_path.mkdir(parents=True)
 
         xhquant_init(str(work_dir_path / "export_hmonnx.log"), self.debug)
         set_random_seed(self.seed)
@@ -182,12 +184,15 @@ class BaseLLMWorkflow:
 
         各个字段规则
         原始model_name: yaml中export.model.model_name字段，不存在直接raiseError
-        spec_decode_mode: yaml中export.model.spec_decode_mode字段，如果字段不存在"_{spec_decode_mode}"直接从format_model_name中删除
+        spec_decode_mode: yaml中export.model.spec_decode_mode字段，
+            如果字段不存在"_{spec_decode_mode}"直接从format_model_name中删除
         chip_arch: yaml中export.model.chip_arch字段，XH2a映射到xh2，其余情况不变
-        quant_scheme: yaml中export.model.quant_scheme.quant_type字段，只取w{数字}a{数字}，例如w8a16，w8a8。如果quant.bits字段存在，则w后的数字改为quant.bits数值
+        quant_scheme: yaml中export.model.quant_scheme.quant_type字段，只取w{数字}a{数字}，例如w8a16，w8a8。
+            如果quant.bits字段存在，则w后的数字改为quant.bits数值
         prefill_chunk_length: yaml中export.model.prefill_chunk_length字段
         context_max_length: yaml中export.model.context_max_length字段
-        max_pe_length: yaml中export.model.max_pe_length字段。如果缺失，从export_model_dir路径下的config.json中递归搜索max_position_embeddings字段
+        max_pe_length: yaml中export.model.max_pe_length字段。
+            如果缺失，从export_model_dir路径下的config.json中递归搜索max_position_embeddings字段
         """
         model_cfg = workflow_config.export["model"]
         try:

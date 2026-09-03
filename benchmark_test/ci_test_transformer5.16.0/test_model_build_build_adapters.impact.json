@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test-model-build-build-adapters",
+      "patterns": [
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_integrations/__init__.py",
+        "xhmodel_merak/model_integrations/*/plugin.py",
+        "xhmodel_merak/model_integrations/_shared.py",
+        "xhmodel_merak/model_build/**",
+        "xhmodel_merak/model_integrations/*/build.py",
+        "xhmodel_merak/xh_other_model/models/pi05/**",
+        "xhmodel_merak/xh_other_model/models/kokoro/**",
+        "xhmodel_merak/_requirements.py",
+        "xhmodel_merak/_environment.py",
+        "pyproject.toml",
+        "benchmark_test/ci_test_transformer5.16.0/test_model_build_build_adapters.py",
+        "xhmodel_merak/errors.py",
+        "xhmodel_merak/model_artifact/**"
+      ]
+    }
+  ]
+}

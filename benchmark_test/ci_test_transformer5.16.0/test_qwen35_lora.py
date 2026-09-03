@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,7 @@ from safetensors.torch import save_file
 from xhmodel_merak.xh_llm.lora_layer import LoRALinear, apply_lora_to_linear
 from xhmodel_merak.xh_llm.models.qwen3_5.lora import (
     XHQwen3_5LoRAConfig,
+    _materialize_artifact_file,
     apply_lora_to_frontend,
     attach_lora_buffers,
     inspect_lora_adapter,
@@ -24,6 +26,10 @@ class _Attention(nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.q_proj = nn.Linear(4, 3, bias=False)
+        # Model loaders may disable nn.init globally. Represent checkpoint
+        # weights explicitly so earlier exports cannot leave this fixture NaN.
+        with torch.no_grad():
+            self.q_proj.weight.copy_(torch.arange(12, dtype=torch.float32).reshape(3, 4) / 12)
 
     def forward(self, x):
         return self.q_proj(x)
@@ -291,7 +297,7 @@ def test_static_lora_rewrite_preserves_quant_weight_and_marks_only_weight_schema
 
 
 
-def test_lora_variant_export_leaves_embedding_destination_for_shared_symlink(
+def test_lora_variant_export_leaves_embedding_destination_for_shared_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -333,6 +339,69 @@ def test_lora_variant_export_leaves_embedding_destination_for_shared_symlink(
     assert len(export_calls) == 1
     assert export_calls[0][1] is False
     assert not child_embedding.exists()
+
+
+def test_lora_shared_file_copy_fallback_is_symlink_free(monkeypatch, tmp_path: Path):
+    root_dir = tmp_path / "root"
+    adapter_dir = root_dir / "lora" / "adapter"
+    adapter_dir.mkdir(parents=True)
+    source = root_dir / "shared.bin"
+    source.write_bytes(b"shared")
+    destination = adapter_dir / "shared.bin"
+
+    def cross_device_link(*_args, **_kwargs):
+        raise OSError(errno.EXDEV, "cross-device link")
+
+    monkeypatch.setattr(os, "link", cross_device_link)
+    _materialize_artifact_file(
+        source,
+        destination,
+        source_root=root_dir.resolve(),
+        destination_root=adapter_dir.resolve(),
+    )
+
+    assert destination.read_bytes() == b"shared"
+    assert not destination.is_symlink()
+
+
+def test_lora_shared_file_rejects_source_escape(tmp_path: Path):
+    root_dir = tmp_path / "root"
+    adapter_dir = root_dir / "lora" / "adapter"
+    adapter_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    source = root_dir / "shared.bin"
+    source.symlink_to(outside)
+    destination = adapter_dir / "shared.bin"
+
+    with pytest.raises(ValueError, match="escapes the export root"):
+        _materialize_artifact_file(
+            source,
+            destination,
+            source_root=root_dir.resolve(),
+            destination_root=adapter_dir.resolve(),
+        )
+
+    assert not destination.exists()
+
+
+def test_lora_shared_file_rejects_destination_escape(tmp_path: Path):
+    root_dir = tmp_path / "root"
+    adapter_dir = root_dir / "lora" / "adapter"
+    adapter_dir.mkdir(parents=True)
+    source = root_dir / "shared.bin"
+    source.write_bytes(b"shared")
+    destination = adapter_dir / ".." / "outside.bin"
+
+    with pytest.raises(ValueError, match="destination escapes"):
+        _materialize_artifact_file(
+            source,
+            destination,
+            source_root=root_dir.resolve(),
+            destination_root=adapter_dir.resolve(),
+        )
+
+    assert not (adapter_dir.parent / "outside.bin").exists()
 
 
 def test_spec_runtime_path_preserves_lora_file_symlink(tmp_path: Path):

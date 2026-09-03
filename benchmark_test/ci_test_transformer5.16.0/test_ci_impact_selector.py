@@ -21,6 +21,10 @@ from select_tests import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+POLICY_GATES = {
+    f"{SUITE_RELATIVE}/test_ci_impact_selector.py",
+    f"{SUITE_RELATIVE}/test_recipe_coverage.py",
+}
 
 
 @pytest.mark.ci_policy
@@ -29,7 +33,7 @@ def test_minicpm46_preprocess_callers_select_focused_cpu_contract(filename):
     changed_path = f"xhmodel_merak/xh_llm/models/minicpm_v_4_6/{filename}"
     selection = select_for_changes([changed_path], repo_root=REPO_ROOT)
     contract = f"{SUITE_RELATIVE}/test_minicpm_v_4_6_preprocess_contract.py"
-    assert set(selection.tests) == {f"{SUITE_RELATIVE}/test_ci_impact_selector.py", contract}
+    assert set(selection.tests) == POLICY_GATES | {contract}
     assert selection.uncovered_files == ()
     assert selection.full_suite is False
     assert f"rule:minicpm-v46-text-preprocess-contract:{changed_path}" in selection.reasons[contract]
@@ -75,7 +79,7 @@ def test_moe_source_selects_its_registered_block_export(filename, expects_layout
     changed = f"xhmodel_merak/xh_llm/models/qwen3_5_moe/{filename}"
     selection = select_for_changes([changed], repo_root=REPO_ROOT)
     target = f"{SUITE_RELATIVE}/test_qwen35_35b_a3b_block_export.py"
-    expected = {f"{SUITE_RELATIVE}/test_ci_impact_selector.py", target}
+    expected = POLICY_GATES | {target}
     if expects_layout:
         layout = f"{SUITE_RELATIVE}/test_qwen35_visual_release_layout.py"
         expected.add(layout)
@@ -128,7 +132,7 @@ def test_deleted_test_does_not_require_a_replacement_impact_mapping():
     deleted_test = "benchmark_test/ci_test_transformer5.16.0/test_retired_model.py"
     selection = select_for_changes([deleted_test], repo_root=REPO_ROOT)
 
-    assert selection.tests == ("benchmark_test/ci_test_transformer5.16.0/test_ci_impact_selector.py",)
+    assert set(selection.tests) == POLICY_GATES
 
 
 @pytest.mark.ci_policy
@@ -221,7 +225,7 @@ def test_force_all_does_not_bypass_frozen_legacy_policy(tmp_path, capsys):
 def test_docs_only_change_keeps_fast_policy_gate():
     selection = select_for_changes(["docs/ci.md"], repo_root=REPO_ROOT)
 
-    assert selection.tests == ("benchmark_test/ci_test_transformer5.16.0/test_ci_impact_selector.py",)
+    assert set(selection.tests) == POLICY_GATES
 
 
 @pytest.mark.ci_policy
@@ -239,7 +243,7 @@ def test_retired_ci_test_suite_is_guarded_by_tombstone_policy():
 
     assert not (REPO_ROOT / retired_suite).exists()
     assert selection.full_suite is False
-    assert selection.tests == ("benchmark_test/ci_test_transformer5.16.0/test_ci_impact_selector.py",)
+    assert set(selection.tests) == POLICY_GATES
     reasons = selection.reasons[selection.tests[0]]
     for changed_path in changed_paths:
         assert f"rule:retired-ci-test-suite:{changed_path}" in reasons
@@ -257,7 +261,7 @@ def test_retired_transformer55_suite_is_guarded_by_tombstone_policy():
 
     assert not (REPO_ROOT / retired_suite).exists()
     assert selection.full_suite is False
-    assert selection.tests == ("benchmark_test/ci_test_transformer5.16.0/test_ci_impact_selector.py",)
+    assert set(selection.tests) == POLICY_GATES
     reasons = selection.reasons[selection.tests[0]]
     for changed_path in changed_paths:
         assert f"rule:retired-transformer55-suite:{changed_path}" in reasons
@@ -455,10 +459,9 @@ def test_minicpm_declaration_change_does_not_select_gemma_or_bge():
         "xhmodel_merak/xh_llm/models/minicpm_v_4_6/inference.py",
         "xhmodel_merak/xh_llm/models/minicpm_v_4_6/text_model.py",
     ], repo_root=REPO_ROOT)
-    assert selection.tests == (
-        f"{SUITE_RELATIVE}/test_ci_impact_selector.py",
+    assert set(selection.tests) == POLICY_GATES | {
         f"{SUITE_RELATIVE}/test_minicpm_v_4_6_preprocess_contract.py",
-    )
+    }
     assert selection.full_suite is False
 
 
@@ -707,7 +710,7 @@ def test_missing_changed_paths_file_fails_with_clear_error(declaration_repo, cap
 ])
 def test_other_test_directories_do_not_enter_ci_selection(changed_path):
     selection = select_for_changes([changed_path], repo_root=REPO_ROOT)
-    assert selection.tests == (f"{SUITE_RELATIVE}/test_ci_impact_selector.py",)
+    assert set(selection.tests) == POLICY_GATES
     assert selection.full_suite is False
 
 

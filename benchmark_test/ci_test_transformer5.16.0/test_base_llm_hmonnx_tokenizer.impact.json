@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test-base-llm-hmonnx-tokenizer",
+      "patterns": [
+        "xhmodel_merak/xh_llm/hmonnx/**",
+        "xhmodel_merak/model_integrations/autoregressive/**",
+        "pyproject.toml",
+        "benchmark_test/ci_test_transformer5.16.0/test_base_llm_hmonnx_tokenizer.py"
+      ]
+    }
+  ]
+}

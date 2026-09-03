@@ -1,12 +1,12 @@
 import gc
 import json
-import os
 from collections.abc import Mapping
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import torch
+
+from xhmodel_merak._environment import scoped_environment
 
 from ...workflows.base import BaseLLMWorkflow
 from ...workflows.result import ExportResult, QuantResult
@@ -427,22 +427,8 @@ class Qwen35Workflow(BaseLLMWorkflow):
         return normalized == "cuda" or normalized.startswith("cuda:") or normalized.isdigit()
 
     @staticmethod
-    @contextmanager
     def _hmonnx_v2_scope(enabled: bool):
-        if not enabled:
-            yield
-            return
-
-        env_name = "ENABLE_HMINFERENCE_V2"
-        previous = os.environ.get(env_name)
-        os.environ[env_name] = "1"
-        try:
-            yield
-        finally:
-            if previous is None:
-                os.environ.pop(env_name, None)
-            else:
-                os.environ[env_name] = previous
+        return scoped_environment({"ENABLE_HMINFERENCE_V2": "1"}) if enabled else scoped_environment({})
 
     @staticmethod
     def _collect_golden_meta_files(root_meta_file: str) -> list[str]:

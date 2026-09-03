@@ -33,7 +33,6 @@ import torch.nn as nn
 from accelerate import init_empty_weights
 from transformers import AutoModelForImageTextToText
 from transformers.cache_utils import Cache
-from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5CausalLMOutputWithPast
 
 from xhmodel_merak.utils import calculate_file_md5
 from xhmodel_merak.xh_llm.base_model import get_model_param_buffer_size_gb
@@ -68,7 +67,7 @@ from .lora import (
     finalize_lora_metadata,
     inspect_lora_adapters,
 )
-from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
+from .modeling_qwen3_5 import Qwen3_5CausalLMOutputWithPast, Qwen3_5ForConditionalGeneration
 from .modeling_qwen3_5 import Qwen3_5ForConditionalGeneration as XHQwen3_5ForConditionalGeneration
 from .modeling_qwen3_5_patch import qwen3_5_patch
 from .qwen3_5_hmonnx_inference import XHQwen3_5_HMONNXModel
@@ -1423,7 +1422,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             adapter_export.str_datetime = exported_info.str_datetime
             # The embedding is not affected by the supported Linear-only LoRA
             # adapters. finalize_lora_metadata() exposes the root embedding in
-            # each adapter directory through a symlink, so do not write a
+            # each adapter directory through a hard link or copy, so do not write a
             # redundant regular file at that destination first.
             self._export_hmonnx(adapter_export, save_token_embedding=False)
             exported_adapters.append((adapter, adapter_export))

@@ -1572,13 +1572,13 @@ class XHGemma4SeriesModel(VisionLLMModel):
         if sliding_window <= 0:
             raise ValueError(f"Gemma4 contract-v2 sliding_window must be positive; got {sliding_window}.")
         prefill_chunk_length = int(self.config.prefill_chunk_length)
-        if prefill_chunk_length < 280:
+        if self.config.bidirectional_vision_attention and prefill_chunk_length < 280:
             raise ValueError(
                 "Gemma4 contract-v2 prefill_chunk_length must be at least 280 so a visual "
                 f"token range remains atomic; got {prefill_chunk_length}."
             )
 
-        expected_sliding_width = ((sliding_window + 320 + 15) // 16) * 16
+        expected_sliding_width = ((sliding_window + prefill_chunk_length + 15) // 16) * 16
         for cache_pos, (cache_type, shape) in enumerate(zip(layer_cache_types, layer_kv_shapes, strict=True)):
             if not isinstance(shape, (list, tuple)) or len(shape) < 3:
                 raise ValueError(
@@ -1588,7 +1588,7 @@ class XHGemma4SeriesModel(VisionLLMModel):
             if cache_type == "sliding_attention" and int(shape[2]) != expected_sliding_width:
                 raise ValueError(
                     "Gemma4 contract-v2 layer_kv_shapes sliding width must equal "
-                    f"align16(sliding_window + 320)={expected_sliding_width}; "
+                    f"align16(sliding_window + prefill_chunk_length)={expected_sliding_width}; "
                     f"got {shape[2]} at cache {cache_pos}."
                 )
 

@@ -25,7 +25,7 @@
 from ._compat import PreTrainedConfig, RopeParameters, layer_type_validation
 
 
-class Qwen3_5TextConfig(PreTrainedConfig):
+class Qwen3_5TextConfig(PreTrainedConfig):  # noqa: N801
     r"""
     This is the configuration class to store the configuration of a [`Qwen3_5TextModel`]. It is used to instantiate a
     Qwen3_5 model according to the specified arguments, defining the model architecture.
@@ -159,7 +159,7 @@ class Qwen3_5TextConfig(PreTrainedConfig):
         eos_token_id: int | None = None,
         **kwargs,
     ):
-        kwargs["ignore_keys_at_rope_validation"] = {"mrope_section", "mrope_interleaved"}
+        kwargs["ignore_keys_at_rope_validation"] = ["mrope_section", "mrope_interleaved"]
         self.pad_token_id = pad_token_id
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
@@ -199,7 +199,7 @@ class Qwen3_5TextConfig(PreTrainedConfig):
         super().__init__(**kwargs)
 
 
-class Qwen3_5VisionConfig(PreTrainedConfig):
+class Qwen3_5VisionConfig(PreTrainedConfig):  # noqa: N801
     model_type = "qwen3_5"
     base_config_key = "vision_config"
 
@@ -235,7 +235,7 @@ class Qwen3_5VisionConfig(PreTrainedConfig):
         self.initializer_range = initializer_range
 
 
-class Qwen3_5Config(PreTrainedConfig):
+class Qwen3_5Config(PreTrainedConfig):  # noqa: N801
     r"""
     This is the configuration class to store the configuration of a [`Qwen3_5Model`]. It is used to instantiate a
     Qwen3.5 model according to the specified arguments, defining the model architecture. Instantiating a configuration

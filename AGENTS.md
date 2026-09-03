@@ -6,11 +6,19 @@
   历史根目录由 [CI policy](benchmark_test/ci_test_transformer5.16.0/impact_policy.json) 冻结。
 - 修改 Merak 的入口、分层或模型接入时，先读 [Merak 架构](docs/architecture/merak.md)。
   保持 workflow 编排、模型语义、图表达和 runtime 的职责边界。
+- 修改已注册模型或统一接口时，同时遵循 [接口接入约定](xhmodel_merak/model_integrations/README.md)；
+  模型升级需要一起核对 recipe、构建、加载、示例和测试，不能只解文本冲突。
+- 新增 Merak 模型必须在同一变更中提供可发现的 `ModelRecipe`、可用 workflow、统一接口
+  示例及当前 CI 用例/impact 声明；只有底层注册或导出脚本不算接入完成。
+  [recipe 门禁](benchmark_test/ci_test_transformer5.16.0/test_recipe_coverage.py) 每次 CI 都运行，
+  存量缺口清单只减不增，不用新增豁免或 `master=False` 规避公开主模型的接入要求。
 - 涉及量化接入或权重格式时，遵循 [ModelZoo / GPTQModel 开发边界](docs/architecture/quantization-boundary.md)。
 - 算子、结构和芯片适配知识从 [建模知识索引](docs/modeling/README.md) 按需读取；
   设备支持结论必须带适用配置和验证证据，不能由芯片名称或单个模型类推。
 - 涉及 MLA/权重吸收或 cache 共享时，先核对 [Ling MLA 约束](docs/modeling/structures/ling-mla-quantization.md)：
   融合须在权重量化前完成；SEFP 指数域不同的 K/V 不得因浮点 latent 相同就共享缓存。
+- 涉及 Kokoro / M50 路径的 LSTM 时，先读 [Merak 的 LSTM 约定](xhmodel_merak/AGENTS.md)：
+  有效前缀索引属于模型图；标准 LSTM 语义、量化和最终展开属于 xhquanttool，不能混作芯片能力限制。
 - **新增测试统一写到 `benchmark_test/ci_test_transformer5.16.0/`，不向 `tests/`、
   `test/` 或其他测试目录增加用例。** 补充已有行为的回归也遵循此约定。
   先读该目录的 [AGENTS.md](benchmark_test/ci_test_transformer5.16.0/AGENTS.md) 和

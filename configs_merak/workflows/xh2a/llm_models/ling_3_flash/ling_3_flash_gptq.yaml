@@ -46,7 +46,7 @@ quant:
   sym: true
   max_quant_layers: null
   calibration:
-    jsonl: data/calib_data/NeelNanda-pile-10k.jsonl
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
     text_key: text
     nsamples: 128
     seqlen: 2048

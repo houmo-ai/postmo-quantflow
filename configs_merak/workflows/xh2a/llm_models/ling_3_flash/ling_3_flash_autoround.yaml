@@ -47,7 +47,7 @@ quant:
   data_type: int_sym_xh
   iters: 400
   calibration:
-    jsonl: data/calib_data/NeelNanda-pile-10k.jsonl
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
     text_key: text
     nsamples: 256
     seqlen: 2048

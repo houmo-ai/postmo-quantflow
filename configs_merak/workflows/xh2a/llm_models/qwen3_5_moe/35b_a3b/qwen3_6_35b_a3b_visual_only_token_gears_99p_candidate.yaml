@@ -38,5 +38,3 @@ export:
     quant_scheme:
       quant_type: w8a8h1_sefp
       ops: {}
-    fuse_gdr_ops: true
-    fuse_gdr_block_recurrent_ops: true

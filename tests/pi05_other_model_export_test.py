@@ -544,7 +544,7 @@ def test_compact_graph_signatures_use_one_cache_and_rope_offset() -> None:
     assert "self.masked_add(attn_weights, attention_mask)" in inspect.getsource(expert_attention.forward)
 
 
-def test_xhquant_masked_add_applies_mask_twice_with_saturation() -> None:
+def test_xhquant_masked_add_applies_mask_twice_with_host_saturation() -> None:
     from xhquant.nn import MaskedAdd
 
     values = torch.tensor([[[[1.0, 2.0]]]], dtype=torch.float16)

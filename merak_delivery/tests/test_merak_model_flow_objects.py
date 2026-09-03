@@ -29,7 +29,7 @@ def test_object_oriented_flow_api_is_exposed():
 
 
 def test_cli_builds_existing_commands():
-    parser = flow.MerakModelFlowCLI().build_parser()
+    parser = flow.MerakModelFlowCLI(parser_factory=flow.build_parser).build_parser()
 
     args = parser.parse_args(["validate"])
     assert args.func is flow.validate_command

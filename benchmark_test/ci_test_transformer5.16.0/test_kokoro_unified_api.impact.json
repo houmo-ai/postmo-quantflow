@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "kokoro-unified-release-contract",
+    "patterns": [
+      "xhmodel_merak/model_integrations/kokoro/**",
+      "xhmodel_merak/model_build/**",
+      "xhmodel_merak/model_artifact/**",
+      "xhmodel_merak/model_catalog/**",
+      "xhmodel_merak/model_inference/**",
+      "xhmodel_merak/xh_other_model/models/kokoro/**",
+      "configs_merak/workflows/**/kokoro/**",
+      "benchmark_test/ci_test_transformer5.16.0/_kokoro_fixture.py"
+    ]
+  }]
+}

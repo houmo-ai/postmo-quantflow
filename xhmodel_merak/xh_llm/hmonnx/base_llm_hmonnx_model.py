@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from torch import Tensor
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerFast
 
 from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig, BaseLLMInputProcessor
 from xhquant.api import get_xhquant_logger
@@ -533,8 +533,12 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         # does not block on a Transformers confirmation prompt.  Callers can
         # still opt out explicitly with ``trust_remote_code=False``.
         kwargs.setdefault("trust_remote_code", True)
-        tokenizer = AutoTokenizer.from_pretrained(self.hf_model_dir, **kwargs)
-        return tokenizer
+        try:
+            return AutoTokenizer.from_pretrained(self.hf_model_dir, **kwargs)
+        except ValueError as exc:
+            if "Tokenizer class TokenizersBackend does not exist" not in str(exc):
+                raise
+            return PreTrainedTokenizerFast.from_pretrained(self.hf_model_dir, **kwargs)
 
     def is_support_dynamic_input(self) -> bool:
         return False

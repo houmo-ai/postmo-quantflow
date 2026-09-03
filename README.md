@@ -6,14 +6,23 @@
 
 ## 依赖项
 
-使用xhquanttool工程的python环境
+使用已预装 xhquant、Torch 及运行依赖的 xhquanttool Python 环境。以下命令不会解析或安装
+`pyproject.toml` 中的依赖；不要在空环境中执行，否则 `flash_attn` 等构建依赖不可用。
 
 ## 安装
 
 ```bash
-pip install -v -e . --no-index --no-build-isolation
-或者 uv pip install -e . --link-mode=copy
+# pip
+python -m pip install -v -e . --no-index --no-deps --no-build-isolation
+
+# uv
+uv pip install -e . --no-index --no-deps --no-build-isolation --link-mode=copy
 ```
+
+## 统一模型接口
+
+查模型、查看可改参数、构建产物和推理的可运行示例见
+[examples_merak/unified_api](examples_merak/unified_api/README.md)。
 
 ## HM-Eval 评测平台使用方式
 
@@ -22,7 +31,7 @@ pip install -v -e . --no-index --no-build-isolation
 ### 启动 Web UI
 
 ```bash
-cd /data01/home/chenzx/project/xh2modelzoo
+cd /path/to/xh2modelzoo
 python -m hm_eval --host 127.0.0.1 --port 7860
 ```
 

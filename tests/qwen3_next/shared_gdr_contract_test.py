@@ -485,8 +485,8 @@ def test_qwen3_next_mtp_workflow_keeps_shared_gdr_configuration_parity():
     assert model["split_conv_cache"] is True
     assert model["normalize_force_fp32"] is False
     assert model["use_manual_depthwise_conv1d"] is False
-    assert model["fuse_gdr_ops"] is False
-    assert model["fuse_gdr_block_recurrent_ops"] is False
+    assert model["fuse_gdr_ops"] is True
+    assert model["fuse_gdr_block_recurrent_ops"] is True
     assert model["spec_decode_mode"] == "mtp"
     assert model["num_draft_tokens"] == 4
     assert model["output_post_norm_hidden"] is True
@@ -565,6 +565,9 @@ def test_qwen3_next_gptq_profile_contains_only_recipe_consumed_keys():
     forbidden = {
         "preset",
         "hessian_mse",
+        "sym",
+        "iters",
+        "dataset",
         "seed",
         "quant_nontext_module",
         "offload_to_disk",

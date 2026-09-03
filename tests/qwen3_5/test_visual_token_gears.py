@@ -336,7 +336,7 @@ def test_visual_patch_to_fronted_routes_wrap_model_directly_to_torchfx(monkeypat
     assert captured["kwargs"] == {}
 
 
-def test_plain_onnx_export_decomposes_masked_add_with_clip(tmp_path):
+def test_plain_onnx_export_decomposes_masked_add_as_two_adds_then_clip(tmp_path):
     import onnx
 
     from xhquant import nn as xhnn
@@ -366,7 +366,7 @@ def test_plain_onnx_export_decomposes_masked_add_with_clip(tmp_path):
     graph = onnx.load(onnx_path).graph
     mask_adds = [node for node in graph.node if node.op_type == "Add" and "attention_mask" in node.input]
     assert len(mask_adds) == 2
-    assert any(node.op_type == "Clip" for node in graph.node)
+    assert sum(node.op_type == "Clip" for node in graph.node) == 1
     assert sum(node.op_type == "Softmax" for node in graph.node) == 1
     assert all(node.op_type != "MaskedSoftmax" for node in graph.node)
 

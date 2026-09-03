@@ -80,7 +80,7 @@ internal:
       required: false
       description: 模型输出张量或后处理前的输出参数。
   workflow:
-    config_path: configs_merak/workflows/xh2a/llm_models/qwen3_next/80b_a3b/qwen3_next_80b_a3b_full.yaml
+    config_path: configs_merak/workflows/xh2a/llm_models/qwen3_next/80b_a3b/qwen3_next_80b_a3b_full_gptq.yaml
     model_dir: ssh://xuzk@10.30.0.23:10022/data01/datasets/Qwen3-Next-80B-A3B-Instruct
     class: auto
     actions:

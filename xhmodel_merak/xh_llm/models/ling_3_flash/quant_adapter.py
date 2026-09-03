@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -57,6 +58,27 @@ class Ling3FlashQuantSpec:
             raise ValueError(f"Unsupported Ling MLA layout: {self.mla_weight_layout!r}")
 
 
+def _resolve_calibration_jsonl(value: str) -> str:
+    expanded = os.path.expanduser(os.path.expandvars(value))
+    prefix = "xh2modelzoo://"
+    if not expanded.startswith(prefix):
+        return str(Path(expanded).resolve())
+    relative = expanded.removeprefix(prefix).lstrip("/")
+    candidates = []
+    data_root = os.getenv("XH2MODELZOO_DATA_ROOT")
+    if data_root:
+        root = Path(data_root).expanduser()
+        candidates.extend((root / relative, root / relative.removeprefix("data/")))
+    repo_root = os.getenv("XH2MODELZOO_ROOT")
+    if repo_root:
+        candidates.append(Path(repo_root).expanduser() / relative)
+    candidates.extend(parent / relative for parent in Path(__file__).resolve().parents)
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+    raise FileNotFoundError(f"Ling calibration repo resource does not exist: {value!r}")
+
+
 def _recipe_kwargs(spec: Ling3FlashQuantSpec, calibration_texts=None) -> dict:
     spec.validate()
     kwargs = {
@@ -72,7 +94,9 @@ def _recipe_kwargs(spec: Ling3FlashQuantSpec, calibration_texts=None) -> dict:
         "batch_size": spec.batch_size,
         "nsamples": spec.nsamples,
         "seqlen": spec.seqlen,
-        "calibration_jsonl": spec.calibration_jsonl,
+        "calibration_jsonl": (
+            _resolve_calibration_jsonl(spec.calibration_jsonl) if spec.calibration_jsonl is not None else None
+        ),
         "calibration_text_key": spec.text_key,
         "calibration_dataset": spec.dataset,
         "calibration_data": calibration_texts,
@@ -151,7 +175,9 @@ def autoround_calibration_source(spec: Ling3FlashQuantSpec, calibration_texts=No
 
     return source(
         calibration_data=calibration_texts,
-        calibration_jsonl=spec.calibration_jsonl,
+        calibration_jsonl=(
+            _resolve_calibration_jsonl(spec.calibration_jsonl) if spec.calibration_jsonl is not None else None
+        ),
         calibration_dataset=spec.dataset,
         calibration_text_key=spec.text_key,
     )

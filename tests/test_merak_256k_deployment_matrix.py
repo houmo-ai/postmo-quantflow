@@ -82,7 +82,8 @@ def test_qwen_yaml_keeps_small_default_and_derives_draft_capacity(
     model = _model_config(relative_path)
 
     assert model["context_max_length"] == DEFAULT_CONTEXT
-    assert model["fuse_gdr_block_recurrent_ops"] is False
+    assert model["fuse_gdr_ops"] is True
+    assert model["fuse_gdr_block_recurrent_ops"] is True
     assert model["flash_attention"]["enable"] is False
     assert {name: model["flash_attention"][name] for name in FA8} == FA8
 

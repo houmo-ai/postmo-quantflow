@@ -13,10 +13,12 @@ import json
 import os
 import re
 import time
-from contextlib import contextmanager
+from collections.abc import Collection
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from xhmodel_merak._environment import scoped_environment
 
 
 @dataclass
@@ -39,18 +41,8 @@ class HMONNXQuickTestResult:
         return asdict(self)
 
 
-@contextmanager
 def _patches_runtime_scope():
-    env_name = "ENABLE_HMINFERENCE_V2"
-    previous = os.environ.get(env_name)
-    os.environ[env_name] = "1"
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(env_name, None)
-        else:
-            os.environ[env_name] = previous
+    return scoped_environment({"ENABLE_HMINFERENCE_V2": "1"})
 
 
 def find_hmonnx_meta_file(export_result_or_path: Any) -> str:
@@ -183,6 +175,8 @@ def hmonnx_generate(
     fast: bool = False,
     debug: bool = False,
     golden: bool = False,
+    golden_components: Collection[str] | None = None,
+    stream_output: bool = True,
     min_output_tokens: int = 0,
     auto_offload: bool = False,
     cuda_graph: bool = False,
@@ -190,6 +184,13 @@ def hmonnx_generate(
     device_map: None = None,
 ) -> HMONNXQuickTestResult:
     """Run a lightweight HMONNX generate smoke test for full or visual exports."""
+    resolved_meta = str(meta_file)
+    selected_golden = tuple(dict.fromkeys(golden_components or ()))
+    if golden and selected_golden:
+        raise ValueError("golden and golden_components are mutually exclusive")
+    if (golden or "decode" in selected_golden) and max_new_tokens < 2:
+        raise ValueError("Decode Golden requires max_new_tokens >= 2 so the decode graph executes")
+
     import torch
     from transformers import TextStreamer
 
@@ -197,7 +198,6 @@ def hmonnx_generate(
     from xhquant.api import get_xhquant_logger, xhquant_init
     from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
 
-    resolved_meta = str(meta_file)
     xhquant_init(None, debug)
     logger = get_xhquant_logger()
     hmonnx_model = AutoLLMHONNXModel.from_pretrained(
@@ -214,24 +214,25 @@ def hmonnx_generate(
         hmonnx_model.enable_auto_offload = True
 
     runtime_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    loaded_prompt = _load_prompt(prompt)
     use_multimodal = bool(image_path) and Path(str(image_path)).exists() and hasattr(hmonnx_model, "get_tf_processor")
     if use_multimodal:
         tokenizer, model_inputs = _build_multimodal_inputs(
             hmonnx_model,
-            loaded_prompt,
+            prompt,
             str(image_path),
             think,
             runtime_device,
         )
     else:
-        tokenizer, model_inputs = _build_text_inputs(hmonnx_model, loaded_prompt, think, runtime_device)
+        tokenizer, model_inputs = _build_text_inputs(hmonnx_model, prompt, think, runtime_device)
 
-    streamer = TextStreamer(tokenizer)
+    streamer = TextStreamer(tokenizer) if stream_output else None
     hmonnx_model.to(runtime_device)
     if fast and hasattr(hmonnx_model, "to_fast"):
         hmonnx_model.to_fast()
-    if golden and hasattr(hmonnx_model, "enable_golden"):
+    if selected_golden:
+        _set_component_golden(hmonnx_model, selected_golden)
+    elif golden and hasattr(hmonnx_model, "enable_golden"):
         hmonnx_model.enable_golden = True
 
     contexts = [
@@ -239,12 +240,11 @@ def hmonnx_generate(
         MemoryTracker(device=runtime_device, name="generate", logger=logger),
         LLMInferenceContextManager(hmonnx_model, devices=[runtime_device]),
     ]
-    max_tokens = 2 if golden else max_new_tokens
     start = time.perf_counter()
     with ContextManagers(contexts):
         generated_ids = hmonnx_model.generate(
             **model_inputs,
-            max_new_tokens=max_tokens,
+            max_new_tokens=max_new_tokens,
             streamer=streamer,
             do_sample=do_sample,
             pad_token_id=tokenizer.eos_token_id,
@@ -264,6 +264,21 @@ def hmonnx_generate(
         latency_s=latency_s,
         tokens_per_second=_tokens_per_second(len(output_ids), latency_s),
     )
+
+
+def _set_component_golden(hmonnx_model: Any, components: Collection[str]) -> None:
+    selected = set(components)
+    supported = {
+        "prefill": getattr(hmonnx_model, "prefill_model", None),
+        "decode": getattr(hmonnx_model, "decode_model", None),
+        "visual": getattr(hmonnx_model, "visual", None),
+    }
+    unknown = sorted(name for name in selected if name not in supported or supported[name] is None)
+    if unknown:
+        raise ValueError(f"HMONNX model does not expose Golden components: {unknown}")
+    for name, component in supported.items():
+        if component is not None:
+            component.enable_golden = name in selected
 
 
 def spec_decode_generate(
@@ -313,8 +328,8 @@ def spec_decode_generate(
         cuda_graph_warmup_runs=cuda_graph_warmup_runs,
         cuda_graph_graph_warmup_runs=cuda_graph_graph_warmup_runs,
     )
-    input_prompt = _load_prompt(prompt_file or prompt)
-    if prompt_file:
+    input_prompt = prompt
+    if prompt_file is not None:
         input_prompt = Path(prompt_file).read_text(encoding="utf-8")
 
     for _ in range(warmup_runs):
@@ -428,18 +443,16 @@ def _load_meta_info(meta_file: str | Path) -> dict[str, Any]:
     return json.loads(Path(meta_file).read_text(encoding="utf-8"))
 
 
-def _load_prompt(prompt: str) -> str:
-    path = Path(prompt)
-    if path.is_file():
-        return path.read_text(encoding="utf-8")
-    return prompt
-
-
 def _build_text_inputs(hmonnx_model: Any, prompt: str, think: bool, device: str):
     tokenizer = hmonnx_model.get_tokenizer()
     messages = [{"role": "user", "content": prompt}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=think)
-    return tokenizer, tokenizer([text], return_tensors="pt", truncation=True).to(device)
+    return tokenizer, tokenizer(
+        [text],
+        return_tensors="pt",
+        truncation=True,
+        return_token_type_ids=False,
+    ).to(device)
 
 
 def _build_multimodal_inputs(hmonnx_model: Any, prompt: str, image_path: str, think: bool, device: str):
