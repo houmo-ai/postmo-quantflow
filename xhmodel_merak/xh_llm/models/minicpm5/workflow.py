@@ -46,8 +46,8 @@ class MiniCPM5Workflow(BaseLLMWorkflow):
         hmonnx_model = AutoLLMHONNXModel.from_pretrained(
             meta_file,
             device_map=[device] if isinstance(device, str) else device,
-            enable_golden=True,
         )
+        hmonnx_model.enable_golden = True
         tokenizer = hmonnx_model.get_tokenizer()
         prompt = input_messages if isinstance(input_messages, str) else input_messages.get("text", "")
         text = tokenizer.apply_chat_template(

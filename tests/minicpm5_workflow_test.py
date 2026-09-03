@@ -118,5 +118,6 @@ def test_minicpm5_dump_golden_uses_exported_golden_metadata(tmp_path, monkeypatc
     )
 
     assert result == str(meta_file)
-    assert calls == {"path": str(meta_file), "kwargs": {"device_map": ["cuda:0"], "enable_golden": True}}
+    assert calls == {"path": str(meta_file), "kwargs": {"device_map": ["cuda:0"]}}
+    assert model.enable_golden is True
     assert model.generated

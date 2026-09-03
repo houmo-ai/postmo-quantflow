@@ -226,24 +226,11 @@ class _MiniCPM5MoE(DynamicModule):
         )
         self.router_input_cast = xhnn.Cast(torch.float32).to(dtype=torch.float32)
         self.router_topk = xhnn.TopK(self.top_k, axis=-1)
-        self.routing_gather = xhnn.GatherElements(axis=1)
-        self.routing_sum = xhnn.ReduceSum(dim=-1, keepdim=True)
-        self.routing_add = xhnn.Add()
-        self.routing_div = xhnn.Div()
-        self.routing_mul = xhnn.Mul()
-        self.register_buffer(
-            "routing_epsilon",
-            torch.tensor(1e-20, dtype=torch.float32, device=self.gate.weight.device),
-            persistent=False,
-        )
-        self.register_buffer(
-            "routing_scale",
-            torch.tensor(self.routed_scaling_factor, dtype=torch.float32, device=self.gate.weight.device),
-            persistent=False,
-        )
         routing_dtype = experts[0].gate_proj.weight.dtype
         self.routing_cast = xhnn.Cast(routing_dtype).to(dtype=routing_dtype)
-        self.moeblock = MoeBlock("silu", self.top_k, normalize_routing_weights=False, topk_outside=True)
+        self.moeblock = MoeBlock(
+            "silu", self.top_k, normalize_routing_weights=self.norm_topk_prob, topk_outside=True
+        )
         for projection_name in ("gate_proj", "up_proj", "down_proj"):
             packed_weight, packed_quant_weight = _pack_expert_projection(experts, projection_name)
             setattr(self.moeblock, f"expert_{projection_name}_weight", nn.Parameter(packed_weight))
@@ -269,18 +256,14 @@ class _MiniCPM5MoE(DynamicModule):
                 ~group_mask.unsqueeze(-1).expand_as(grouped).reshape_as(scores_for_choice).bool(), 0.0
             )
         selected_experts = self.router_topk(scores_for_choice)[1]
-        routing_weights = self.routing_gather(scores, selected_experts)
-        if self.norm_topk_prob:
-            routing_sum = self.routing_add(self.routing_sum(routing_weights), self.routing_epsilon)
-            routing_weights = self.routing_div(routing_weights, routing_sum)
-        if self.routed_scaling_factor != 1.0:
-            routing_weights = self.routing_mul(routing_weights, self.routing_scale)
-        routing_weights = self.routing_cast(routing_weights)
+        scores = self.routing_cast(scores)
         output = self.moeblock(
             hidden_states,
-            routing_weights.view(batch_size, sequence_length, self.top_k),
+            scores.view(batch_size, sequence_length, self.num_experts),
             selected_experts=selected_experts.view(batch_size, sequence_length, self.top_k),
         )
+        if self.routed_scaling_factor != 1.0:
+            output = output * self.routed_scaling_factor
         return output + self.shared_experts(hidden_states)
 
 
