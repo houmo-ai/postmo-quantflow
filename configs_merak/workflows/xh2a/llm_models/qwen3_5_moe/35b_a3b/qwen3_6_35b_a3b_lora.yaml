@@ -74,3 +74,6 @@ export:
       w_schema:
         bits: 8
         fp_mode: sefp
+      a_schema:
+        bits: 8
+        fp_mode: sefp

@@ -179,17 +179,9 @@ def build_qwen35_spec_decode_contract(
         )
         contract["draft"] = {
             "abi": (
-                (
-                    "qwen_dflash2_paged_shared_v1"
-                    if flash_attention_enabled
-                    else "qwen_dflash2_v1"
-                )
+                ("qwen_dflash2_paged_shared_v1" if flash_attention_enabled else "qwen_dflash2_v1")
                 if is_dflash2
-                else (
-                    "qwen_dflash_paged_shared_v3"
-                    if flash_attention_enabled
-                    else "qwen_dflash_v1"
-                )
+                else ("qwen_dflash_paged_shared_v3" if flash_attention_enabled else "qwen_dflash_v1")
             ),
             "context_hmonnx": context_path,
             "context_decode_hmonnx": context_decode_path,
@@ -211,9 +203,7 @@ def build_qwen35_spec_decode_contract(
                 input_embedding_scale=float(draft_config.input_embedding_scale),
                 output_multiplier=float(draft_config.output_multiplier),
                 final_logit_softcapping=draft_config.final_logit_softcapping,
-                activation_residual_scale=float(
-                    draft_config.activation_residual_scale
-                ),
+                activation_residual_scale=float(draft_config.activation_residual_scale),
                 selector_scheme="precomputed_kxk_v1",
                 decode_outputs=[
                     "candidate_ids",
@@ -1366,7 +1356,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         if adapter is not None:
             lora_config = self.config.lora
             assert lora_config is not None
-            apply_lora_to_frontend(frontend_model, adapter, lora_config.w_schema)
+            apply_lora_to_frontend(frontend_model, adapter, lora_config.w_schema, lora_config.a_schema)
 
         quanted_model = self._to_quanted(frontend_model, LLMModelState.QUANTED_ALIGNED)
         self._quanted_model = quanted_model
@@ -1551,9 +1541,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             empty_hf_model_for_placeholder,
             self.hf_model_dir,
         )
-        big_hf_model_cls.initialize_process_worker_after_quantized_preprocess(
-            empty_hf_model_for_placeholder
-        )
+        big_hf_model_cls.initialize_process_worker_after_quantized_preprocess(empty_hf_model_for_placeholder)
         big_hf_model_cls._preprocess_quantized_hf_model(
             empty_hf_model,
             self.hf_model_dir,

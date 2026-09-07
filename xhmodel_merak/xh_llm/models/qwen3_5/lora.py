@@ -39,6 +39,7 @@ class XHQwen3_5LoRAConfig(BaseConfig):  # noqa: N801
         *,
         path: list[str] | tuple[str, ...],
         w_schema: Mapping[str, Any] | None = None,
+        a_schema: Mapping[str, Any] | None = None,
         **kwargs,
     ) -> None:
         if "mode" in kwargs:
@@ -69,15 +70,20 @@ class XHQwen3_5LoRAConfig(BaseConfig):  # noqa: N801
         normalized_w_schema = copy.deepcopy(dict(w_schema)) if w_schema else None
         if normalized_w_schema and "act_schema" in normalized_w_schema:
             raise ValueError(
-                "Qwen3.5 lora.w_schema only controls LoRA A/B weights; activation precision "
-                "is inherited from export.model.quant_scheme"
+                "Qwen3.5 lora.w_schema only controls LoRA A/B weights; use lora.a_schema "
+                "to override activation precision"
             )
+
+        if a_schema is not None and not isinstance(a_schema, Mapping):
+            raise TypeError("Qwen3.5 lora.a_schema must be a mapping when provided")
+        normalized_a_schema = copy.deepcopy(dict(a_schema)) if a_schema else None
 
         self.path = list(path)
         # None (including YAML ``w_schema: {}``) deliberately means no node
         # override.  Passing an empty schema to xhquant would otherwise select
         # xhquant's own W8 default instead of inheriting the model scheme.
         self.w_schema = normalized_w_schema
+        self.a_schema = normalized_a_schema
 
 
 @dataclass(frozen=True)
@@ -155,8 +161,7 @@ def inspect_lora_adapter(adapter_path: str) -> LoRAAdapterSpec:
         module_path = match.group("module")
         if _is_visual_module_path(module_path):
             raise ValueError(
-                "Qwen3.5 keep-LoRA does not support ViT/visual adapters; "
-                f"found visual tensor {key!r} in {source_path}"
+                f"Qwen3.5 keep-LoRA does not support ViT/visual adapters; found visual tensor {key!r} in {source_path}"
             )
         side = match.group("side")
         if side in pair_items[module_path]:
@@ -173,8 +178,7 @@ def inspect_lora_adapter(adapter_path: str) -> LoRAAdapterSpec:
     for module_path, sides in sorted(pair_items.items()):
         if set(sides) != {"A", "B"}:
             raise ValueError(
-                f"Incomplete LoRA tensor pair for module {module_path!r} in {source_path}; "
-                f"found sides {sorted(sides)}"
+                f"Incomplete LoRA tensor pair for module {module_path!r} in {source_path}; found sides {sorted(sides)}"
             )
         a_key, a_shape = sides["A"]
         b_key, b_shape = sides["B"]
@@ -184,8 +188,7 @@ def inspect_lora_adapter(adapter_path: str) -> LoRAAdapterSpec:
         has_transposed_rank = a_shape[1] == rank and b_shape[0] == rank
         if not (has_standard_rank or has_transposed_rank):
             raise ValueError(
-                f"LoRA tensor rank does not match adapter r={rank} for module {module_path!r}: "
-                f"A={a_shape}, B={b_shape}"
+                f"LoRA tensor rank does not match adapter r={rank} for module {module_path!r}: A={a_shape}, B={b_shape}"
             )
         pairs.append(LoRAWeightPair(module_path, a_key, b_key, a_shape, b_shape))
 
@@ -241,6 +244,7 @@ def apply_lora_to_frontend(
     frontend_model: Any,
     adapter: LoRAAdapterSpec,
     w_schema: Mapping[str, Any] | None,
+    a_schema: Mapping[str, Any] | None = None,
 ) -> None:
     """Rewrite both target graphs to ``src + B(A(X)) * (alpha / rank)``."""
 
@@ -270,6 +274,9 @@ def apply_lora_to_frontend(
             quant_config = copy.deepcopy(node.meta.get("quant_config", {}))
             if w_schema is not None:
                 quant_config["w_schema"] = copy.deepcopy(dict(w_schema))
+            if a_schema is not None:
+                quant_config["act_schema"] = copy.deepcopy(dict(a_schema))
+
             node.meta["quant_config"] = quant_config
         if len(lora_nodes) != expected_lora_linears:
             raise RuntimeError(
@@ -321,6 +328,7 @@ def finalize_lora_metadata(
             "scale": adapter.scale,
             "target_linear_count": len(adapter.pairs),
             "w_schema": copy.deepcopy(lora_config.w_schema),
+            "a_schema": copy.deepcopy(lora_config.a_schema),
         }
         child_model_config = getattr(child_meta, "model_config", None)
         child_lora_config = getattr(child_model_config, "lora", None)
@@ -345,6 +353,7 @@ def finalize_lora_metadata(
                 "scale": adapter.scale,
                 "target_linear_count": len(adapter.pairs),
                 "w_schema": copy.deepcopy(lora_config.w_schema),
+                "a_schema": copy.deepcopy(lora_config.a_schema),
             }
         )
 
@@ -582,7 +591,7 @@ def _resolve_linear(
             f"(A={pair.a_shape}, B={pair.b_shape})"
         )
     raise ValueError(
-        f"LoRA target module {module_path!r} matches multiple Qwen3.5 Linear modules: " f"{sorted(suffix_matches)}"
+        f"LoRA target module {module_path!r} matches multiple Qwen3.5 Linear modules: {sorted(suffix_matches)}"
     )
 
 
