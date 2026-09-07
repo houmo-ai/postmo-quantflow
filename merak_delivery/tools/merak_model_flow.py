@@ -348,7 +348,7 @@ def _extract_quant_summary(workflow_config_path: Path) -> dict[str, Any]:
 
 
 def collect_manifest_command(args: argparse.Namespace) -> int:
-    model_card_path = _resolve_path(args.model_card)
+    model_card_path = _resolve_model_card_path(args.model_card)
     card = _load_model_card(model_card_path)
     workflow_config_path = ROOT / card["workflow"]["config_path"]
     work_dir = _resolve_path(args.work_dir)

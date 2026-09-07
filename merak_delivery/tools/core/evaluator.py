@@ -44,7 +44,7 @@ class MerakEvaluator:
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "MerakEvaluator":
         services = get_services()
-        model_card_path = services.resolve_path(args.model_card)
+        model_card_path = services.resolve_model_card_path(args.model_card)
         card = services.load_model_card(model_card_path)
         work_dir = services.resolve_path(args.work_dir) if args.work_dir else services.default_work_dir(card)
         return cls(
