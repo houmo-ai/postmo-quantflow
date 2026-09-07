@@ -120,7 +120,7 @@ c
 ### 开启 prefill chunk 调试
 
 ```bash
-python examples_merak/llm/qwen3/debug_scripts/qwen3_xh_generate.py --config configs_merak/xh2a/llm_models/qwen3/8b/qwen3_8b_xh2a_2k.py --eval-type quanted_fast --enable-prefill-chunk
+python examples_merak/llm/qwen3/debug_scripts/_qwen3_xh_generate.py --config configs_merak/xh2a/llm_models/qwen3/8b/qwen3_8b_xh2a_2k.py --eval-type quanted_fast --enable-prefill-chunk
 ```
 
 ## 说明

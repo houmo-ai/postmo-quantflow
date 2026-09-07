@@ -33,6 +33,7 @@ from xhmodel_merak.xh_llm.big_hf_model_helper import (
 )
 from xhmodel_merak.xh_llm.hmonnx.deterministic_export import (
     _canonical_node_names,
+    _restore_default_hmfp_attributes,
     canonicalize_hmonnx_artifact,
 )
 
@@ -1537,6 +1538,38 @@ def test_canonical_node_names_ignore_exporter_local_paths_and_counters():
         "node_000001_sigmoid",
         "node_000002_identity",
     ]
+
+
+def test_restore_default_hmfp_act_max_exp_boost_for_strict_custom_schema():
+    missing = onnx.helper.make_node(
+        "Linear",
+        ["x", "weight", "scale"],
+        ["y"],
+        domain="ai.houmo.xh2a",
+    )
+    explicit = onnx.helper.make_node(
+        "Linear",
+        ["x", "weight", "scale"],
+        ["z"],
+        domain="ai.houmo.xh2a",
+        hmfp_act_max_exp_boost=3,
+    )
+    standard = onnx.helper.make_node("Linear", ["x", "weight"], ["out"])
+    graph = onnx.helper.make_graph([missing, explicit, standard], "defaults", [], [])
+
+    _restore_default_hmfp_attributes(graph)
+
+    assert {
+        item.name: item.i
+        for item in graph.node[0].attribute
+        if item.name == "hmfp_act_max_exp_boost"
+    } == {"hmfp_act_max_exp_boost": 0}
+    assert {
+        item.name: item.i
+        for item in graph.node[1].attribute
+        if item.name == "hmfp_act_max_exp_boost"
+    } == {"hmfp_act_max_exp_boost": 3}
+    assert not any(item.name == "hmfp_act_max_exp_boost" for item in graph.node[2].attribute)
 
 
 def test_replace_placeholder_allows_unconsumed_subgraph_outputs(tmp_path):

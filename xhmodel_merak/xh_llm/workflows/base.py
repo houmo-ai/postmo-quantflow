@@ -3,11 +3,15 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import WorkflowConfig
 from .result import ExportResult, QuantResult
 from .utils import same_abs_path
+
+
+if TYPE_CHECKING:
+    from xhmodel_merak.xh_llm.base_model import XHBaseModel
 
 
 class BaseLLMWorkflow:
@@ -39,6 +43,43 @@ class BaseLLMWorkflow:
             raise NotImplementedError(f"{type(self).__name__}.quant() must implement model-specific quantization")
         return QuantResult(raw_model_dir=self.model_dir, skipped=True)
 
+    def get_model(
+        self,
+        quant_result: QuantResult | None = None,
+        config_overrides: Mapping[str, Any] | None = None,
+        work_dir: str | None = None,
+    ) -> "XHBaseModel":
+        from xhmodel_merak.xh_llm import AutoLLMConfig, AutoLLMModel
+        from xhquant.api import Config, get_xhquant_logger
+
+        if quant_result is None:
+            quant_result = QuantResult(raw_model_dir=self.model_dir, skipped=True)
+
+        workflow_config = self.workflow_config.with_overrides(config_overrides)
+        export_cfg = self._build_export_config(quant_result, workflow_config)
+        cfg = Config(export_cfg)
+        logger = get_xhquant_logger()
+        logger.info(f"Config:\n{cfg.pretty_text}")
+
+        model_cfg = AutoLLMConfig.from_pretrained(cfg.model)
+        logger.info(f"Resolved model config type: {type(model_cfg).__name__}")
+        if (
+            self.expected_model_config_cls_name is not None
+            and type(model_cfg).__name__ != self.expected_model_config_cls_name
+        ):
+            raise TypeError(
+                f"Expected model config type {self.expected_model_config_cls_name}, but got {type(model_cfg).__name__}"
+            )
+        logger.info(f"Model Config:\n{model_cfg.to_json_string()}")
+
+        xh_model = AutoLLMModel.from_pretrained(config=model_cfg)
+        logger.info(f"Resolved model type: {type(xh_model).__name__}")
+        if self.expected_model_cls_name is not None and type(xh_model).__name__ != self.expected_model_cls_name:
+            raise TypeError(f"Expected model type {self.expected_model_cls_name}, but got {type(xh_model).__name__}")
+        if work_dir is not None:
+            xh_model.work_dir = work_dir
+        return xh_model
+
     def export(
         self,
         quant_result: QuantResult,
@@ -52,7 +93,6 @@ class BaseLLMWorkflow:
         """
         import torch
 
-        from xhmodel_merak.xh_llm import AutoLLMConfig, AutoLLMModel
         from xhquant.api import Config, get_xhquant_logger, set_random_seed, xhquant_init
         from xhquant.utils import MemoryTracker, TimeProfiler
 
@@ -60,8 +100,6 @@ class BaseLLMWorkflow:
             raise ValueError("quant_result can't be None")
 
         workflow_config = self.workflow_config.with_overrides(config_overrides)
-        export_cfg = self._build_export_config(quant_result, workflow_config)
-
         work_dir_path = Path(output_dir)
         if work_dir_path.exists():
             raise FileExistsError(f"{str(work_dir_path)} already exists!")
@@ -73,31 +111,9 @@ class BaseLLMWorkflow:
 
         config_file = str(work_dir_path / f"{workflow_config.name}.yaml")
         workflow_config.dump(config_file)
-        cfg = Config(export_cfg)
-
         logger.info(f"Workflow config: {workflow_config.name}")
         logger.info(f"Using device: {device}, cuda_available: {torch.cuda.is_available()}")
-        logger.info(f"Config:\n{cfg.pretty_text}")
-
-        model_cfg = AutoLLMConfig.from_pretrained(cfg.model)
-        logger.info(f"Resolved model config type: {type(model_cfg).__name__}")
-        if (
-            self.expected_model_config_cls_name is not None
-            and type(model_cfg).__name__ != self.expected_model_config_cls_name
-        ):
-            raise TypeError(
-                f"Expected model config type {self.expected_model_config_cls_name}, "
-                f"but got {type(model_cfg).__name__}"
-            )
-        logger.info(f"Model Config:\n{model_cfg.to_json_string()}")
-
-        xh_model = AutoLLMModel.from_pretrained(config=model_cfg)
-        logger.info(f"Resolved model type: {type(xh_model).__name__}")
-        if self.expected_model_cls_name is not None and type(xh_model).__name__ != self.expected_model_cls_name:
-            raise TypeError(f"Expected model type {self.expected_model_cls_name}, but got {type(xh_model).__name__}")
-        # TODO work_dir是否必要？
-        if hasattr(xh_model, "work_dir"):
-            xh_model.work_dir = str(work_dir_path)
+        xh_model = self.get_model(quant_result, config_overrides, str(work_dir_path))
 
         with TimeProfiler("convert", logger), MemoryTracker(device, "convert2hmonnx", logger):
             meta = xh_model.export_hmonnx(str(work_dir_path))
@@ -195,8 +211,7 @@ class BaseLLMWorkflow:
         match = re.search(r"w(\d+)a(\d+)", quant_type.lower())
         if match is None:
             raise ValueError(
-                "export.model.quant_scheme.quant_type must contain a w{bits}a{bits} token, "
-                f"got {quant_type!r}"
+                f"export.model.quant_scheme.quant_type must contain a w{{bits}}a{{bits}} token, got {quant_type!r}"
             )
         weight_bits = int(match.group(1))
         activation_bits = int(match.group(2))
@@ -209,6 +224,7 @@ class BaseLLMWorkflow:
         if max_pe_length is not None:
             max_pe_length = int(max_pe_length)
         else:
+
             def find_max_position_embeddings(data: Any) -> Any:
                 if isinstance(data, Mapping):
                     if "max_position_embeddings" in data:

@@ -12,6 +12,10 @@ conda activate xhquant_55
 需要配套的 GPTQModel 和 AutoRound 支持 `int_sym_xh`。当前 CI 使用
 Transformers 5.16.1，见 [CI 环境与测试](../../../benchmark_test/ci_test_transformer5.16.0/README.md)。
 
+XH2A 与 Yuehui 配置不要混用。Yuehui 的 Qwen3.5-4B YAML 在
+`configs_merak/workflows/yuehui/llm_models/qwen3_5/4b/`，导出前确认环境已安装
+对应的 xhquant/runtime 依赖。
+
 ## 选配置
 
 以下路径都相对于 `configs_merak/workflows/xh2a/llm_models/`。
@@ -87,6 +91,62 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
 35B-A3B 对应 `qwen3_6_35b_a3b_full_mtp.yaml`。量化目录需包含 MTP 权重；
 DFlash 还需准备 YAML 中指定的 draft checkpoint。
 `--export-from-quanted-model` 跳过量化，直接导出 `--model-dir` 中的模型。
+
+## Yuehui Qwen3.5-4B
+
+Yuehui 命令统一使用 `configs_merak/workflows/yuehui/` 下的 YAML。原始 HF 模型
+走 `full.yaml` 时会量化并导出；量化后的 HF/GPTQModel 目录加
+`--export-from-quanted-model`；跳过量化但输入仍是原始 HF 权重时用
+`no_quant.yaml`。
+
+完整模型：量化并导出
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir data/models/Qwen3.5-4B \
+  --config-path configs_merak/workflows/yuehui/llm_models/qwen3_5/4b/qwen3_5_4b_full.yaml \
+  --quant-output-dir work_dirs/yuehui_qwen3_5_4b_quant \
+  --export-output-dir work_dirs/yuehui_qwen3_5_4b_export \
+  --device cuda:0 \
+  --overwrite
+```
+
+完整模型：跳过量化，直接导出
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir data/models/Qwen3.5-4B \
+  --config-path configs_merak/workflows/yuehui/llm_models/qwen3_5/4b/qwen3_5_4b_no_quant.yaml \
+  --export-output-dir work_dirs/yuehui_qwen3_5_4b_no_quant_export \
+  --device cuda:0 \
+  --overwrite
+```
+
+仅导出视觉塔：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir data/models/Qwen3.5-4B \
+  --config-path configs_merak/workflows/yuehui/llm_models/qwen3_5/4b/qwen3_5_4b_visual_only_896.yaml \
+  --quant-output-dir work_dirs/yuehui_qwen3_5_4b_visual_quant \
+  --export-output-dir work_dirs/yuehui_qwen3_5_4b_visual_export \
+  --device cuda:0 \
+  --overwrite
+```
+
+visual-only 命令会先执行 YAML 中的 AutoRound，再导出 visual tower。
+如果 `--model-dir` 已经是量化后的 HF/GPTQModel 目录，需要补充
+`--export-from-quanted-model`，否则 workflow 会再次量化：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir data/models/Qwen3.5-4B \
+  --config-path configs_merak/workflows/yuehui/llm_models/qwen3_5/4b/qwen3_5_4b_visual_only_896.yaml \
+  --export-from-quanted-model \
+  --export-output-dir work_dirs/yuehui_qwen3_5_4b_visual_export \
+  --device cuda:0 \
+  --overwrite
+```
 
 ## 常用导出选项
 

@@ -1,0 +1,28 @@
+quant: null
+
+export:
+  model:
+    chip_arch: YueHui
+    model_type: Qwen3ForCausalLM
+    # 该字段仅用作占位，实际会在导出前实时覆盖
+    hf_model: null
+    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
+    model_name: qwen3_0_6b
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      quant_type: w8a16h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a16h1_sefp
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+    only_first_block: false
