@@ -110,8 +110,12 @@ DFlash2 的 8K 与 256K 配置分别为 `qwen3_8_27b_full_dflash2_8k.yaml`、
 
 ## 验证产物
 
-主入口是导出目录内的 `golden_meta_info.json`，其中记录
-`prefill/`、`decode/`、`visual/` 和可选的 draft 子图相对路径。
+完整包的主入口是导出目录内的 `golden_meta_info.json`，其中记录
+`prefill/`、`decode/`、`visual_m*` 和可选的 draft 子图相对路径。
+五档视觉图位于包根目录的 `visual_m96`、`visual_m196`、`visual_m384`、
+`visual_m704`、`visual_m1536`，与 `prefill`、`decode` 同级；路由清单为
+根目录的 `visual_gears.json`。完整包名的视觉后缀使用下划线：
+`visualm96_196_384_704_1536`。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
@@ -126,8 +130,15 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_gener
 
 `--dump-golden` 保存对齐用的中间结果，`--quick-test` 检查导出后的运行链路；
 两者都不能代替 PPL 和任务精度评测。视觉模型还需用真实图片跑端到端验证。
-五档 visual golden 覆盖 96/196/384/704/1536 token；visual-only 的入口是
-`visual_meta_info.json`。
+`--dump-golden` 先为五档视觉图分别生成 `visual_m*/step_0`，再用真实图片
+验证 visual → prefill → decode；命中档位的视觉 golden 写入 `step_1`。
+真实图片验证不能代替全部五档的覆盖。visual-only 的入口是根目录的
+`visual_meta_info.json`，图和 golden 同样位于 `visual_m*`，路由清单仍为
+根目录的 `visual_gears.json`。
+
+每个 gear 的 step 链接必须指向该 gear 自己的图和 external data。
+发布布局校验与链接修复只支持根目录 `visual_m*`，不支持旧 `visual/m*`
+或独立导出的 `m*` 布局；旧包需要重新导出，并按元数据中的相对路径加载。
 
 投机解码接收率用 [spec-decode 测试](debug_scripts/qwen3_5_xh_spec_decode_test.py)，
 PPL 用 [PPL 脚本](debug_scripts/qwen3_5_xh_ppl_eval.py)。
