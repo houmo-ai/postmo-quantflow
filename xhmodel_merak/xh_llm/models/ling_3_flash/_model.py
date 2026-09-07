@@ -233,6 +233,34 @@ class _LingMLAAttention(DynamicModule):
             self.k_cache = LLMCacheV2(axis=axis)
             self.v_cache = LLMCacheV2(axis=axis)
 
+        layout = getattr(self.config, "ling_mla_layout", "hf_unabsorbed")
+        if layout not in ("hf_unabsorbed", "xh2_absorbed_v1"):
+            raise ValueError(f"Unsupported Ling MLA layout: {layout!r}")
+        if layout == "xh2_absorbed_v1":
+            if self.gated_attention_proj_granularity_type not in (None, "head_wise"):
+                raise ValueError("xh2_absorbed_v1 cannot move an element-wise gate across value-up")
+            q_in = self.hidden_size if self.q_lora_rank is None else self.q_lora_rank
+            shapes = {
+                "q_absorbed_proj": (self.num_heads * self.kv_lora_rank, q_in),
+                "q_rope_proj": (self.num_heads * self.qk_rope_head_dim, q_in),
+                "absorbed_dense": (self.hidden_size, self.num_heads * self.kv_lora_rank),
+            }
+            for name, shape in shapes.items():
+                linear = getattr(self, name, None)
+                if not isinstance(linear, nn.Linear) or tuple(linear.weight.shape) != shape:
+                    raise ValueError(f"Invalid absorbed MLA {name}; load the matching GPTQModel layout before wrapping")
+            if any(hasattr(self, name) for name in ("q_proj", "q_b_proj", "kv_b_proj", "dense")):
+                raise ValueError("Mixed raw/absorbed Ling MLA layout; refusing a second weight absorption")
+            # These are the calibrated boundaries. Reuse the same objects,
+            # including ModelZoo's unpacked integer payload, without a matmul.
+            self.use_elementwise_value_projection = False
+            weight = self.q_absorbed_proj.weight
+            self.register_buffer(
+                "attention_scale", torch.tensor(float(self.scaling), device=weight.device, dtype=weight.dtype),
+                persistent=False,
+            )
+            return self
+
         device = self.kv_b_proj.weight.device
         dtype = self.kv_b_proj.weight.dtype
         fusion_dtype = torch.float32 if device.type != "meta" else dtype
@@ -308,9 +336,8 @@ class _LingMLAAttention(DynamicModule):
             if self.dense.bias is not None:
                 self.absorbed_dense.bias.data.copy_(self.dense.bias)
             del self.dense
-        # The absorbed matrices are new quantization boundaries.  They are
-        # quantized by Merak's W8 export scheme rather than pretending that a
-        # product of packed integer weights is itself a valid packed weight.
+        # Legacy HF layout only: these new boundaries need Merak W8 quantization.
+        # New recipes use xh2_absorbed_v1 and preserve their trained payload above.
         if self.q_lora_rank is None:
             del self.q_proj
         else:

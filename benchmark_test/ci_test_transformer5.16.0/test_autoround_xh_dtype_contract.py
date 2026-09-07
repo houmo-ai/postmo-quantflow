@@ -20,7 +20,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ROOT = REPO_ROOT / "configs_merak/workflows/xh2a/llm_models"
-FAMILIES = ("qwen3_5", "qwen3_5_moe", "qwen3_next")
+FAMILIES = ("qwen3_5", "qwen3_5_moe", "qwen3_next", "ling_3_flash")
 PROFILE_PATHS = tuple(sorted(path for family in FAMILIES for path in (CONFIG_ROOT / family).rglob("*.yaml")))
 
 
@@ -39,7 +39,7 @@ def modules():
         "xhmodel_merak.xh_llm",
         "xhmodel_merak.xh_llm.workflows",
         "xhmodel_merak.xh_llm.models",
-        *(f"xhmodel_merak.xh_llm.models.{family}" for family in ("qwen3_5", "qwen3_next")),
+        *(f"xhmodel_merak.xh_llm.models.{family}" for family in ("qwen3_5", "qwen3_next", "ling_3_flash")),
     )
     try:
         for name in packages:
@@ -50,6 +50,8 @@ def modules():
         yield types.SimpleNamespace(
             qwen=importlib.import_module("xhmodel_merak.xh_llm.models.qwen3_5.quant_adapter"),
             next=importlib.import_module("xhmodel_merak.xh_llm.models.qwen3_next.workflow"),
+            ling=importlib.import_module("xhmodel_merak.xh_llm.models.ling_3_flash.quant_adapter"),
+            ling_workflow=importlib.import_module("xhmodel_merak.xh_llm.models.ling_3_flash.workflow"),
         )
     finally:
         for name in list(sys.modules):
@@ -152,3 +154,78 @@ def test_next_workflow_reaches_real_recipe_and_parser(modules, tmp_path, method,
         assert "--data-type" not in command
         with pytest.raises(ValueError, match="keys not consumed"):
             modules.next.Qwen3NextWorkflow._validate_qwen3_next_quant_config({**quant, "data_type": "int_sym_xh"})
+
+
+@pytest.mark.parametrize("method,dtype", (("autoround", None), ("autoround", "int_sym_gptq"), ("gptq", None)))
+def test_ling_workflow_dry_run_reports_effective_dtype(modules, tmp_path, method, dtype):
+    path = CONFIG_ROOT / f"ling_3_flash/ling_3_flash_{method}.yaml"
+    workflow = modules.ling_workflow.Ling3FlashWorkflow(str(tmp_path / "model"), str(path))
+    quant = workflow.workflow_config.quant
+    quant.pop("data_type", None)
+    quant["runtime"]["dry_run"] = True
+    if dtype is not None:
+        quant["data_type"] = dtype
+    result = workflow.quant(str(tmp_path / "out"), "cuda:0")
+    assert not (tmp_path / "out").exists()
+    assert result.meta["precision"]["routed_experts"] == "W4"
+    assert result.meta["precision"]["all_other_quantized_linears"] == "W8"
+    if method == "autoround":
+        assert result.meta["data_type"] == (dtype or "int_sym_xh")
+        assert result.meta["calibration"]["nsamples"] == 256
+        assert result.meta["provenance"]["iters"] == 400
+        assert result.meta["provenance"]["backend"] == "auto_round"
+    else:
+        assert "data_type" not in result.meta
+        assert result.meta["calibration"]["nsamples"] == 128
+    assert result.meta["provenance"]["mla_weight_layout"] == "xh2_absorbed_v1"
+
+
+@pytest.mark.parametrize("dtype", ("int_sym_xh", "int_sym_gptq"))
+def test_ling_cli_passes_dtype_to_spec(modules, monkeypatch, dtype):
+    cli = contracts._load_source_module("_ci_ling_quantize", REPO_ROOT / "examples_merak/llm/ling_3_flash/quantize.py")
+    argv = ["quantize.py", "--method", "autoround", "--output", "/unused"]
+    if dtype != "int_sym_xh":
+        argv.extend(["--data-type", dtype])
+    monkeypatch.setattr(sys, "argv", argv)
+    spec = cli._build_spec(cli.parse_args())
+    spec.validate()
+    assert spec.data_type == dtype
+    assert (spec.nsamples, spec.iters, spec.batch_size) == (256, 400, 1)
+
+
+@pytest.mark.parametrize("dry_run", (False, True))
+def test_ling_plan_preserves_requested_run_mode(modules, tmp_path, dry_run):
+    spec = modules.ling.Ling3FlashQuantSpec(
+        model_dir=str(tmp_path / "model"),
+        output_dir=str(tmp_path / "out"),
+        method="autoround",
+        dry_run=dry_run,
+    )
+    plan = modules.ling.quantization_plan(spec)
+    assert plan["provenance"]["dry_run"] is dry_run
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("section", (None, "calibration", "runtime", "moe"))
+def test_ling_workflow_rejects_unused_config_keys(modules, tmp_path, section):
+    path = CONFIG_ROOT / "ling_3_flash/ling_3_flash_autoround.yaml"
+    workflow = modules.ling_workflow.Ling3FlashWorkflow(str(tmp_path / "model"), str(path))
+    quant = workflow.workflow_config.quant
+    quant["runtime"]["dry_run"] = True
+    target = quant if section is None else quant.setdefault(section, {})
+    target["unused_setting"] = 1
+    with pytest.raises(ValueError, match="keys not consumed"):
+        workflow.quant(str(tmp_path / "out"), "cuda:0")
+    assert not (tmp_path / "out").exists()
+
+
+def test_ling_workflow_reports_the_backend_output_path(modules, tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(target, target_is_directory=True)
+    path = CONFIG_ROOT / "ling_3_flash/ling_3_flash_autoround.yaml"
+    workflow = modules.ling_workflow.Ling3FlashWorkflow(str(tmp_path / "model"), str(path))
+    result = workflow.quant(str(alias / "quantized"), "cuda:0", config_overrides={"quant.runtime.dry_run": True})
+    assert result.quanted_model_dir == result.meta["output_dir"] == str(target / "quantized")
+    assert not (target / "quantized").exists()

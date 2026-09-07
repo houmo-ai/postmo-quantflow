@@ -9,6 +9,8 @@
 - 涉及量化接入或权重格式时，遵循 [ModelZoo / GPTQModel 开发边界](docs/architecture/quantization-boundary.md)。
 - 算子、结构和芯片适配知识从 [建模知识索引](docs/modeling/README.md) 按需读取；
   设备支持结论必须带适用配置和验证证据，不能由芯片名称或单个模型类推。
+- 涉及 MLA/权重吸收或 cache 共享时，先核对 [Ling MLA 约束](docs/modeling/structures/ling-mla-quantization.md)：
+  融合须在权重量化前完成；SEFP 指数域不同的 K/V 不得因浮点 latent 相同就共享缓存。
 - **新增测试统一写到 `benchmark_test/ci_test_transformer5.16.0/`，不向 `tests/`、
   `test/` 或其他测试目录增加用例。** 补充已有行为的回归也遵循此约定。
   先读该目录的 [AGENTS.md](benchmark_test/ci_test_transformer5.16.0/AGENTS.md) 和

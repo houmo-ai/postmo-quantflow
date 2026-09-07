@@ -38,16 +38,18 @@ export:
 quant:
   algorithm: gptqmodel
   method: autoround
+  mla_weight_layout: xh2_absorbed_v1
   output_format: gptqmodel_hf
   artifact_format: gptqmodel_hf
   bits: 8
   group_size: 64
   sym: true
-  iters: 200
+  data_type: int_sym_xh
+  iters: 400
   calibration:
     jsonl: data/calib_data/NeelNanda-pile-10k.jsonl
     text_key: text
-    nsamples: 128
+    nsamples: 256
     seqlen: 2048
   runtime:
     batch_size: 1

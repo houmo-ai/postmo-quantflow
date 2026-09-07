@@ -15,6 +15,22 @@ The authors and contributors of this project make no representation
 or warranty regarding third-party software, models, or datasets.
 Use of such components is at the user's own risk.
 
+Ling-3.0-flash checkpoint-side code (CI fixture only)
+----------------------------------------------------------------------
+Source: https://huggingface.co/inclusionAI/Ling-3.0-flash
+Revision: e0dfe7cd0f6e3b572bbbc0a8a84947469e428cc3
+Files: benchmark_test/ci_test_transformer5.16.0/fixtures/ling3_flash/
+    modeling_bailing_moe_v3.py (CI-only derivative; Apache-2.0 source header)
+    configuration_bailing_moe_v3.py (unmodified; MIT per upstream model card)
+The modeling file retains Copyright 2025 Antgroup and The HuggingFace Inc.
+team, together with its original attribution and Apache-2.0 notice.
+HOUMO CI changes defer FLA imports to KDA construction/execution and remove
+unused FLA imports and tensor_cache memoization. MLA/MoE code is unchanged.
+The configuration file has no separate copyright or license header.
+License texts: licenses/Ling-3.0-flash/LICENSE and LICENSE-MIT.
+The local config uses one tiny MLA/MoE layer for CPU loader tests without FLA.
+No pretrained weights, tokenizer, or upstream inference service is included.
+
 1. Third-party open source libraries
 ----------------------------------------------------------------------
 half (half-precision floating-point library)

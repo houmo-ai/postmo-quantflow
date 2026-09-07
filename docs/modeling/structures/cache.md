@@ -15,6 +15,12 @@
 同时覆盖两个调用方及共享 preprocessing/cache helper。
 它验证文本输入接口，不验证完整 attention 数值或 NPU cache 写回。
 
+## 相同浮点值不代表同一量化状态
+
+Ling XH2a 的 K 存 latent＋RoPE，V 单独存 latent。两者指数对齐轴不同，
+必须各自维护数据与指数，不能按 GPU 单 latent cache 的做法合并物理存储。
+显式 attention 与 FlashAttention 使用相同 cache ABI，详见 [Ling MLA](ling-mla-quantization.md)。
+
 ## 混合注意力与投机验证
 
 [hybrid_cache_runtime](../../../xhmodel_merak/xh_llm/models/qwen3_5/hybrid_cache_runtime.py)

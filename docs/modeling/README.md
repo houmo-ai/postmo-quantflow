@@ -11,6 +11,7 @@
 | 量化算法、模型适配和权重格式应改 ModelZoo 还是 GPTQModel | [跨仓库开发边界](../architecture/quantization-boundary.md) |
 | 模型注册与 wrapper 注册、`_setup`/`graph_forward`、frontend 选择 | [图表达边界](operators/graph-expression.md) |
 | FlashAttention 精度、QKV 布局、mask 图表达 | [Attention 算子](operators/attention.md) |
+| Ling MLA 先融合再量化、K/V 独立 SEFP 指数域与 cache | [Ling MLA 量化边界](structures/ling-mla-quantization.md) |
 | RMSNorm 权重、gating、padding 对归一化的影响 | [归一化算子](operators/normalization.md) |
 | prefill/decode、混合状态、投机验证回滚 | [Cache 与状态](structures/cache.md) |
 | expert 权重、路由与量化载荷 | [MoE](structures/moe.md) |

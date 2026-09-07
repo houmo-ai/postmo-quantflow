@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ...workflows.result import QuantResult
+from ..qwen3_5.quant_adapter import _quant_output_path, _resolve_calibration_value
 from ..qwen3_5.workflow import Qwen35Workflow
 from .quant_adapter import (
     Ling3FlashQuantSpec,
@@ -68,9 +69,8 @@ class Ling3FlashWorkflow(Qwen35Workflow):
         if requested_method == "auto_round":
             requested_method = "autoround"
         if requested_method != method:
-            raise ValueError(
-                f"Ling quant adapter expected method={method!r}, got {requested_method!r}"
-            )
+            raise ValueError(f"Ling quant adapter expected method={method!r}, got {requested_method!r}")
+        self._validate_ling_quant_config(quant_cfg)
 
         calibration = dict(quant_cfg.get("calibration") or {})
         runtime = dict(quant_cfg.get("runtime") or {})
@@ -109,26 +109,24 @@ class Ling3FlashWorkflow(Qwen35Workflow):
         if not isinstance(offload_to_disk, bool):
             raise TypeError("runtime.offload_to_disk must be a boolean")
         if not isinstance(wait_for_submodule_finalizers, bool):
-            raise TypeError(
-                "runtime.wait_for_submodule_finalizers must be a boolean"
-            )
-        result_dir = str(Path(output_dir).expanduser().resolve())
+            raise TypeError("runtime.wait_for_submodule_finalizers must be a boolean")
+        result_dir = _quant_output_path(output_dir, quant_cfg)
         spec = Ling3FlashQuantSpec(
             model_dir=self.model_dir,
             output_dir=result_dir,
             method=method,
+            data_type=str(quant_cfg.get("data_type", "int_sym_xh")),
+            mla_weight_layout=str(quant_cfg.get("mla_weight_layout", "xh2_absorbed_v1")),
             dataset=str(calibration.get("dataset", "NeelNanda/pile-10k")),
             calibration_jsonl=(
-                None if calibration_jsonl in (None, "") else str(calibration_jsonl)
+                None if calibration_jsonl in (None, "") else _resolve_calibration_value(calibration_jsonl)
             ),
             text_key=str(calibration.get("text_key", "text")),
-            nsamples=int(calibration.get("nsamples", quant_cfg.get("nsamples", 128))),
+            nsamples=int(calibration.get("nsamples", quant_cfg.get("nsamples", 256 if method == "autoround" else 128))),
             seqlen=int(calibration.get("seqlen", quant_cfg.get("seqlen", 2048))),
             batch_size=int(runtime.get("batch_size", quant_cfg.get("batch_size", 1))),
-            moe_batch_size=(
-                None if moe_batch_size is None else int(moe_batch_size)
-            ),
-            iters=int(quant_cfg.get("iters", 200)),
+            moe_batch_size=(None if moe_batch_size is None else int(moe_batch_size)),
+            iters=int(quant_cfg.get("iters", 400)),
             group_size=int(quant_cfg.get("group_size", 64)),
             base_bits=base_bits,
             expert_bits=expert_bits,
@@ -147,12 +145,65 @@ class Ling3FlashWorkflow(Qwen35Workflow):
             seed=int(quant_cfg.get("seed", self.seed)),
             dry_run=bool(runtime.get("dry_run", False)),
         )
-        quantize_ling3_flash(spec)
+        quanted_model_dir = quantize_ling3_flash(spec)
         return QuantResult(
             raw_model_dir=self.model_dir,
-            quanted_model_dir=result_dir,
+            quanted_model_dir=str(quanted_model_dir),
             meta=quantization_plan(spec),
         )
+
+    @staticmethod
+    def _validate_ling_quant_config(quant_cfg: Mapping[str, Any]) -> None:
+        allowed = {
+            "algorithm",
+            "method",
+            "output_format",
+            "artifact_format",
+            "bits",
+            "group_size",
+            "sym",
+            "data_type",
+            "mla_weight_layout",
+            "iters",
+            "seed",
+            "calibration",
+            "runtime",
+            "moe",
+            "nsamples",
+            "seqlen",
+            "batch_size",
+            "max_quant_layers",
+            "offload_to_disk",
+            "wait_for_submodule_finalizers",
+            "save_path",
+            "output_dir",
+        }
+        unknown = set(quant_cfg) - allowed
+        sections = {
+            "calibration": {"dataset", "jsonl", "text_key", "nsamples", "seqlen"},
+            "runtime": {
+                "device",
+                "device_map",
+                "batch_size",
+                "moe_batch_size",
+                "offload_to_disk",
+                "offload_dir",
+                "wait_for_submodule_finalizers",
+                "hessian_mse",
+                "dry_run",
+            },
+            "moe": {"attention_bits", "dense_mlp_bits", "expert_bits", "shared_expert_bits"},
+        }
+        for section, keys in sections.items():
+            value = quant_cfg.get(section) or {}
+            if not isinstance(value, Mapping):
+                raise TypeError(f"quant.{section} must be a mapping")
+            unknown.update(f"{section}.{key}" for key in set(value) - keys)
+        if unknown:
+            raise ValueError(f"Ling quant keys not consumed by the recipe: {sorted(unknown)}")
+        for key in ("artifact_format", "output_format"):
+            if quant_cfg.get(key, "gptqmodel_hf") != "gptqmodel_hf":
+                raise ValueError(f"Ling quant.{key} must be 'gptqmodel_hf'")
 
 
 __all__ = ["Ling3FlashWorkflow"]

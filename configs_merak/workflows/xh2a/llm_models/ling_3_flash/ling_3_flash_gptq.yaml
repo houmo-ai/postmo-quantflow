@@ -38,6 +38,7 @@ export:
 quant:
   algorithm: gptqmodel
   method: gptq
+  mla_weight_layout: xh2_absorbed_v1
   output_format: gptqmodel_hf
   artifact_format: gptqmodel_hf
   bits: 8

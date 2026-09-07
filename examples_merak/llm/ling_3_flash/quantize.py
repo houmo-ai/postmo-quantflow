@@ -18,12 +18,15 @@ from xhmodel_merak.xh_llm.models.ling_3_flash.quant_adapter import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=("gptq", "autoround"), required=True)
+    parser.add_argument(
+        "--data-type", default="int_sym_xh", help="AutoRound weight dtype (unused by GPTQ)"
+    )
     parser.add_argument("--model", type=Path, default=Path("weights/Ling-3.0-flash"))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dataset", default="NeelNanda/pile-10k")
     parser.add_argument("--calibration-jsonl", type=Path)
     parser.add_argument("--text-key", default="text")
-    parser.add_argument("--nsamples", type=int, default=128)
+    parser.add_argument("--nsamples", type=int, default=None, help="AutoRound: 256; GPTQ: 128")
     parser.add_argument("--seqlen", type=int, default=2048)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument(
@@ -35,7 +38,11 @@ def parse_args() -> argparse.Namespace:
             "the default processes the whole expert subset once"
         ),
     )
-    parser.add_argument("--iters", type=int, default=200)
+    parser.add_argument("--iters", type=int, default=400)
+    parser.add_argument(
+        "--mla-weight-layout", choices=("xh2_absorbed_v1", "hf_unabsorbed"),
+        default="xh2_absorbed_v1", help="MLA weight layout used during calibration and export",
+    )
     parser.add_argument("--group-size", type=int, default=64)
     parser.add_argument("--base-bits", type=int, default=8)
     parser.add_argument("--expert-bits", type=int, default=4)
@@ -76,6 +83,8 @@ def _build_spec(args: argparse.Namespace) -> Ling3FlashQuantSpec:
         model_dir=str(args.model),
         output_dir=str(args.output),
         method=args.method,
+        data_type=args.data_type,
+        mla_weight_layout=args.mla_weight_layout,
         dataset=args.dataset,
         calibration_jsonl=(
             None if args.calibration_jsonl is None else str(args.calibration_jsonl)

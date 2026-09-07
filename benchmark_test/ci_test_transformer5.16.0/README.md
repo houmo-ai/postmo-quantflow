@@ -241,6 +241,15 @@ GPTQModel interface/dependency update, explicitly run the relevant contracts and
 consumer tests: this repository's selector cannot detect another repository's
 changes. See [development responsibilities](../../docs/architecture/quantization-boundary.md).
 
+Ling MLA loader tests build a one-layer MLA/MoE model with deterministic small
+weights and real W8/G64 packing. The [bundled fixture](fixtures/ling3_flash/README.md)
+contains pinned, checksummed upstream model code and a reduced config, not
+pretrained weights. Its CI-only source changes defer FLA imports to KDA, which
+this fixture does not construct. No FLA installation, model directory, HF
+download, or quantization training is required. Normal and streamed loading
+still use the production implementations; a fresh-process regression blocks
+FLA imports and repeats these paths with empty HF caches in offline mode.
+
 MiniCPM-V-4.6 has a CPU-only text-preprocessing interface contract in
 `test_minicpm_v_4_6_preprocess_contract.py`. It calls the real export/runtime
 preprocessor factories with small tensors, without downloading checkpoints,

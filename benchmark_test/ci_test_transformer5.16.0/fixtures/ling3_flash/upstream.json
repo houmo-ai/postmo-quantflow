@@ -1,0 +1,20 @@
+{
+  "repository": "https://huggingface.co/inclusionAI/Ling-3.0-flash",
+  "revision": "e0dfe7cd0f6e3b572bbbc0a8a84947469e428cc3",
+  "sha256": {
+    "configuration_bailing_moe_v3.py": "f2c048966aec8a2f042cfeb1351f74d51a28589b409c55baae7d24e841c1f6c4",
+    "modeling_bailing_moe_v3.py": "e40f0675fcda7a48eb648fe0b418d71548dfbf31dc0bb08394fea865aabe9664"
+  },
+  "upstream_sha256": {
+    "configuration_bailing_moe_v3.py": "f2c048966aec8a2f042cfeb1351f74d51a28589b409c55baae7d24e841c1f6c4",
+    "modeling_bailing_moe_v3.py": "c2509bf7ac580c262e2581d34d6403aa21682d2e10beb9ad85ad8820a7e33a40"
+  },
+  "modifications": {
+    "modeling_bailing_moe_v3.py": "CI-only: defer FLA imports to KDA construction/execution; remove unused FLA imports and tensor_cache memoization. MLA/MoE implementations unchanged."
+  },
+  "licenses": {
+    "configuration_bailing_moe_v3.py": "MIT (upstream model card)",
+    "modeling_bailing_moe_v3.py": "Apache-2.0 (explicit source header)"
+  },
+  "config": "One gated MLA layer with two routed experts and one shared expert; reduced dimensions, no KDA or pretrained weights."
+}

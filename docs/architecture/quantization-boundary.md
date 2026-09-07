@@ -60,12 +60,12 @@ recipe 的输出目录交给 ModelZoo 的 [QuantResult](../../xhmodel_merak/xh_l
 | [Qwen3.5 quant adapter](../../xhmodel_merak/xh_llm/models/qwen3_5/quant_adapter.py) | GPTQ 调用 `gptqmodel.recipes.qwen35:quantize_qwen35`；AutoRound 调用 `qwen35_autoround:quantize_qwen35_autoround`，adapter 封装 `QuantResult` |
 | [Gemma4 quant adapter](../../xhmodel_merak/xh_llm/models/gemma4_series/quant_adapter.py) | GPTQ 使用 recipe 并检查签名；已有 AutoRound mode1 仍映射到外部脚本 CLI，不能写成所有路径均已统一到 Python recipe |
 | [公共 GPTQ Linear 转换](../../xhmodel_merak/xh_llm/base_llm_model.py)、[反量化转换](../../xhmodel_merak/xh_llm/_dequant_converter.py) | 将量化载荷转为可导出的权重/模块并保留所需量化信息，是 ModelZoo 的消费适配；格式真值由生产端定义 |
-| [Ling 量化适配](../../xhmodel_merak/xh_llm/models/ling_3_flash/quant_adapter.py) | 仍直接调用 GPTQModel/AutoRound，并带优化期 guard、层策略和产物配置修补；可复用的量化行为/写入修复应归回量化侧，部署配置映射留在本仓库 |
+| [Ling 量化适配](../../xhmodel_merak/xh_llm/models/ling_3_flash/quant_adapter.py) | GPTQ 与 AutoRound 都调用 `gptqmodel.recipes.ling3_flash:quantize_ling3_flash`；后端先吸收浮点 MLA，再量化、保存新布局。ModelZoo 复用整数载荷，保留 K/V 独立 SEFP cache；边界见 [专项说明](../modeling/structures/ling-mla-quantization.md) |
 | [Laguna 兼容模块](../../xhmodel_merak/xh_llm/models/laguna/gptqmodel_compat.py) | 补 GPTQModel 注册表的 `register_laguna_gptqmodel()` 是量化侧接入遗留；同文件中的 `restore_gptqmodel_moe_structure()` 是消费侧结构恢复，两者不按文件名一并迁移 |
 
 新增接入优先使用已存在的公开 recipe；缺少能力时在量化库实现接口，再由 ModelZoo 对接。
 迁移旧兼容逻辑需先有可用的后端版本与消费回归，不能仅因文档划了边界就删除仍在用的修补。
-本次只明确职责，没有声称已经完成这些跨仓库迁移。
+各路径的迁移状态以上表为准，不能由某个 recipe 已接通推断其他模型也已完成。
 
 ## 验证边界
 

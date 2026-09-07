@@ -160,6 +160,10 @@ class XHLing3FlashModel(XHQwen3NextModel):
                     get_xhquant_logger().info(
                         "Ling generation_config.json not found; using the config-derived defaults."
                     )
+        if getattr(config, "ling_mla_layout", "hf_unabsorbed") != "hf_unabsorbed":
+            from gptqmodel.models.definitions.ling3_flash_mla import validate_ling_mla_model
+
+            validate_ling_mla_model(hf_model)
         return hf_model
 
     def _get_language_model(self, hf_model: Any) -> Any:

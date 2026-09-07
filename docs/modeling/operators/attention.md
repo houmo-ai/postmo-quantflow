@@ -26,6 +26,13 @@
 不属于当前 CI。当前 [Qwen block 导出](../../../benchmark_test/ci_test_transformer5.16.0/test_qwen35_35b_a3b_block_export.py)
 检查其固定配置的导出链路，并不穷举五路精度组合；新增这类回归应在当前 CI 内补用例与 impact。
 
+## MLA：权重融合不等于共享量化 cache
+
+Ling 的 XH2a 路径允许 Q/K 与 V/output 权重吸收，但保持 Q/K 的 D=C+R、V 的 D=C。
+K/V 的 SEFP 指数对齐轴不同，不能把相同浮点 latent 当成可共享的量化张量。
+融合必须在 GPTQ/AutoRound 之前完成，导出时保留融合后 Linear 的整数载荷。
+具体公式、gate 限制、softmax scale 与验证见 [Ling MLA](../structures/ling-mla-quantization.md)。
+
 ## MaskAdd：数学式相似不代表图契约相同
 
 [Gemma4 视觉适配](../../../xhmodel_merak/xh_llm/models/gemma4_series/gemma4_series_vision_model.py)
