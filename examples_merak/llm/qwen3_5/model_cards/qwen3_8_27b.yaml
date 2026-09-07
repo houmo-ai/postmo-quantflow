@@ -132,4 +132,4 @@ internal:
       examples:
       - examples_merak/llm/qwen3_5
       readme:
-      - examples_merak/llm/qwen3_5/README.md
+      - examples_merak/llm/qwen3_5/readme.md

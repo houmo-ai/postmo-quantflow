@@ -34,7 +34,7 @@ class Qwen3NextWorkflow(Qwen35Workflow):
     }
     _METHOD_QUANT_KEYS = {
         "gptq": {"max_quant_layers", "validation"},
-        "autoround": {"sym", "iters", "seed", "deterministic", "format"},
+        "autoround": {"sym", "data_type", "iters", "seed", "deterministic", "format"},
     }
     _COMMON_SECTION_KEYS = {
         "moe": {
@@ -162,13 +162,14 @@ class Qwen3NextWorkflow(Qwen35Workflow):
             result = quantize_qwen3_next(
                 **common_kwargs,
                 sym=bool(quant_cfg.get("sym", True)),
-                iters=int(quant_cfg.get("iters", 200)),
+                data_type=str(quant_cfg.get("data_type", "int_sym_xh")),
+                iters=int(quant_cfg.get("iters", 400)),
                 dataset=str(calibration.get("dataset", "NeelNanda/pile-10k")),
                 calibration_jsonl=calibration.get("jsonl"),
                 batch_size=int(runtime.get("batch_size", quant_cfg.get("batch_size", 8))),
                 gradient_accumulate_steps=int(runtime.get("gradient_accumulate_steps", 1)),
                 low_gpu_mem_usage=bool(runtime.get("low_gpu_mem_usage", True)),
-                nsamples=int(calibration.get("nsamples", quant_cfg.get("nsamples", 128))),
+                nsamples=int(calibration.get("nsamples", quant_cfg.get("nsamples", 256))),
                 seqlen=int(calibration.get("seqlen", quant_cfg.get("seqlen", 2048))),
                 seed=int(quant_cfg.get("seed", 42)),
                 deterministic=bool(quant_cfg.get("deterministic", False)),

@@ -111,8 +111,9 @@ def build_qwen35_autoround_kwargs(
         "bits": int(quant_cfg.get("bits", 4)),
         "group_size": group_size,
         "sym": _as_bool(quant_cfg.get("sym", True)),
-        "iters": int(quant_cfg.get("iters", 200)),
-        "nsamples": int(calibration_cfg.get("nsamples", quant_cfg.get("nsamples", 128))),
+        "data_type": str(quant_cfg.get("data_type", "int_sym_xh")),
+        "iters": int(quant_cfg.get("iters", 400)),
+        "nsamples": int(calibration_cfg.get("nsamples", quant_cfg.get("nsamples", 256))),
         "seqlen": int(calibration_cfg.get("seqlen", quant_cfg.get("seqlen", 2048))),
         "batch_size": int(runtime_cfg.get("batch_size", quant_cfg.get("batch_size", default_batch_size))),
         "dataset": _resolve_autoround_dataset_value(
@@ -258,7 +259,7 @@ def _calibration_overrides_gptqmodel_defaults(calibration_cfg: Mapping[str, Any]
     """Return whether ``quant.calibration`` should shape GPTQModel CLI args.
 
     The shared Qwen3.5 YAMLs are AutoRound-first and carry AutoRound defaults
-    under ``quant.calibration`` (pile-10k, 128 samples, seqlen 2048).
+    under ``quant.calibration`` (pile-10k, 256 samples, seqlen 2048).
     When users switch only ``quant.algorithm`` to ``gptqmodel`` we must keep the
     README-verified GPTQModel defaults instead of inheriting those AutoRound
     values.  However explicit GPTQModel calibration overrides still need to be
@@ -273,7 +274,7 @@ def _calibration_overrides_gptqmodel_defaults(calibration_cfg: Mapping[str, Any]
     if str(dataset) not in _LEGACY_AUTOROUND_DATASETS | {DEFAULT_AUTOROUND_DATASET, DEFAULT_AUTOROUND_DATASET_PATH}:
         return True
     return (
-        calibration_cfg.get("nsamples", 128) != 128
+        calibration_cfg.get("nsamples", 256) not in {128, 256}
         or calibration_cfg.get("seqlen", 2048) != 2048
     )
 

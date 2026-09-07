@@ -22,6 +22,17 @@ configs_merak/workflows/xh2a/llm_models/qwen3_next/80b_a3b/
   qwen3_next_80b_a3b_full_mtp_gptq.yaml
 ```
 
+AutoRound configurations default to `quant.data_type: int_sym_xh` (positive
+scales on the signed integer grid). GPTQModel's
+`quantize_qwen3_next(method="autoround")` now runs the vendored AutoRound backend,
+including expert unfusing, mixed W4/W8 packing and unchanged `mtp.*` passthrough.
+Use the matching GPTQModel source containing `qwen3_next_autoround.py`; older
+GPTQ-only recipes cannot run this path. GPTQ configurations and existing
+checkpoints are unchanged. AutoRound defaults are n256/i400, bs8/ga1,
+HF `NeelNanda/pile-10k`, and deterministic mode off. `quant.deterministic: true`
+enables strict deterministic algorithms and eager full attention. The output
+must be empty (or new); the recipe never overwrites an existing checkpoint.
+
 The shared workflow runner can be used directly (the Qwen3-Next workflow is a
 text-only specialization of `Qwen35Workflow`):
 

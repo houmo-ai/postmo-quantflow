@@ -45,11 +45,12 @@ quant:
   group_size: 64
   rotation: false
   sym: true
-  iters: 200
+  data_type: int_sym_xh
+  iters: 400
   format: auto_round:gptqmodel
   calibration:
     dataset: NeelNanda/pile-10k
-    nsamples: 128
+    nsamples: 256
     seqlen: 2048
   runtime:
     batch_size: 8
