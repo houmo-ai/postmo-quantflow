@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "paddleocr-vl-model",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/__init__.py",
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/config.py",
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/hf.py",
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/_llm_model_impl.py",
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/data.py",
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/generation.py",
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/model.py",
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/runtime.py",
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/workflow.py",
+      "configs_merak/workflows/**/paddleocr_vl/**",
+      "examples_merak/llm/paddleocr_vl/paddleocr_vl_workflow.py"
+    ]
+  }]
+}

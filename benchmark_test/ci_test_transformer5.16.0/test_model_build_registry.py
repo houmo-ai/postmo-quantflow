@@ -32,6 +32,7 @@ EXPECTED_VARIANTS = {
     "gemma4-31b": ["full"],
     "gemma4-26b-a4b": ["full"],
     "ling-3.0-flash": ["full"],
+    "paddleocr-vl-1.6": ["full"],
     "pi0.5-libero": ["lerobot-h50"],
     "kokoro-82m-v1.1-zh": ["full"],
 }
@@ -49,7 +50,7 @@ def test_distributed_catalog_preserves_the_full_public_description_snapshot():
     # First-release API: one public model_id; export naming stays internal.
     payload = json.dumps(descriptions, sort_keys=True, separators=(",", ":")).encode()
 
-    assert hashlib.sha256(payload).hexdigest() == "56847513a2af0d3c74c4b60da2fe4249ceeb4eeeb7c334780455f767619e0045"
+    assert hashlib.sha256(payload).hexdigest() == "6fbaf4ee9883fb1ad26f9f3f542286c12e176c98245838a8b06747105deb1550"
 
 
 @pytest.mark.parametrize("model_id", EXPECTED_VARIANTS)
@@ -175,6 +176,9 @@ def test_adapter_refs_are_resolved_through_registered_targets():
     assert get_adapter_spec("inference", "qwen.inference").target == (
         "xhmodel_merak.model_integrations.qwen.inference:adapter"
     )
+    assert get_adapter_spec("inference", "paddleocr-vl.inference").target == (
+        "xhmodel_merak.model_integrations.paddleocr_vl.inference:adapter"
+    )
     assert get_artifact_format_spec("autoregressive").validator == (
         "xhmodel_merak.model_integrations.autoregressive.artifact:validate_artifact"
     )
@@ -186,7 +190,14 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
         json.dumps(description)
         assert description["input_schema"]["type"] == "object"
         assert description["output_schema"]["type"] == "object"
-        if not model.startswith(("macaron", "qwen", "ornith")) or model == "qwen3-next-80b-a3b":
+        if model == "paddleocr-vl-1.6":
+            assert description["vision"] == {
+                "mode": "dynamic_token_gears",
+                "profile": "visualm96-196-384-704-1024-1280",
+                "image_token_gears": [96, 196, 384, 704, 1024, 1280],
+                "static_profiles": [],
+            }
+        elif not model.startswith(("macaron", "qwen", "ornith")) or model == "qwen3-next-80b-a3b":
             assert description["vision"] is None
         else:
             assert description["vision"] == {
@@ -197,6 +208,35 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
             }
             assert "448x448" not in json.dumps(description)
             assert "896x896" not in json.dumps(description)
+
+
+def test_paddleocr_vl_description_exposes_document_runtime_contract():
+    description = describe_model("paddleocr-vl-1.6", full=True)
+
+    assert description["workflow_variants"] == [
+        {
+            "name": "full",
+            "workflow_config": (
+                "configs_merak/workflows/xh2a/llm_models/paddleocr_vl/"
+                "paddleocr_vl_1_6_r1_autoround_w8_token_gears.yaml"
+            ),
+            "speculative_mode": None,
+            "requires_lora": False,
+            "required_sources": [],
+            "extra_components": [],
+            "context_workflows": [],
+        }
+    ]
+    assert description["input_schema"]["required"] == ["prompt", "image"]
+    assert description["input_schema"]["properties"]["max_new_tokens"] == {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 4096,
+        "default": 1024,
+    }
+    assert description["defaults"]["vision_profile"] == "visualm96-196-384-704-1024-1280"
+    assert description["vision"]["image_token_gears"] == [96, 196, 384, 704, 1024, 1280]
+    assert description["required_resources"] == ["calibration"]
 
 
 def test_describe_model_returns_independent_schema_copies():
@@ -214,6 +254,7 @@ def test_text_output_schema_matches_typed_inference_result_fields():
         description = describe_model(model, full=True)
         if description["task"] not in {
             "multimodal-generation",
+            "document-understanding",
             "text-generation",
             "vision-language-generation",
         }:
@@ -239,8 +280,16 @@ def test_all_public_workflow_configs_exist_and_match_registered_quantization():
                 else:
                     assert quant is None, config_path
                 if recipe.artifact_format == "autoregressive":
-                    quant_type = data["export"]["model"]["quant_scheme"]["quant_type"]
-                    assert set(recipe.deployment_precision.values()) == {quant_type}, config_path
+                    model_config = data["export"]["model"]
+                    quant_type = model_config["quant_scheme"]["quant_type"]
+                    visual_quant_type = quant_type
+                    if quant.get("quantize_vision"):
+                        visual_quant_type = model_config["visual_config"]["quant_scheme"]["quant_type"]
+                    expected_precision = {
+                        component: visual_quant_type if component == "visual" else quant_type
+                        for component in recipe.components
+                    }
+                    assert recipe.deployment_precision == expected_precision, config_path
                 for resource_name, dotted_path in recipe.resource_config_bindings:
                     if resource_name in recipe.required_resources:
                         continue

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "paddleocr-vl-workflow",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/paddleocr_vl/*",
+      "configs_merak/workflows/**/paddleocr_vl/**",
+      "examples_merak/llm/paddleocr_vl/prepare_calibration.py",
+      "examples_merak/llm/paddleocr_vl/paddleocr_vl_workflow.py"
+    ]
+  }]
+}

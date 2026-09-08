@@ -1,0 +1,25 @@
+quant: null
+export:
+  model:
+    model_type: PaddleOCRVLForConditionalGeneration
+    model_name: paddleocr_vl_1_6
+    chip_arch: XH2a
+    hf_model: null
+    dtype: float16
+    context_max_length: 16384
+    max_pe_length: 16384
+    prefill_chunk_length: 256
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      quant_type: w8a8_sefp
+    visual_config:
+      max_size_h: 896
+      max_size_w: 896
+      patch_size: 14
+      spatial_merge_size: 2
+      visual_input_mode: patches
+      image_token_gears: [96, 196, 384, 704, 1024, 1280]
+      image_token_capacity: 1280
+      quant_scheme:
+        quant_type: w8a8_sefp

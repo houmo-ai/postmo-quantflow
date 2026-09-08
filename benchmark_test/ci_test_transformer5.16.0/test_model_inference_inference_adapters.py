@@ -14,6 +14,7 @@ from xhmodel_merak.model_inference.inputs import validate_inputs
 from xhmodel_merak.model_integrations.autoregressive import inference as _autoregressive
 from xhmodel_merak.model_integrations.gemma4 import inference as gemma4
 from xhmodel_merak.model_integrations.ling import inference as ling
+from xhmodel_merak.model_integrations.paddleocr_vl import inference as paddleocr_vl
 from xhmodel_merak.model_integrations.pi05 import inference as pi05
 from xhmodel_merak.xh_other_model.models.pi05 import compact_runtime
 
@@ -24,6 +25,7 @@ from xhmodel_merak.xh_other_model.models.pi05 import compact_runtime
         ("qwen.inference", "xhmodel_merak.model_integrations.qwen.inference"),
         ("gemma4.inference", "xhmodel_merak.model_integrations.gemma4.inference"),
         ("ling.inference", "xhmodel_merak.model_integrations.ling.inference"),
+        ("paddleocr-vl.inference", "xhmodel_merak.model_integrations.paddleocr_vl.inference"),
         ("pi05.inference", "xhmodel_merak.model_integrations.pi05.inference"),
         ("kokoro.inference", "xhmodel_merak.model_integrations.kokoro.inference"),
     ),
@@ -77,6 +79,38 @@ def test_ling_adapter_returns_text_result(monkeypatch, tmp_path: Path) -> None:
     assert result.output_text == "answer"
     assert result.output_tokens == 2
     assert captured.get("cuda_graph", False) is False
+
+
+def test_paddleocr_vl_adapter_requires_image_and_returns_text(monkeypatch, tmp_path: Path) -> None:
+    image = tmp_path / "document.png"
+    image.touch()
+    captured = {}
+
+    def run_paddleocr_generation(*args, **kwargs):
+        captured.update(kwargs)
+        return "recognized", 3, 0.5, 6.0, {"prompt_tokens": 4}
+
+    monkeypatch.setattr(paddleocr_vl, "run_paddleocr_generation", run_paddleocr_generation)
+    kwargs = _adapter_kwargs(
+        tmp_path,
+        "paddleocr-vl-1.6",
+        {"prompt": "OCR:", "image": str(image)},
+    )
+
+    result = paddleocr_vl.adapter.run(**kwargs)
+
+    assert result.output_type == "text"
+    assert result.output_text == "recognized"
+    assert result.output_tokens == 3
+    assert captured["image_path"] == image.resolve()
+    assert captured["max_new_tokens"] == 1024
+    assert captured["enable_golden"] is False
+
+    with pytest.raises(ModelError) as caught:
+        paddleocr_vl.adapter.run(
+            **_adapter_kwargs(tmp_path, "paddleocr-vl-1.6", {"prompt": "OCR:"})
+        )
+    assert caught.value.code == ErrorCode.INVALID_PARAMETER
 
 
 def test_autoregressive_runtime_disables_token_type_ids(monkeypatch, tmp_path: Path) -> None:

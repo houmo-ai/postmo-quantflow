@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "paddleocr-vl-preprocessing-and-case-evidence",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/paddleocr_vl/processing.py",
+        "examples_merak/llm/paddleocr_vl/evaluate_cases.py"
+      ]
+    }
+  ]
+}

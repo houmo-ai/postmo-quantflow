@@ -1,0 +1,198 @@
+schema_version: 2
+external:
+  model:
+    id: paddleocr_vl_1_6
+    family: paddleocr_vl
+    display_name: PaddleOCR-VL 1.6
+  parameters:
+    total: 958588736
+    active: 958588736
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 896, 896, 3]
+    prefill: null
+    decode: null
+    unit: TFLOPs
+    status: missing
+    note: HF processor 保持动态 smart_resize；新视觉 ABI 使用 96/196/384/704/1024/1280 合并后 token 容量档位。
+  precision:
+    float_format: bfloat16 source; float16 deployment baseline
+    quantized_format: language W8A8-SEFP; vision W8A16H1-SEFP; GPTQ W8G64 weights
+    comparisons:
+    - name: native_document_visual_anchor_recall
+      dataset: QTL-510/CMS-787 7 个原生尺寸案例，134 个部分人工标注锚点
+      metric: anchor recall (%)
+      float: 85.82
+      quant: 91.04
+      delta: 5.22
+      evidence: work_dirs/paddleocr_vl/diagnostics/quarot_autoround_w8_vision_w8a16_accuracy_v1.md
+      status: verified
+  owner: zukang.xu
+internal:
+  model:
+    type: llm_models
+    modality:
+    - image
+    - text
+    task:
+    - optical-character-recognition
+    - document-parsing
+    - table-recognition
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - multimodal
+    - paddleocr
+    - quarot
+    - autoround
+  source:
+    provider: PaddlePaddle
+    name: PaddlePaddle/PaddleOCR-VL-1.6
+    url: https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6
+    license: Apache-2.0
+    raw_model_path: /data01/datasets/PaddleOCR-VL-1.6
+  components:
+  - id: model
+    display_name: PaddleOCR-VL 1.6
+    type: llm_models
+    role: 文档图像 OCR、表格识别与结构化解析
+    precision: language W8A8-SEFP + vision W8A16H1-SEFP
+    inputs:
+    - name: image
+      type: image
+      required: true
+      description: RGB 文档图像。
+    - name: prompt
+      type: string
+      required: true
+      description: OCR、表格识别或文档解析提示词。
+    outputs:
+    - name: generated_text
+      type: string
+      required: true
+      description: OCR 文本、OTSL 表格或文档结构序列。
+  - id: language_model
+    display_name: PaddleOCR-VL language decoder
+    type: llm_models
+    role: 图文条件生成与 OCR/表格序列解码
+    precision: GPTQ W8G64 weights + W8A8-SEFP deployment
+    inputs:
+    - name: input_ids
+      type: tensor
+      dtype: int64
+      required: true
+      description: 处理后的文本与图像占位 token。
+    - name: image_embeddings
+      type: tensor
+      dtype: float16
+      required: true
+      description: Vision encoder 和跨模态 projector 生成的图像特征。
+    outputs:
+    - name: logits
+      type: tensor
+      dtype: float16
+      required: true
+      description: 自回归生成 logits。
+  - id: vision_encoder
+    display_name: PaddleOCR-VL vision encoder
+    type: vision_models
+    role: 文档图像编码
+    precision: GPTQ W8G64 weights + W8A16H1-SEFP deployment
+    inputs:
+    - name: pixel_values
+      type: tensor
+      dtype: float16
+      required: true
+      description: HF processor 按原图动态生成并由 host 重排、补齐到 token gear 的 RGB patch。
+    outputs:
+    - name: visual_features
+      type: tensor
+      dtype: float16
+      required: true
+      description: 合并后的视觉 token 特征。
+  - id: projector
+    display_name: Multimodal projector
+    type: projector
+    role: 将视觉特征投影到语言隐藏空间
+    precision: float16
+    inputs:
+    - name: visual_features
+      type: tensor
+      dtype: float16
+      required: true
+      description: Vision encoder 输出。
+    outputs:
+    - name: image_embeddings
+      type: tensor
+      dtype: float16
+      required: true
+      description: 语言模型使用的图像 embedding。
+  io:
+    inputs:
+    - name: image
+      type: image
+      required: true
+      description: RGB 文档图像；HF processor 生成的视觉 token 数需不超过 1280。
+    - name: prompt
+      type: string
+      required: true
+      description: OCR、表格识别或文档解析提示词。
+    outputs:
+    - name: generated_text
+      type: string
+      required: true
+      description: OCR 文本、OTSL 表格或文档结构序列。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/paddleocr_vl/paddleocr_vl_1_6_r1_autoround_w8_token_gears.yaml
+    model_dir: /data01/datasets/PaddleOCR-VL-1.6
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8_sefp
+      components:
+        language_weights: gptq_w8g64
+        language_quant_scheme: w8a8_sefp
+        vision_weights: gptq_w8g64
+        vision_quant_scheme: w8a16h1_sefp
+        projector: float16
+  runtime:
+    device: cuda:0
+    seed: 42
+    work_dir: work_dirs/merak_delivery/paddleocr_vl_1_6
+  release:
+    version_id: paddleocr_vl_1_6_quarot_autoround_w8_vision_w8a16_20260909
+    target_status: accuracy_passed
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: PaddleOCR-VL 1.6 language and vision HMONNX
+      release_path: work_dirs/paddleocr_vl/runs/quarot_autoround_w8_vision_w8a16_native_profiles_export_v1
+      release_url: ''
+      version: '20260909'
+      date: '2026-09-09'
+      quant_type: language_w8a8_sefp+vision_w8a16h1_sefp
+      artifact_type: hmonnx
+      status: ready
+  presentation:
+    summary: PaddleOCR-VL 1.6 在 XH2a 上的文档 OCR 部署，语言和 Vision encoder 使用 QuaRot + AutoRound GPTQ W8 权重，语言激活使用 W8A8-SEFP，Vision 激活使用 W8A16H1-SEFP。
+    demo:
+      kind: command
+      entrypoint: examples_merak/llm/paddleocr_vl/evaluate_cases.py
+    limitations:
+    - 卡片登记的现有 HMONNX 是历史精确分辨率 ABI；token-gear 实现需要重新导出产物后才能用于动态 patch grid。
+    - 134 个锚点是部分人工标注，不能代表完整生产文档集的 CER、WER 或表格准确率。
+    - 银行区域已标注单元格为 35/37 精确匹配，菜单和手写案例仍存在误识别。
+    - Vision W8A8-SEFP 在两个整页案例发生重复生成，因此交付配置固定使用 Vision W8A16H1-SEFP。
+    evidence:
+      examples:
+      - examples_merak/llm/paddleocr_vl
+      readme:
+      - examples_merak/llm/paddleocr_vl/README.md

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "paddleocr-vl-vision",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/paddleocr_vl/**",
+        "benchmark_test/ci_test_transformer5.16.0/test_paddleocr_vl_vision.py"
+      ]
+    }
+  ]
+}

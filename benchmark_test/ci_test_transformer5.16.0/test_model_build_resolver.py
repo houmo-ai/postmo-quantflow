@@ -1,4 +1,5 @@
 import hashlib
+import importlib
 import json
 import re
 from pathlib import Path
@@ -479,15 +480,40 @@ def test_materialized_workflow_preserves_upstream_visual_contract(model_dir, tmp
 
 
 def test_every_public_vlm_variant_declares_the_registered_visual_contract():
-    from xhmodel_merak.model_integrations.qwen.planning import _validate_visual_workflow
-
     for recipe in list_recipes():
         if recipe.vision_profile is None:
             continue
+        assert recipe.config_resolver is not None
+        planning_module, _, _ = recipe.config_resolver.partition(":")
+        validate_visual_workflow = importlib.import_module(planning_module)._validate_visual_workflow
         for variant in recipe.variants:
             for workflow in {variant.workflow_config, *(path for _, path in variant.context_workflows)}:
                 data = yaml.safe_load(resolve_workflow_config(workflow).read_text(encoding="utf-8"))
-                _validate_visual_workflow(recipe, data)
+                validate_visual_workflow(recipe, data)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("image_token_gears", [96, 196]),
+        ("image_token_capacity", 1024),
+        ("patch_size", 16),
+        ("spatial_merge_size", 4),
+        ("max_size_w", 448),
+        ("max_size_h", 448),
+    ],
+)
+def test_paddleocr_plan_rejects_visual_workflow_drift(field, value):
+    from xhmodel_merak.model_integrations.paddleocr_vl.planning import _validate_visual_workflow
+
+    recipe = get_recipe("paddleocr-vl-1.6")
+    workflow = resolve_workflow_config(recipe.default_variant.workflow_config)
+    data = yaml.safe_load(workflow.read_text(encoding="utf-8"))
+    data["export"]["model"]["visual_config"][field] = value
+
+    with pytest.raises(ModelError, match="PaddleOCR-VL Workflow visual contract") as error:
+        _validate_visual_workflow(recipe, data)
+    assert field in error.value.details["mismatches"]
 
 
 @pytest.mark.parametrize(

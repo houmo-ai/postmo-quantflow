@@ -1174,6 +1174,28 @@ The following paths are used:
 Users are responsible for complying with the Apache License, Version 2.0.
 
 ----------------------------------------------------------------------
+PaddleOCR-VL Merak adapters (Transformers 5.16.1)
+----------------------------------------------------------------------
+Component Name: Transformers PaddleOCR-VL implementation
+Version: 5.16.1
+Source:
+https://github.com/huggingface/transformers/tree/v5.16.1/src/transformers/models/paddleocr_vl
+Copyright Statement:
+Copyright 2025 The PaddlePaddle Team and The HuggingFace Inc. team. All rights reserved.
+Copyright 2026 HOUMO AI (modifications)
+License: Apache License, Version 2.0
+License Text: licenses/transformers/LICENSE
+Derived graph adapters:
+    xhmodel_merak/xh_llm/models/paddleocr_vl/_llm_model_impl.py
+    xhmodel_merak/xh_llm/models/paddleocr_vl/_vision_model_impl.py
+Modifications express native attention, M-RoPE, cache and fixed-grid vision
+semantics using Merak/xhquant graph interfaces. The remaining model package
+loads the installed native Transformers implementation rather than vendoring it.
+The model checkpoint used for validation is PaddlePaddle/PaddleOCR-VL-1.6,
+revision c5630abae1d940eafe0697512a0325494b02ab42; its weights are not source files
+included in this notice or committed with the adapters.
+
+----------------------------------------------------------------------
 PaddleOCR-VL
 ----------------------------------------------------------------------
 Component Name: PaddleOCR-VL

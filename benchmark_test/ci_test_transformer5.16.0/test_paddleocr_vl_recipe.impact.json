@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "paddleocr-vl-recipe",
+      "patterns": [
+        "recipes/**",
+        "xhmodel_merak/model_integrations/paddleocr_vl/**",
+        "configs_merak/workflows/**/paddleocr_vl/**",
+        "examples_merak/llm/paddleocr_vl/model_cards/**",
+        "benchmark_test/ci_test_transformer5.16.0/test_paddleocr_vl_recipe.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_paddleocr_vl_recipe.impact.json"
+      ]
+    }
+  ]
+}
