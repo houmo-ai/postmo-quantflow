@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "cosyvoice3-yuehui-export-contract",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/cosyvoice3/**",
+        "configs_merak/workflows/yuehui/other_models/cosyvoice3/**",
+        "examples_merak/tts/cosyvoice3/**"
+      ]
+    }
+  ]
+}

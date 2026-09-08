@@ -26,14 +26,6 @@ export:
     hift: w8a16_sefp
     spk_embed_affine_layer: w8a16h1_sefp
     pre_lookahead_layer: w8a16h1_sefp
-  source_onnx:
-    llm_decoder: llm_decoder.onnx
-    speech_tokenizer_v3: speech_tokenizer_v3.onnx
-    campplus: campplus.onnx
-    flow_decoder: flow_decoder_estimator_fp32.onnx
-    hift: hift.onnx
-    spk_embed_affine_layer: spk_embed_affine_layer.onnx
-    pre_lookahead_layer: pre_lookahead_layer.onnx
   shapes:
     campplus:
       batch_size: 1

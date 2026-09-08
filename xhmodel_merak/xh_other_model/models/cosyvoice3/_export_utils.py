@@ -554,9 +554,17 @@ def to_xh_device_type(target_device: str):
     """Map the workflow ``target_device`` string to ``xhquant.api.DeviceType``."""
     from xhquant.api import DeviceType
 
-    if target_device != "XH2a":
-        raise ValueError(f"CosyVoice3 workflow currently supports target_device='XH2a', got {target_device!r}")
-    return DeviceType.XH2a
+    device_types = {
+        "XH2a": DeviceType.XH2a,
+        "YueHui": DeviceType.YueHui,
+    }
+    try:
+        return device_types[target_device]
+    except KeyError as exc:
+        supported = ", ".join(device_types)
+        raise ValueError(
+            f"Unsupported CosyVoice3 target_device {target_device!r}; expected one of: {supported}"
+        ) from exc
 
 
 def build_quant_config(target_device: str, quant_type: str, **overrides: Any) -> Any:

@@ -64,7 +64,7 @@ _DEFAULT_SOURCE_ONNX = {
     "llm_decoder": "llm_decoder.onnx",
     "speech_tokenizer_v3": "speech_tokenizer_v3.onnx",
     "campplus": "campplus.onnx",
-    "flow_decoder": "flow_decoder_estimator_fp32.onnx",
+    "flow_decoder": "flow.decoder.estimator.fp32.onnx",
     "hift": "hift.onnx",
     "spk_embed_affine_layer": "spk_embed_affine_layer.onnx",
     "pre_lookahead_layer": "pre_lookahead_layer.onnx",

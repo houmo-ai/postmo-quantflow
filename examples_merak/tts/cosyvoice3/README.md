@@ -33,11 +33,12 @@ additionally has its own `meta_info.json` (read by `XHQwen2HMONNXModel`):
   - `<model_dir>/CosyVoice-BlankEN/` (or `<model_dir>`) — Qwen2 HF config.
   - `<model_dir>/onnx/` — source onnx files for the onnx-based submodels:
     `llm_decoder.onnx`, `speech_tokenizer_v3.onnx`, `campplus.onnx`,
-    `flow_decoder_estimator_fp32.onnx`, `hift.onnx`,
+    `flow.decoder.estimator.fp32.onnx`, `hift.onnx`,
     `spk_embed_affine_layer.onnx`, `pre_lookahead_layer.onnx`.
 
-Source onnx paths and the llm checkpoint can be overridden in the workflow YAML
-(`export.onnx_dir`, `export.llm_checkpoint`, `export.source_onnx`).
+Source onnx filenames are resolved by the workflow. The source directory and
+llm checkpoint can be overridden with `export.onnx_dir` and
+`export.llm_checkpoint`.
 
 ## Export
 
@@ -59,6 +60,23 @@ CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD conda run -n <env_name> \
     --dump-golden \
     --overwrite
 ```
+
+Export the verified YueHui W8A16 baseline:
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD conda run -n <env_name> \
+  python examples_merak/tts/cosyvoice3/cosyvoice3_workflow.py \
+    --config-path \
+      configs_merak/workflows/yuehui/other_models/cosyvoice3/cosyvoice3_0_5b.yaml \
+    --model-dir <model_dir> \
+    --export-output-dir work_dirs/CosyVoice3-0.5B_YueHui_W8A16 \
+    --device cuda:0 \
+    --overwrite
+```
+
+This baseline intentionally keeps all components at W8A16. NVFP4 weight import
+is outside the scope of this workflow configuration and must be handled as a
+separate weight-format path.
 
 Override a single component or quant type:
 
@@ -197,4 +215,3 @@ Non-LLM components do **not** have their own `meta_info.json`; their metadata
   HMONNX inference model used by runtime demos/eval).
 - CosyVoice3 is sourced from
   https://github.com/FunAudioLLM/CosyVoice under Apache License 2.0.
-

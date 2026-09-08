@@ -114,6 +114,17 @@ class XHQwen2HMONNXModel(LLMONNXModel):
         self.pad_token_id = 151645
         self._phase_prefill = None
 
+    def _set_device(self, device):
+        super()._set_device(device)
+        if self.llm_decoder_session is not None:
+            self.llm_decoder_session.to(device)
+        return self
+
+    def _set_exec_device(self, device):
+        super()._set_exec_device(device)
+        if self.llm_decoder_session is not None:
+            self.llm_decoder_session.exec_device = device
+
     def _validate_meta(self, meta_info: dict, model_dir: str) -> None:
         missing = [k for k in self._REQUIRED_META_KEYS if k not in meta_info]
         if missing:
