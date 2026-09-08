@@ -5,30 +5,15 @@ export:
   model:
     type: XHKokoroModel
 
-  graph_mode: bucketed_precision_split
-  # Four production capacity gears: T32/F160, T64/F320,
-  # T128/F640, and T256/F1280. Host retries the next gear only when the
-  # predicted duration exceeds the current F capacity.
+  # Four paired routes; no T/F Cartesian product.
   token_buckets: [32, 64, 128, 256]
   audio_seconds_buckets: [4, 8, 16, 32]
-  lstm_variants: [native, decomposed]
-
   opset: 17
   seed: 1234
-  simplify: false
   convert_hmonnx: true
-  allow_decomposed_failure: true
-  # Required to inline pkg.onnxscript.torch_lib functions in decomposed LSTM
-  # exports. This is exporter normalization, not a Kokoro post-export rewrite.
-  torch_onnx_internal_optimize: true
 
-  # Real HMONNX audio/spectrum validation rejects W16A16 phase accumulation.
-  # Keep only CumSum -> phase interpolation -> Sin on Host FP32.
-  phase_on_npu: false
-  stft_pad_mode: length_aware_reflect
-  stft_phase_mode: cordic
-  f0_norm_mode: adain
-
+  # HMONNX always decomposes LSTM at export. F0 stays on NPU.
+  # F0 upsampling, phase preparation, CumSum and Sin use CPU FP32.
   components:
     text_duration:
       quant_type: w16a16_sefp

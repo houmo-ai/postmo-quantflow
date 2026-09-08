@@ -104,6 +104,23 @@ kernel 与 lowering 留在工具链。不同模型共用同一能力时才抽取
 不新增空 registry、不自动把 M50/YH/XH3 互作别名、不把 Markdown 当运行时配置。
 具体已有入口和未知项见 [目标设备](../modeling/targets/README.md)。
 
+## 非 LLM 的发布产物
+
+新增非 LLM 发布沿用 [HM 模型版本发布命名规则](https://houmo.feishu.cn/wiki/WbX8wq9tpihXeHkzAy7caqMZnUh)
+的组织原则：小写 `hmquant_<平台>_<上游模型名>_<精度>_<尺寸>_<日期>` 前缀，
+子模型按“角色＋实际输入档位”平铺，模型、权重与 `step_0` 同属一个组件目录。
+prefill/context 是 LLM 语义，非 LLM 应换成实际部署维度，不填无意义的 LLM 长度；
+例如 Kokoro 使用成对的 T/F 档位。具体格式及命令放在模型 README，
+不靠文件名表达优化过程或历史导出模式。
+
+Golden 沿实际 runtime 数据流采集，metadata 记录使用的输入、档位、执行位置和完成状态。
+step 内模型/权重用包内相对软链接，ZIP 保留软链接；不手工重命名 ONNX 引用的
+external_data。小模型允许沿用 SDK 的内嵌权重存储，实际引用以 ONNX 和 metadata 为准。
+随包保留上游文本配置及必要的 Host 常量，运行时路径相对发布根目录，不能依赖导出机的
+checkpoint 绝对路径。数值对比留在 demo/验证程序，`quant/export` 不承担精度验收。
+
+这项约定用于新接入或本次重构的发布路径，不表示其他历史非 LLM workflow 已完成迁移。
+
 ## CI 是架构的一部分
 
 所有新增测试均进入 [benchmark_test/ci_test_transformer5.16.0](../../benchmark_test/ci_test_transformer5.16.0/README.md)。

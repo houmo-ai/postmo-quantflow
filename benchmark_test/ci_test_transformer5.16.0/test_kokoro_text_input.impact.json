@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "kokoro-custom-text-input",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/kokoro/text.py",
+        "examples_merak/audio/kokoro/bucketed_inference_demo.py"
+      ]
+    }
+  ]
+}

@@ -1,422 +1,141 @@
-# Kokoro v1.1-zh：XH2a ModelZoo 最佳适配方案
+# Kokoro v1.1-zh / XH2a
 
-本目录对应 `HMSW-4679`、`HMSW-4680` 和 `CMS-706`。正式部署采用独立的 T/F
-bucket、三张 NPU 图，以及一段很窄的 CPU FP32 相位计算：
+当前方案固定为三张 NPU 图和一张 CPU FP32 相位图，只发布展开 LSTM 的
+HMONNX。浮点 ONNX 保留标准 forward LSTM；有效前缀反转由图外输入
+`reverse_indices` 和图内 Gather 表达。量化及最终 LSTM 展开交给 xhquant，
+Kokoro 不修改 xhquant，也不对导出的 ONNX 做额外图优化。
 
-```text
-ZHG2P / tokenization / voice pack                              Host
-        |
-        | 选择最小 T bucket
-        v
-text_duration: Front Base + Duration/Text Encoder             NPU W16A16
-        |
-        | duration_features / text_encoded / duration_logits
-        v
-duration -> 真实 F -> 选择最小 F bucket -> index/Gather      Host
-        |
-        v
-frame_acoustic: Shared BiLSTM + F0/Noise + Decoder            NPU W16A16
-                + F0 upsample + phase increments
-        |
-        v
-phase_core: CumSum -> phase interpolation -> Sin               CPU FP32
-        |
-        v
-generator_istft: SourceMerge + Harmonic STFT + Generator      NPU W16A16
-                 + static iSTFT -> waveform
-```
+## 数据流
 
-Host 还负责 duration 归约、bucket 路由以及用 frame-to-token index 执行 Gather；
-需要保留 FP32 的模型计算只有 `CumSum -> phase interpolation -> Sin`。F0 Predictor、
-F0 上采样、谐波频率构造、SourceMerge、Harmonic STFT、Generator 和 iSTFT 全部在 NPU。
+1. CPU：ZHG2P、词表映射、NumPy voice pack 查表，生成 style。
+2. NPU `text_duration`：文本编码、Duration Encoder、Duration Predictor。
+3. CPU：sigmoid/sum/round 得到 duration；根据 F 选档，通过 frame-to-token
+   索引 Gather 复制特征，不构造 alignment 矩阵、不做矩阵乘法。
+4. NPU `frame_acoustic`：Shared LSTM、F0/Noise Predictor、Decoder；
+   输出 `decoder_feature [1,512,2F]` 和 `f0 [1,2F]`。
+5. CPU `phase_core`：F0 上采样、谐波频率、phase increments、CumSum、
+   相位插值和 Sin，输出 `sine [1,600F,9]`，整个过程 FP32。
+6. NPU `generator_istft`：SourceMerge、谐波 STFT、Generator、静态 iSTFT。
+   CPU 按真实 F 裁剪音频。
 
-## 1. 为什么不是一张静态图
+不能合成单张 W16A16 图的原因是相位误差会累积。只移走 CumSum/Sin 仍不足：
+NPU 上 F0 上采样后的频率换算、phase increments 量化也会引入相位漂移，
+长句可能出现沙哑。CPU 相位图必须从 F0 开始；F0 Predictor 本身仍在 NPU。
+Generator 中用于清浊音判定的 F0 上采样不参与相位累加，保留在 NPU。
 
-Kokoro 有两个不同时间域：文本域 `T` 和声学帧域 `F`。执行文本图前只知道 token
-数，`F=sum(duration)` 必须等 Duration Predictor 完成后才能得到。把 T/F 同时固化
-到一张图会产生两个问题：
+F0 Predictor 保留 masked AdaIN；Generator 使用已适配的 mean/缩放/RMSNorm
+方案，s 和 inv_s 由 CPU 按有效长度提供。Attention mask 为有效 0、
+无效 -65504，wrap 中连续加两次；不使用 MaskAdd、Clip 或 -inf。
+STFT 按真实长度反射补边，固定使用 CORDIC 相位表达。
+SineGen 的随机声源固定 seed=1234。
 
-1. 为不同文本长度和语速覆盖全部组合，需要导出 T×F 笛卡尔积；
-2. 若只绑定少量 T/F 配对，F 溢出时必须连已经正确完成的文本图一起重跑。
+## 档位与路由
 
-因此第一处边界放在 duration 后。Host 根据真实 F 选择声学 bucket，生成
-frame-to-token index，再用两次 Gather 完成 Length Regulator，后续 F 图不再依赖 T。
+| T 容量 | F 容量 | 最长音频 |
+| --- | --- | --- |
+| 32 | 160 | 4 秒 |
+| 64 | 320 | 8 秒 |
+| 128 | 640 | 16 秒 |
+| 256 | 1280 | 32 秒 |
 
-第二处边界来自精度。W16A16 中很小的频率误差会被长序列 CumSum 持续积分，最终
-形成明显错相。真实 T32/F120 HMONNX 中，相位全上 NPU 的 STFT magnitude cosine
-只有 `0.780179`；只把相位核心留在 CPU FP32 后恢复到 `0.995189`。所以正式方案是
-三张 NPU 图，不再把两图路径作为生产选择。
+Batch=1，T 包含首尾两个 boundary token，F 为 40 Hz 帧数；
+F0 长度是 2F，24 kHz 波形长度是 600F。实际语音长短由 duration 决定。
+先选能容纳 token 的最小档，duration 超出 F 后重试下一对 T/F；
+不导出 T/F 笛卡尔积。不满档时按真实长度 mask。超过最大档时报错，
+由调用方切句；demo 不静默截断或自动切句。
 
-ZHG2P 和 voice 查表本来就是 Host 前处理，也不进入 ONNX。voice pack 独立保存，
-Host 输出 `style[1,256]`，不会为每个音色重复导出模型。
+## 环境与原始资源
 
-## 2. 资产
+使用安装了 xhquant 的 Python 环境，导出还需要 torch、onnx、transformers
+以及锁定的 Kokoro 0.9.4 源码；自定义中文依赖 `misaki[zh]==0.9.4`。
+当前本地验证环境为 Python 3.12、torch 2.8.0、transformers 5.3.0、
+ONNX 1.18、ONNX Runtime 1.24.4。HMONNX demo 是 SDK 仿真，不是芯片执行。
 
-适配锁定以下上游版本：
+`--model-dir` 需要 `pytorch/config.json`、
+`pytorch/kokoro-v1_1-zh.pth`、`pytorch/voices/zf_001.pt` 和锁定的
+`source/kokoro`。资源身份由 `assets.py` 校验，不下载或依赖第三方导出 ONNX。
+原始权重不放进交付包；推理只需要随包的 config、voice.npy 和模型。
 
-- 源码：[hexgrad/kokoro](https://github.com/hexgrad/kokoro)，commit
-  `dfb907a02bba8152ca444717ca5d78747ccb4bec`；
-- PyTorch 模型：[hexgrad/Kokoro-82M-v1.1-zh](https://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh)；
-- 默认 voice：`zf_001`。
+## 导出和 Golden
 
-```bash
-pip install huggingface_hub
-bash examples_merak/audio/kokoro/download_assets.sh \
-  work_dirs/model_assets/kokoro
-python -m pip install work_dirs/model_assets/kokoro/source/kokoro
-```
-
-工作流只校验源码 commit、checkpoint、配置和 voice，随后由 PyTorch wrapper 直接导出
-新的标准 ONNX。发布版 ONNX 不参与建图、量化或 HMONNX 导出，也不由下载脚本获取。
-只有运行 `analyze_reference.py` 或 `reference_onnx_repro.py` 做独立上游对照时，才需要
-另外下载参考 ONNX 并通过 `--onnx` 显式传入。
-
-## 3. T/F bucket
-
-Kokoro 的采样率为 24 kHz，每个声学帧最终对应 600 个采样点：
-
-```text
-frames_per_second = 24000 / 600 = 40
-F = audio_seconds * 40
-waveform_max_samples = F * 600
-```
-
-生产只保留四个 T/F 容量档位：
-
-| route | T bucket | F bucket | 最大音频 |
-|---|---:|---:|---:|
-| 1 | 32 | 160 | 4 秒 |
-| 2 | 64 | 320 | 8 秒 |
-| 3 | 128 | 640 | 16 秒 |
-| 4 | 256 | 1280 | 32 秒 |
-
-T 图和 F 图在文件上仍分别保存，因此不是 4×4 的笛卡尔积；运行时按上表成对路由。
-先执行 token 能放下的最小 route，duration 若超过该 route 的 F 容量，再用下一档 T 图
-重算并继续，确保实际选择始终是表中的合法组合。T 超过 256 或 F 超过 1280 时由上层
-按自然句边界切句，不做静默截断。
-
-所有 attention mask 的有效位置为 0，无效位置为 `-65504`，不使用 `-inf`。ALBERT
-attention 使用 Kokoro 自己的 wrapper，在 Softmax 前直接连续执行两次普通 mask Add，
-不依赖 `xhquant.nn` 的大模型专用算子，也不额外插入 Clip；饱和由目标 Add 保证，以满足编译器
-FlashAttention 融合契约。T/F padding 特征显式清零，最终只保留
-`valid_frames*600` 个波形采样点。
-
-## 4. 三张 NPU 图和 Host 接口
-
-### 4.1 text_duration（T 域）
-
-包含 Front Base、3 层 Duration Encoder BiLSTM、Duration Predictor BiLSTM 和
-Text Encoder BiLSTM，共 5 个逻辑双向 LSTM。
-
-```text
-输入：
-input_ids         [1,T]       INT32
-attention_mask    [1,1,T,T]   FP32
-style             [1,256]     FP32
-valid_len         [1]         INT32
-reverse_indices   [T]         INT64，供标准 Gather 使用
-
-输出：
-duration_features [1,T,640]
-text_encoded      [1,512,T]
-duration_logits   [1,T,50]
-```
-
-### 4.2 Host duration、F 路由和 alignment
-
-```text
-duration[i] = max(round(sum(sigmoid(duration_logits[i])) / speed), 1)
-duration[padding] = 0
-valid_frames = sum(duration)
-F_bucket = smallest(F_bucket >= valid_frames)
-
-alignment[i,j] = 1  if start[i] <= j < end[i] else 0
-encoded = duration_features^T @ alignment  -> [1,640,F]
-asr     = text_encoded @ alignment         -> [1,512,F]
-```
-
-Alignment 放 Host 后会彻底消化 T 轴，避免 F 图重新携带固定 T。
-
-### 4.3 frame_acoustic（F 域）
-
-包含 Shared Prosody BiLSTM、F0 Predictor、Noise Predictor、Decoder、F0 上采样
-和 9 路谐波增量构造，共 1 个逻辑双向 LSTM。F0 保持官方 AdaIN 语义。
-
-```text
-输入：
-encoded           [1,640,F]
-asr               [1,512,F]
-style             [1,256]
-valid_frames      [1]
-reverse_indices   [F]         INT64，供标准 Gather 使用
-
-输出：
-decoder_feature   [1,512,2F]
-f0                [1,2F]
-phase_increments  [1,2F,9]
-```
-
-### 4.4 phase_core（CPU FP32）
-
-```text
-phase_increments[1,2F,9]
-  -> CumSum(FP32)
-  -> * 2π
-  -> 300x linear interpolation
-  -> Sin * 0.1
-  -> sine[1,600F,9]
-```
-
-F0 上采样、谐波序号相乘、除以 24 kHz、remainder 和初始相位注入已经在
-`frame_acoustic` 完成。CPU 不执行 F0 Predictor、SourceMerge 或 STFT。
-
-### 4.5 generator_istft（F 域）
-
-```text
-输入：
-decoder_feature   [1,512,2F]
-sine              [1,600F,9]
-f0                [1,2F]
-style             [1,256]
-valid_frames      [1]
-
-输出：
-waveform          [1,600F]
-```
-
-图内完成 voiced/unvoiced 门控、固定噪声、SourceMerge、长度感知 Harmonic STFT、
-Generator 和静态 iSTFT。reflect padding 按真实 valid length 计算，不把 bucket 尾部
-的 0 当作真实音频反射。
-
-## 5. 双向 LSTM
-
-Kokoro 源模型仍是逻辑双向 LSTM，但 pad 后的有效前缀不能塞进 ONNX LSTM 的私有输入。
-每个逻辑双向层在 wrapper 中显式降低为两条标准数据流：
-
-```text
-forward:  X                 -> direction=forward LSTM(W_f/R_f)
-backward: Gather(X, P)      -> direction=forward LSTM(W_b/R_b)
-                            -> Gather(output, P)
-result:    Concat(forward, backward)
-```
-
-其中前缀反转索引为：
-
-```text
-L=5, capacity=8
-reverse_indices = [4,3,2,1,0,5,6,7]
-```
-
-索引只反转有效前缀，padding 后缀留在原位。这个置换满足 `P^-1=P`，所以反向分支
-输入前和输出恢复时可以使用同一组 Gather；整条静态序列全反转会把 padding 搬到
-前面并污染反向 hidden state，因此不能使用。
-
-因此导出的 FP32 ONNX 本身可直接通过 checker 和 ONNX Runtime：LSTM 第五输入为空，
-`reverse_indices` 只连接标准 Gather。T 图的 5 个逻辑 BiLSTM 对应 10 个 forward LSTM，
-F 图的 1 个逻辑 BiLSTM 对应 2 个 forward LSTM。
-
-xhquant 的 QLSTM 内部由 QLinear、Add、Mul、Sigmoid、Tanh 和 Split 组成。
-LSTM 使用与 Linear 相同的量化配置传递：一个 quant type 同时控制 X/H 激活以及 W、R
-两组权重。PTQ 固化时，W 和 R 都执行 `weight_static_quant()`，生成
-`qweight + scale_or_exp`。native 和 decomposed 只是导出表示不同，使用的是同一份量化
-权重；native 大算子不再携带 FP16 W/R initializer。
-
-同一套量化实现支持两种导出表示：
-
-| 形态 | torch.export 结果 | 用途 |
-|---|---|---|
-| native | 保留带量化 W/R 输入的 `ai.houmo.xh2a::LSTM` | 编译器原生支持后的正式小图 |
-| decomposed | 展开为量化 Linear、门控、状态更新和 Gather | 默认展开路径 |
-
-选择方式：
-
-```text
-Python API: decompose_lstm=False / True
-环境变量:  XHQUANT_LSTM_EXPORT_MODE=native|decomposed
-```
-
-Python 参数优先级最高；未传参数、也未设置环境变量时默认导出 decomposed。需要 native
-时显式传 `decompose_lstm=False`，或设置环境变量为 `native`。
-
-当前 native HMONNX 的 LSTM 是严格 9 输入契约。早期把第 10 个输入解释成
-`reverse_indices` 的私有 HMONNX 已废弃，runtime 会直接拒绝，不做兼容读取；需要重新从
-标准 ONNX 导出。
-
-展开参考 RoIAlign 的 torch.export 机制，在导出阶段决定，不再先生成 native HMONNX
-再调用 `decompose_hmonnx_lstm()` 手工改最终文件。T 图 native 应有 10 个 forward LSTM，
-`frame_acoustic` 应有 2 个；`generator_istft` 不含 LSTM。decomposed 节点数随静态
-序列长度线性增长，大 bucket 文件更大、编译更慢，失败会按 bucket 记录，不伪装成功。
-
-`torch_onnx_internal_optimize` 必须保持 `true`。T32/F120 的关闭实验中，native
-数值不变，但两个 decomposed 图都残留 `pkg.onnxscript.torch_lib` function domain，
-HMONNX runtime 不能解析。这里启用的是 PyTorch exporter 将 function 正规化为标准
-节点的必要步骤；Kokoro 自己的 post-export graph rewrite 仍为 0。
-
-## 6. Merak 导出
-
-主配置：
-
-`configs_merak/workflows/xh2a/other_models/kokoro/kokoro_xh2a_bucketed_w16.yaml`
-
-完整四档导出：
+在仓库根目录运行：
 
 ```bash
 PYTHONPATH=. python examples_merak/audio/kokoro/kokoro_workflow.py \
   --model-dir work_dirs/model_assets/kokoro \
-  --output-dir work_dirs/kokoro_merak/bucketed_w16
+  --output-dir work_dirs/kokoro_merak \
+  --device cuda:0 --dump-golden
 ```
 
-选择一组配对 T/F 做开发烟测：
+默认导出全部四档：12 张 HMONNX、12 张 NPU 浮点参考 ONNX、4 张 CPU ONNX。
+只有 decomposed HMONNX，没有模式开关，环境变量不能把本 recipe 改成 native。
+`--token-bucket 32` 可选择单档；`--onnx-only` 仅作浮点导出，不能和
+`--dump-golden` 合用。重复发布到已有 release 目录会报错，不自动覆盖。
 
-```bash
-PYTHONPATH=. python examples_merak/audio/kokoro/kokoro_workflow.py \
-  --model-dir work_dirs/model_assets/kokoro \
-  --output-dir work_dirs/kokoro_merak/smoke_t32_f160 \
-  --token-bucket 32 \
-  --audio-seconds-bucket 4 \
-  --lstm-variants native decomposed
-```
+`quant()` 返回 skipped，PTQ 在 `export()` 调用 xhquant 时执行；
+两阶段不做数值精度对比。`dump_golden()` 是独立阶段，逐档强制跑完整的
+HMONNX → CPU FP32 → HMONNX 链，默认真实输入为“千里之行，始于足下。”。
+下游 Golden 使用上游 HMONNX 输出，不用浮点参考代替。所有 NPU 图保存
+输入、输出及逐算子数据；CPU 图保存输入/输出。已有 step_0 时拒绝覆盖。
+`golden_meta_info.json` 的 complete=true 才表示全部档位完成。
 
-只导出 FP32 ONNX 可加 `--onnx-only`；导出一组后生成节点 golden 可加
-`--dump-golden`。golden 会为命中的 T/F bucket 分别保存 native/decomposed 输入，
-CPU phase_core 保存 FP32 ONNX 输入输出，不遍历 T×F。
+## 推理
 
-分片导出时，用 `--token-bucket` 或 `--audio-seconds-bucket` 选择对应 route 子集，完成
-后使用：
-
-```bash
-PYTHONPATH=. python examples_merak/audio/kokoro/merge_bucket_exports.py \
-  --shard-dir work_dirs/kokoro_merak/shards/a \
-  --shard-dir work_dirs/kokoro_merak/shards/b \
-  --config-path configs_merak/workflows/xh2a/other_models/kokoro/kokoro_xh2a_bucketed_w16.yaml \
-  --output-dir work_dirs/kokoro_merak/bucketed_w16
-```
-
-合并器要求资产、量化、phase boundary、mask 和 LSTM 契约一致，检查四个 T 和四个
-F bucket 是否完整，并重新验证 native/decomposed LSTM 节点。相同且一致的重复 bucket
-可去重；内容冲突会直接报错。
-
-## 7. 产物布局
-
-```text
-work_dirs/kokoro_merak/bucketed_w16/
-├── export_meta_info.json
-├── assets/voices/zf_001.npy                    Host NumPy 常量
-├── onnx/
-│   ├── text_duration/t0032 ... t0256/          4 份
-│   ├── frame_acoustic/f0160 ... f1280/         4 份
-│   ├── phase_core/f0160 ... f1280/             4 份 CPU FP32
-│   └── generator_istft/f0160 ... f1280/        4 份
-└── hmonnx/
-    ├── text_duration/native|decomposed/tXXXX/
-    ├── frame_acoustic/native|decomposed/fXXXX/
-    └── generator_istft/fXXXX/
-```
-
-每张 FP32 ONNX 就是唯一的标准参考图和部署输入，不再生成 `_fp32.onnx` companion，
-也不会在导出后改写 LSTM 输入。大权重可能使用同目录 external data，复制产物时不能
-只复制 `.onnx`。
-
-## 8. Inference demo
+将 EXPORT_DIR 替换为导出命令最后打印的 release 目录：
 
 ```bash
 PYTHONPATH=. python examples_merak/audio/kokoro/bucketed_inference_demo.py \
-  --export-dir work_dirs/kokoro_merak/bucketed_w16 \
-  --backend hmonnx \
-  --lstm-variant native \
-  --output-wav work_dirs/kokoro_merak/bucketed_w16/native_demo.wav
+  --export-dir EXPORT_DIR --backend hmonnx --device cuda:0 \
+  --text '你好，欢迎使用中文语音合成。' --output-wav work_dirs/kokoro.wav
 ```
 
-查看 bucket：
+不传 `--text` 使用内置短句。`--backend ort` 跑同一切分的浮点参考。
+`--list-routes` 查看档位；`--exercise-all-routes` 用同一输入强制覆盖四档。
+`--config-path` 可显式指定词表；默认从包内 hf_config 加载，不需要原始权重。
+当前仅支持中文、数字及中文标点；英文会显式报错，不悄悄丢字。
+超过 256 token 也会明确报错。使用 `validate_release.py` 跑十条长短句、
+保存 WAV 和路由报告；精度对比在 `compare_backends.py`，不在 quant/export。
 
-```bash
-PYTHONPATH=. python examples_merak/audio/kokoro/bucketed_inference_demo.py \
-  --export-dir work_dirs/kokoro_merak/bucketed_w16 \
-  --list-buckets
-```
+## 发布布局与命名
 
-遍历四个配对 route：
+参照[HM 模型版本发布命名规则](https://houmo.feishu.cn/wiki/WbX8wq9tpihXeHkzAy7caqMZnUh)，
+采用全小写 `hmquant_xh2_<hf模型名>_w16a16_<尺寸>_<日期>`。
+非 LLM 没有 prefill/context：这里用实际 token/frame 档位替代，
+不填伪造的 LLM 长度，也不使用 native/decomposed 后缀。
 
-```bash
-PYTHONPATH=. python examples_merak/audio/kokoro/bucketed_inference_demo.py \
-  --export-dir work_dirs/kokoro_merak/bucketed_w16 \
-  --backend hmonnx \
-  --lstm-variant native \
-  --exercise-all-buckets \
-  --route-report work_dirs/kokoro_merak/bucketed_w16/native_all_buckets.json
-```
-
-workflow 只做量化和导出，不执行数值 gate。使用同一组逐图输入比较 ORT 与 HMONNX：
-
-```bash
-PYTHONPATH=. python examples_merak/audio/kokoro/compare_backends.py \
-  --export-dir work_dirs/kokoro_merak/bucketed_w16 \
-  --lstm-variant native \
-  --output-json work_dirs/kokoro_merak/bucketed_w16/native_compare.json
-```
-
-也可以用 `--token-bucket 128` 或 `--audio-seconds 16` 强制 T128/F640。生产模式总是
-从最小合法配对档位开始；duration 溢出当前 F 容量时才重跑下一档 T 图。
-新产物自带完整 `zf_001.npy` voice pack，demo 不依赖 PyTorch 源模型目录；只有读取旧
-产物时才需要用 `--model-dir` 回退到上游 `.pt` voice 文件。
-
-## 9. 当前精度基线
-
-固定中文用例包含 28 个有效 token、110 个声学帧、66,000 个有效采样点，生产路由为
-T32/F160。以下精度表来自同一用例的早期 F120 边界实验，用于说明 CPU phase 的必要性：
-
-| 对比 | waveform cosine | max abs | MAE | STFT magnitude cosine | log-spectrum cosine |
-|---|---:|---:|---:|---:|---:|
-| PyTorch vs FP32 ONNX 三图链 | 0.999463 | 0.048433 | 0.000494 | 0.999943 | 0.999872 |
-| FP32 ONNX vs 相位全 NPU HMONNX | 0.420311 | 0.638173 | 0.028927 | 0.780179 | 0.846850 |
-| FP32 ONNX vs CPU phase HMONNX | 0.727428 | 0.623035 | 0.014746 | 0.995189 | 0.989713 |
-
-CPU phase 不能消除上游量化 F0 已经产生的频率差异，所以逐点 waveform cosine 仍受
-相位漂移影响；但它避免了 W16A16 CumSum 自身继续放大误差，频谱主体明显恢复。
-发布 gate 必须同时检查 duration、F0、phase increments、waveform、STFT magnitude、
-log spectrum、ASR、说话人相似度和人工听测，不能只看一个 cosine。
-
-## 10. 全 bucket 导出与路由实测
-
-最终 `bucketed_w16` 产物只包含 T32/F160、T64/F320、T128/F640、T256/F1280
-四个配对档位。native 图保留标准 forward LSTM 大算子；decomposed 图的 LSTM 数为 0，节点数
-随 T/F 线性增长。28 token 用例自动路由到 T32/F160，输出 110 帧、66,000 个采样点
-（2.75 秒）。`--exercise-all-routes` 会逐一验证四个 route，而不是组合出 16 条路径。
-报告与 WAV 保存在：
+四档包前缀：
+`hmquant_xh2_kokoro-82m-v1.1-zh_w16a16_t32-64-128-256_f160-320-640-1280_YYYYMMDD`。
 
 ```text
-work_dirs/kokoro_merak/bucketed_w16/
-├── ort_all_buckets.json
-├── native_all_buckets.json
-├── decomposed_all_buckets.json
-├── ort_demo.wav
-├── native_demo.wav
-└── decomposed_demo.wav
+<release_prefix>/
+  text_duration_t0032/          # 各角色＋尺寸平铺，共 16 个组件目录
+    <prefix>_text_duration_t0032_with_act.onnx
+    <prefix>_text_duration_t0032_external_data
+    step_0/
+      <prefix>_text_duration_t0032_with_act.onnx -> ../同名文件
+      <prefix>_text_duration_t0032_external_data -> ../同名文件
+      <prefix>_text_duration_t0032_<name>_input.npy
+      <prefix>_text_duration_t0032_<name>_output.npy
+      <prefix>_text_duration_t0032_with_act/    # 逐算子 Golden
+  frame_acoustic_f0160/
+  phase_core_f0160/             # FP32 ONNX，无量化权重文件
+  generator_istft_f0160/
+  ...                          # 其余三档
+  reference_onnx/               # NPU 图的浮点参考
+  hf_config/                   # 上游文本配置和词表
+  assets/voices/zf_001.npy
+  workflow.yaml
+  export_meta_info.json
+  golden_meta_info.json
+  <release_prefix>_hmonnx.py
 ```
 
-PCM16 WAV 上，ORT 对 native 的 STFT magnitude cosine 为 0.995189，ORT 对 decomposed
-为 0.994514；后者逐点 waveform cosine 为 0.267819，但 log-spectrum cosine 仍为
-0.986546。这是上游量化 F0 微差经长时间相位积分后的漂移，不能据此把频谱正确的声音
-误判为整体失真。`--exercise-all-routes` 会在每个 route 结束后释放 runner cache，避免
-验证四档时把所有 decomposed 大图同时常驻 GPU；生产单请求路径仍按需缓存已选择的图。
+模型文件、external_data 的真实路径以 metadata 和 ONNX location 为准。
+**不手工改 external_data 名称**。step 内软链接必须是包内相对链接。
+运行随包 demo 仍需要匹配版本的 xh2modelzoo、xhquant 和上述依赖；
+包内 config/voice 无源目录依赖。调试日志随组件保留。
 
-## 11. 回归
-
-```bash
-PYTHONPATH=. python -m pytest -q tests/kokoro/test_kokoro_support.py
-
-cd "${XHQUANT_REPO}"
-PYTHONPATH=. python -m pytest -q tests/testing/xh2a/ops/test_lstm.py
-```
-
-核心代码：
-
-```text
-xhmodel_merak/xh_other_model/models/kokoro/
-├── buckets.py             # 四档配对 T/F 预设
-├── independent_split.py   # 分离的 T/F NPU 图和 CPU phase_core wrapper
-├── bucketed_runtime.py    # duration 驱动的配对档位回退
-├── graph.py               # 静态 wrapper、BiLSTM、mask
-├── static_dsp.py          # Harmonic STFT 和静态 iSTFT
-└── workflow.py            # Merak 导出、HMONNX、校验和 metadata
-```
+压缩时从 release 的父目录运行 `zip -r -y <prefix>.zip <prefix>/`，
+保留相对软链接，不能解引用复制权重。发布前核对 metadata 完整标记、
+全部模型/权重存在、软链接可解析以及 ZIP 完整性。逐算子 Golden 占用较大，
+应按实际输出统计存储和压缩包大小。

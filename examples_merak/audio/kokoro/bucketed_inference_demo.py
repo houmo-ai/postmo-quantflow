@@ -8,26 +8,26 @@ from typing import Any
 
 import numpy as np
 
-from xhmodel_merak.xh_other_model.models.kokoro.assets import resolve_model_assets, sha256
+from xhmodel_merak.xh_other_model.models.kokoro.assets import sha256
 from xhmodel_merak.xh_other_model.models.kokoro.bucketed_runtime import KokoroBucketedRuntime
 from xhmodel_merak.xh_other_model.models.kokoro.buckets import audio_seconds_to_frames
 from xhmodel_merak.xh_other_model.models.kokoro.host import (
     DEFAULT_INPUT_IDS,
+    DEFAULT_PHONEMES,
+    DEFAULT_TEXT,
     SAMPLE_RATE,
     load_voice_style,
 )
+from xhmodel_merak.xh_other_model.models.kokoro.text import prepare_text
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the four-route Kokoro static pipeline")
-    parser.add_argument(
-        "--model-dir",
-        help="legacy fallback for exports without an embedded NumPy voice pack",
-    )
+    parser.add_argument("--text", help="Chinese text to synthesize (CPU ZHG2P v1.1)")
+    parser.add_argument("--config-path", help="Kokoro v1.1-zh config.json containing the phoneme vocabulary")
     parser.add_argument("--export-dir", required=True)
     parser.add_argument("--output-wav", default="work_dirs/kokoro_bucketed.wav")
     parser.add_argument("--backend", choices=("ort", "hmonnx"), default="hmonnx")
-    parser.add_argument("--lstm-variant", choices=("native", "decomposed"), default="native")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--token-bucket", type=int, help="Force one paired route by T capacity")
@@ -40,11 +40,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    tokens = np.asarray(DEFAULT_INPUT_IDS, dtype=np.int32)
     runtime = KokoroBucketedRuntime.from_export(
         args.export_dir,
         backend=args.backend,
-        lstm_variant=args.lstm_variant,
         device=args.device,
     )
     routes = runtime.available_routes()
@@ -53,10 +51,20 @@ def main() -> None:
         if not args.exercise_all_buckets:
             return
 
+    if args.text is None:
+        text, phonemes = DEFAULT_TEXT, DEFAULT_PHONEMES
+        tokens = np.asarray(DEFAULT_INPUT_IDS, dtype=np.int32)
+    else:
+        text = args.text.strip()
+        config_path = _resolve_config_path(Path(args.export_dir).resolve(), runtime.meta, config_path=args.config_path)
+        tokens, phonemes = prepare_text(
+            text, config_path, max_tokens=max(int(route["token_max_length"]) for route in routes)
+        )
+    text_info = {"text": text, "phonemes": phonemes}
+
     voice_path = _resolve_voice_path(
         Path(args.export_dir).expanduser().resolve(),
         runtime.meta,
-        model_dir=args.model_dir,
     )
     style = load_voice_style(voice_path, phoneme_count=tokens.size - 2).numpy()
 
@@ -82,6 +90,7 @@ def main() -> None:
                         "status": "ok",
                         "samples": int(waveform.size),
                         "rms": float(np.sqrt(np.mean(waveform.astype(np.float64) ** 2))),
+                        **text_info,
                         **synthesis,
                     }
                 )
@@ -92,6 +101,7 @@ def main() -> None:
                         "status": "failed",
                         "error_type": type(error).__name__,
                         "error": str(error),
+                        **text_info,
                     }
                 )
             finally:
@@ -128,12 +138,20 @@ def main() -> None:
             {
                 "output_wav": str(destination),
                 "seconds": waveform.size / SAMPLE_RATE,
+                **text_info,
                 **synthesis,
             },
             indent=2,
             ensure_ascii=False,
         )
     )
+
+
+def _resolve_config_path(export_dir: Path, metadata: dict[str, Any], *, config_path: str | None) -> Path:
+    path = Path(config_path).expanduser() if config_path else export_dir / metadata["runtime_assets"]["config_file"]
+    if not path.is_file():
+        raise FileNotFoundError(f"missing vocabulary: {path}; provide --config-path")
+    return path.resolve()
 
 
 def _exercise_requests(
@@ -173,27 +191,14 @@ def _exercise_requests(
     )
 
 
-def _resolve_voice_path(
-    export_dir: Path,
-    metadata: dict[str, Any],
-    *,
-    model_dir: str | None,
-) -> Path:
-    voice = metadata.get("runtime_assets", {}).get("voice_pack", {})
-    relative = voice.get("file")
-    if relative:
-        path = export_dir / str(relative)
-        if not path.is_file():
-            raise FileNotFoundError(f"exported NumPy voice pack is missing: {path}")
-        expected_sha256 = voice.get("sha256")
-        if expected_sha256 and sha256(path) != expected_sha256:
-            raise RuntimeError(f"exported NumPy voice pack SHA256 mismatch: {path}")
-        return path
-    if model_dir:
-        return resolve_model_assets(model_dir).voice
-    raise ValueError(
-        "export metadata has no runtime_assets.voice_pack; provide --model-dir for a legacy export"
-    )
+def _resolve_voice_path(export_dir: Path, metadata: dict[str, Any]) -> Path:
+    voice = metadata["runtime_assets"]["voice_pack"]
+    path = export_dir / voice["file"]
+    if not path.is_file():
+        raise FileNotFoundError(f"exported NumPy voice pack is missing: {path}")
+    if sha256(path) != voice["sha256"]:
+        raise RuntimeError(f"exported NumPy voice pack SHA256 mismatch: {path}")
+    return path
 
 
 if __name__ == "__main__":

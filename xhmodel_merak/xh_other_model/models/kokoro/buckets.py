@@ -8,7 +8,6 @@ from .host import SAMPLE_RATE, WAVEFORM_SAMPLES_PER_FRAME
 
 TOKEN_BUCKETS = (32, 64, 128, 256)
 AUDIO_BUCKET_SECONDS = (4, 8, 16, 32)
-LSTM_VARIANTS = ("native", "decomposed")
 
 
 def audio_seconds_to_frames(seconds: int) -> int:
@@ -150,7 +149,6 @@ __all__ = [
     "BUCKET_ROUTES",
     "FRAME_BUCKETS",
     "KokoroBucketRoute",
-    "LSTM_VARIANTS",
     "TOKEN_BUCKETS",
     "audio_seconds_for_frame",
     "audio_seconds_to_frames",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import gc
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +11,6 @@ import torch
 from torch import Tensor
 
 from .buckets import (
-    LSTM_VARIANTS,
     audio_seconds_for_frame,
     frame_bucket_key,
     token_bucket_key,
@@ -25,7 +24,6 @@ from .host import (
 )
 from .independent_split import (
     FRAME_ACOUSTIC_ROLE,
-    FRAME_SYNTHESIS_ROLE,
     GENERATOR_ISTFT_ROLE,
     PHASE_CORE_ROLE,
     TEXT_DURATION_ROLE,
@@ -34,7 +32,8 @@ from .independent_split import (
 from .runtime import HmonnxRunner, OrtRunner, Runner
 
 
-BUCKETED_PRECISION_SPLIT_GRAPH_MODE = "bucketed_precision_split"
+GRAPH_MODE = "bucketed_cpu_phase"
+SCHEMA_VERSION = 2
 
 
 class KokoroBucketedRuntime:
@@ -46,15 +45,15 @@ class KokoroBucketedRuntime:
         meta: Mapping[str, Any],
         *,
         backend: str,
-        lstm_variant: str,
         device: str,
+        runner_factory: Callable[[str, str, Path], Runner] | None = None,
     ) -> None:
         if backend not in {"ort", "hmonnx"}:
             raise ValueError("backend must be 'ort' or 'hmonnx'")
-        if lstm_variant not in LSTM_VARIANTS:
-            raise ValueError(f"lstm_variant must be one of {LSTM_VARIANTS}")
-        if meta.get("graph_mode") != BUCKETED_PRECISION_SPLIT_GRAPH_MODE:
-            raise ValueError("metadata is not a Kokoro bucketed precision-split export")
+        if meta.get("graph_mode") != GRAPH_MODE or meta.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError("unsupported Kokoro export schema; regenerate models with the CPU phase workflow")
+        if not meta.get("export_complete"):
+            raise ValueError("Kokoro export is incomplete")
         policy = meta.get("bucket_presets", {}).get("policy")
         if policy != "duration_driven_paired_t_f":
             raise ValueError(f"metadata uses unsupported Kokoro bucket policy: {policy!r}")
@@ -62,13 +61,11 @@ class KokoroBucketedRuntime:
         self.work_dir = Path(work_dir).expanduser().resolve()
         self.meta = dict(meta)
         self.backend = backend
-        self.lstm_variant = lstm_variant
+        self.runner_factory = runner_factory
         self.device = device
         self.seed = int(meta["seed"])
-        self.phase_on_npu = meta.get("phase_boundary", {}).get("mode") == "npu"
-        self.frame_lstm_role = FRAME_SYNTHESIS_ROLE if self.phase_on_npu else FRAME_ACOUSTIC_ROLE
         self.token_buckets = self._sorted_buckets(TEXT_DURATION_ROLE, "token_max_length")
-        self.frame_buckets = self._sorted_buckets(self.frame_lstm_role, "frame_max_length")
+        self.frame_buckets = self._sorted_buckets(FRAME_ACOUSTIC_ROLE, "frame_max_length")
         self.routes = tuple(
             sorted(
                 (dict(route) for route in meta["bucket_presets"]["routes"]),
@@ -96,7 +93,6 @@ class KokoroBucketedRuntime:
         work_dir: str | Path,
         *,
         backend: str = "hmonnx",
-        lstm_variant: str = "native",
         device: str = "cuda:0",
     ) -> KokoroBucketedRuntime:
         root = Path(work_dir).expanduser().resolve()
@@ -107,7 +103,6 @@ class KokoroBucketedRuntime:
             root,
             json.loads(meta_file.read_text(encoding="utf-8")),
             backend=backend,
-            lstm_variant=lstm_variant,
             device=device,
         )
 
@@ -237,28 +232,18 @@ class KokoroBucketedRuntime:
             frame_capacity,
         ).numpy()
 
-        if self.phase_on_npu:
-            generated = self._runner(FRAME_SYNTHESIS_ROLE, frame_key).run(
-                {
-                    **frame_feed,
-                    "generator_norm_scales": generator_norm_scales,
-                }
-            )
-        else:
-            acoustic = self._runner(FRAME_ACOUSTIC_ROLE, frame_key).run(frame_feed)
-            phase = self._runner(PHASE_CORE_ROLE, frame_key).run(
-                {"phase_increments": np.asarray(acoustic["phase_increments"], dtype=np.float32)}
-            )
-            generated = self._runner(GENERATOR_ISTFT_ROLE, frame_key).run(
-                {
-                    "decoder_feature": np.asarray(acoustic["decoder_feature"], dtype=np.float32),
-                    "sine": np.asarray(phase["sine"], dtype=np.float32),
-                    "f0": np.asarray(acoustic["f0"], dtype=np.float32),
-                    "style": style_array,
-                    "valid_frames": np.asarray([valid_frames], dtype=np.int32),
-                    "generator_norm_scales": generator_norm_scales,
-                }
-            )
+        acoustic = self._runner(FRAME_ACOUSTIC_ROLE, frame_key).run(frame_feed)
+        phase = self._runner(PHASE_CORE_ROLE, frame_key).run({"f0": np.asarray(acoustic["f0"], dtype=np.float32)})
+        generated = self._runner(GENERATOR_ISTFT_ROLE, frame_key).run(
+            {
+                "decoder_feature": np.asarray(acoustic["decoder_feature"], dtype=np.float32),
+                "sine": np.asarray(phase["sine"], dtype=np.float32),
+                "f0": np.asarray(acoustic["f0"], dtype=np.float32),
+                "style": style_array,
+                "valid_frames": np.asarray([valid_frames], dtype=np.int32),
+                "generator_norm_scales": generator_norm_scales,
+            }
+        )
 
         valid_samples = valid_frames * WAVEFORM_SAMPLES_PER_FRAME
         waveform = np.asarray(generated["waveform"], dtype=np.float32).reshape(-1)[:valid_samples]
@@ -272,9 +257,8 @@ class KokoroBucketedRuntime:
             "valid_samples": valid_samples,
             "duration": duration[0, : tokens.size].tolist(),
             "backend": self.backend,
-            "lstm_variant": self.lstm_variant,
-            "phase_boundary": "npu" if self.phase_on_npu else "host_fp32",
-            "npu_graph_count": 2 if self.phase_on_npu else 3,
+            "phase_boundary": "f0_to_sine_host_fp32",
+            "npu_graph_count": 3,
             "attempts": attempts,
             "seed": requested_seed,
         }
@@ -349,24 +333,17 @@ class KokoroBucketedRuntime:
         if runner is not None:
             return runner
         bucket = self.meta["components"][role]["buckets"][key]
-        if self.backend == "ort" or role == PHASE_CORE_ROLE:
-            path = bucket.get("reference_onnx_file", bucket["onnx_file"])
-            runner = OrtRunner(self.work_dir / path)
-        elif "hmonnx_variants" in bucket:
-            variant = bucket["hmonnx_variants"][self.lstm_variant]
-            if variant["status"] != "ok":
-                raise RuntimeError(
-                    f"{self.lstm_variant} HMONNX is unavailable for {role}/{key}: "
-                    f"{variant.get('error', 'unknown error')}"
-                )
-            runner = HmonnxRunner(self.work_dir / variant["hmonnx_file"], device=self.device)
+        path = (
+            self.work_dir / bucket["onnx_file" if self.backend == "ort" or role == PHASE_CORE_ROLE else "hmonnx_file"]
+        )
+        if self.runner_factory is not None:
+            runner = self.runner_factory(role, key, path)
+        elif self.backend == "ort" or role == PHASE_CORE_ROLE:
+            runner = OrtRunner(path)
         else:
-            path = bucket.get("hmonnx_file")
-            if not path:
-                raise RuntimeError(f"HMONNX is unavailable for {role}/{key}")
-            runner = HmonnxRunner(self.work_dir / path, device=self.device)
+            runner = HmonnxRunner(path, device=self.device)
         self._runners[cache_key] = runner
         return runner
 
 
-__all__ = ["BUCKETED_PRECISION_SPLIT_GRAPH_MODE", "KokoroBucketedRuntime"]
+__all__ = ["GRAPH_MODE", "SCHEMA_VERSION", "KokoroBucketedRuntime"]

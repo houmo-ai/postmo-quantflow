@@ -9,7 +9,7 @@ import numpy as np
 
 from examples_merak.audio.kokoro.bucketed_inference_demo import _resolve_voice_path
 from xhmodel_merak.xh_other_model.models.kokoro.bucketed_runtime import (
-    BUCKETED_PRECISION_SPLIT_GRAPH_MODE,
+    GRAPH_MODE,
     KokoroBucketedRuntime,
 )
 from xhmodel_merak.xh_other_model.models.kokoro.buckets import audio_seconds_to_frames
@@ -52,12 +52,8 @@ class ComparingRunner:
         reference = self.reference.run(feed)
         candidate = self.candidate.run(feed)
         if reference.keys() != candidate.keys():
-            raise ValueError(
-                f"output mismatch: reference={list(reference)}, candidate={list(candidate)}"
-            )
-        self.calls.append(
-            {name: tensor_metrics(reference[name], candidate[name]) for name in reference}
-        )
+            raise ValueError(f"output mismatch: reference={list(reference)}, candidate={list(candidate)}")
+        self.calls.append({name: tensor_metrics(reference[name], candidate[name]) for name in reference})
         # Downstream graphs consume FP32 reference outputs. This isolates each
         # graph's local error instead of compounding errors from earlier graphs.
         return reference
@@ -68,12 +64,7 @@ def parse_args() -> argparse.Namespace:
         description="Compare bucketed Kokoro ORT and HMONNX with identical per-graph inputs"
     )
     parser.add_argument("--export-dir", required=True)
-    parser.add_argument(
-        "--model-dir",
-        help="legacy fallback for exports without an embedded NumPy voice pack",
-    )
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--lstm-variant", choices=("native", "decomposed"), default="native")
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--token-bucket", type=int)
@@ -86,13 +77,11 @@ def main() -> None:
     args = parse_args()
     export_dir = Path(args.export_dir).expanduser().resolve()
     metadata = json.loads((export_dir / "export_meta_info.json").read_text(encoding="utf-8"))
-    if metadata.get("graph_mode") != BUCKETED_PRECISION_SPLIT_GRAPH_MODE:
-        raise ValueError(
-            "compare_backends.py supports the production bucketed_precision_split export"
-        )
+    if metadata.get("graph_mode") != GRAPH_MODE:
+        raise ValueError("compare_backends.py supports the production bucketed CPU-phase export")
 
     tokens = np.asarray(DEFAULT_INPUT_IDS, dtype=np.int32)
-    voice_path = _resolve_voice_path(export_dir, metadata, model_dir=args.model_dir)
+    voice_path = _resolve_voice_path(export_dir, metadata)
     style = load_voice_style(voice_path, phoneme_count=tokens.size - 2).numpy()
     forced_frame = None if args.audio_seconds is None else audio_seconds_to_frames(args.audio_seconds)
 
@@ -100,32 +89,27 @@ def main() -> None:
         export_dir,
         metadata,
         backend="hmonnx",
-        lstm_variant=args.lstm_variant,
         device=args.device,
     )
     comparison_runtime = KokoroBucketedRuntime(
         export_dir,
         metadata,
         backend="ort",
-        lstm_variant=args.lstm_variant,
         device=args.device,
     )
 
     comparisons: dict[tuple[str, str], ComparingRunner] = {}
     candidate_artifacts: dict[str, str] = {}
-    for role in metadata["component_order"]:
-        for key, bucket in metadata["components"][role]["buckets"].items():
-            reference_path = export_dir / bucket["onnx_file"]
-            candidate = candidate_runtime._runner(str(role), str(key))
-            comparing = ComparingRunner(OrtRunner(reference_path), candidate)
-            comparison_runtime._runners[(str(role), str(key))] = comparing
-            comparisons[(str(role), str(key))] = comparing
-            if "hmonnx_variants" in bucket:
-                candidate_entry = bucket["hmonnx_variants"][args.lstm_variant]
-                candidate_file = candidate_entry.get("hmonnx_file", candidate_entry.get("status"))
-            else:
-                candidate_file = bucket.get("hmonnx_file", bucket["onnx_file"])
-            candidate_artifacts[f"{role}/{key}"] = str(candidate_file)
+
+    def factory(role, key, path):
+        candidate = candidate_runtime._runner(role, key)
+        comparing = ComparingRunner(OrtRunner(path), candidate)
+        comparisons[(role, key)] = comparing
+        bucket = metadata["components"][role]["buckets"][key]
+        candidate_artifacts[f"{role}/{key}"] = bucket.get("hmonnx_file", bucket["onnx_file"])
+        return comparing
+
+    comparison_runtime.runner_factory = factory
 
     synthesize_kwargs = {
         "speed": args.speed,
@@ -152,7 +136,6 @@ def main() -> None:
     report = {
         "reference_backend": "onnxruntime-cpu-fp32",
         "candidate_backend": "hmonnx",
-        "lstm_variant": args.lstm_variant,
         "candidate_artifacts": candidate_artifacts,
         "reference_synthesis": reference_synthesis,
         "candidate_synthesis": candidate_synthesis,

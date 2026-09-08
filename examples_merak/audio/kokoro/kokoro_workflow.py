@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 from pathlib import Path
 
 
 DEFAULT_CONFIG = "configs_merak/workflows/xh2a/other_models/kokoro/kokoro_xh2a_bucketed_w16.yaml"
-DEFAULT_OUTPUT = "work_dirs/kokoro_merak/bucketed_w16"
+DEFAULT_OUTPUT = "work_dirs/kokoro_merak"
 
 
 def parse_args() -> argparse.Namespace:
@@ -31,8 +30,6 @@ def parse_args() -> argparse.Namespace:
         action="append",
         help="Select one paired route by audio capacity; repeat for more routes",
     )
-    parser.add_argument("--lstm-variants", choices=("native", "decomposed"), nargs="+")
-    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -43,7 +40,8 @@ def main() -> None:
     from xhmodel_merak.xh_other_model.models.kokoro.buckets import BUCKET_ROUTES
 
     output_dir = Path(args.output_dir).expanduser().resolve()
-    _remove_output_dir_if_needed(output_dir, overwrite=args.overwrite)
+    if args.dump_golden and args.onnx_only:
+        raise ValueError("--dump-golden cannot be combined with --onnx-only")
     workflow = AutoWorkflow.from_config(
         model_dir=args.model_dir,
         config_path=args.config_path,
@@ -66,8 +64,6 @@ def main() -> None:
         overrides["export.token_buckets"] = [
             route.token_max_length for route in BUCKET_ROUTES if route.audio_seconds in selected
         ]
-    if args.lstm_variants:
-        overrides["export.lstm_variants"] = args.lstm_variants
     config_overrides = overrides or None
     quant_result = workflow.quant(
         output_dir=str(output_dir / "quant"),
@@ -80,7 +76,7 @@ def main() -> None:
         device=args.device,
         config_overrides=config_overrides,
     )
-    print(output_dir / "export_meta_info.json")
+    print(Path(export_result.work_dir) / "export_meta_info.json")
     if args.dump_golden:
         if args.onnx_only:
             raise ValueError("--dump-golden cannot be combined with --onnx-only")
@@ -91,17 +87,6 @@ def main() -> None:
                 input_messages=None,
             )
         )
-
-
-def _remove_output_dir_if_needed(output_dir: Path, *, overwrite: bool) -> None:
-    if not output_dir.exists():
-        return
-    if not overwrite:
-        raise FileExistsError(f"output directory already exists: {output_dir}; pass --overwrite to replace it")
-    cwd = Path.cwd().resolve()
-    if output_dir in {Path("/").resolve(), cwd, cwd.parent}:
-        raise ValueError(f"refusing to recursively remove unsafe output path: {output_dir}")
-    shutil.rmtree(output_dir)
 
 
 if __name__ == "__main__":

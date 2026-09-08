@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "kokoro-release",
+    "patterns": [
+      "xhmodel_merak/xh_other_model/models/kokoro/graph.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/independent_split.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/sine_source.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/export.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/quant_export.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/runtime.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/bucketed_runtime.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/buckets.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/golden.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/release.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/workflow.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/host.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/precision_split.py",
+      "xhmodel_merak/xh_other_model/models/kokoro/single_graph.py",
+      "configs_merak/workflows/xh2a/other_models/kokoro/**",
+      "examples_merak/audio/kokoro/**"
+    ]
+  }]
+}

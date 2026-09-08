@@ -7,7 +7,7 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from .buckets import frame_bucket_key
+from .export import _export_partition
 from .graph import (
     DecoderStatic,
     DurationBidirectionalLSTMBlockStatic,
@@ -31,13 +31,11 @@ from .host import (
     make_generator_rmsnorm_scales,
     make_reverse_idx,
 )
-from .precision_split import _export_partition
-from .single_graph import StaticSineSource, _prefix_mask
+from .sine_source import StaticSineSource, _prefix_mask
 from .static_dsp import StaticISTFT20, StaticSTFT20
 
 
 TEXT_DURATION_ROLE = "text_duration"
-FRAME_SYNTHESIS_ROLE = "frame_synthesis"
 FRAME_ACOUSTIC_ROLE = "frame_acoustic"
 PHASE_CORE_ROLE = "phase_core"
 GENERATOR_ISTFT_ROLE = "generator_istft"
@@ -194,24 +192,6 @@ class FrameCoreStatic(nn.Module):
             generator_norm_scales,
         )
 
-    def forward_generator_from_f0(
-        self,
-        decoder_feature: Tensor,
-        f0: Tensor,
-        style: Tensor,
-        valid_frames: Tensor,
-        generator_norm_scales: Tensor,
-    ) -> Tensor:
-        waveform_mask = _prefix_mask(valid_frames * 600, self.waveform_length, channel_axis=True)
-        harmonic_source = self.sine_source(f0, waveform_mask)
-        return self._generator_from_source(
-            decoder_feature,
-            harmonic_source,
-            style,
-            valid_frames,
-            generator_norm_scales,
-        )
-
     def _generator_from_source(
         self,
         decoder_feature: Tensor,
@@ -248,40 +228,8 @@ class FrameCoreStatic(nn.Module):
         return self.istft(spec_phase, waveform_mask)
 
 
-class FrameSynthesisStatic(nn.Module):
-    """Two-graph deployment continuation, including CumSum/phase/Sin on NPU."""
-
-    def __init__(self, core: FrameCoreStatic) -> None:
-        super().__init__()
-        self.core = core
-
-    def forward(
-        self,
-        encoded: Tensor,
-        asr: Tensor,
-        style: Tensor,
-        valid_frames: Tensor,
-        reverse_indices: Tensor,
-        generator_norm_scales: Tensor,
-    ) -> Tensor:
-        decoder_feature, f0 = self.core.forward_acoustic(
-            encoded,
-            asr,
-            style,
-            valid_frames,
-            reverse_indices,
-        )
-        return self.core.forward_generator_from_f0(
-            decoder_feature,
-            f0,
-            style,
-            valid_frames,
-            generator_norm_scales,
-        )
-
-
 class FrameAcousticStatic(nn.Module):
-    """Three-graph fallback first F graph, ending before phase accumulation."""
+    """NPU acoustic graph: keep F0, move all phase preparation to CPU."""
 
     def __init__(self, core: FrameCoreStatic) -> None:
         super().__init__()
@@ -294,7 +242,7 @@ class FrameAcousticStatic(nn.Module):
         style: Tensor,
         valid_frames: Tensor,
         reverse_indices: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         decoder_feature, f0 = self.core.forward_acoustic(
             encoded,
             asr,
@@ -302,9 +250,7 @@ class FrameAcousticStatic(nn.Module):
             valid_frames,
             reverse_indices,
         )
-        f0_up = self.core.sine_source.upsample_f0(f0)
-        phase_increments = self.core.sine_source.prepare_phase_increments(f0_up)
-        return decoder_feature, f0, phase_increments
+        return decoder_feature, f0
 
 
 class PhaseCoreStatic(nn.Module):
@@ -312,8 +258,10 @@ class PhaseCoreStatic(nn.Module):
         super().__init__()
         self.core = core
 
-    def forward(self, phase_increments: Tensor) -> Tensor:
-        return self.core.sine_source.phase_increments_to_sine(phase_increments)
+    def forward(self, f0: Tensor) -> Tensor:
+        f0_up = self.core.sine_source.upsample_f0(f0.float())
+        increments = self.core.sine_source.prepare_phase_increments(f0_up)
+        return self.core.sine_source.phase_increments_to_sine(increments)
 
 
 class GeneratorISTFTStatic(nn.Module):
@@ -357,9 +305,7 @@ class FrameBucketExport:
 
 def prepare_independent_model(model: nn.Module) -> dict[str, int]:
     return {
-        "albert_attention_double_mask_add": rewrite_albert_attention_double_mask_add(
-            model.bert
-        ),
+        "albert_attention_double_mask_add": rewrite_albert_attention_double_mask_add(model.bert),
         "weight_norm_materialized": materialize_weight_norm(model),
         "depthwise_deconv_output_padding_lowered": rewrite_depthwise_deconvolution(model),
     }
@@ -409,7 +355,6 @@ def export_text_bucket(
     output_path: str | Path,
     text_max_length: int,
     opset: int,
-    validate_onnx: bool,
 ) -> TextBucketExport:
     module = TextDurationStatic(model, text_max_length).eval().cpu()
     feed = {
@@ -417,22 +362,18 @@ def export_text_bucket(
         "attention_mask": make_attention_mask(text_max_length, sample.valid_len),
         "style": sample.style.detach().cpu(),
         "valid_len": sample.valid_len.detach().cpu(),
-        "reverse_indices": make_reverse_idx(text_max_length, sample.valid_len).to(
-            dtype=torch.int64
-        ),
+        "reverse_indices": make_reverse_idx(text_max_length, sample.valid_len).to(dtype=torch.int64),
     }
     with torch.no_grad():
         values = module(*tuple(feed.values()))
     outputs = dict(zip(("duration_features", "text_encoded", "duration_logits"), values, strict=True))
-    artifact, _ = _export_partition(
+    artifact = _export_partition(
         role=TEXT_DURATION_ROLE,
         module=module,
         feed=feed,
         expected=outputs,
         output_path=Path(output_path).expanduser().resolve(),
         opset=opset,
-        simplify=False,
-        validate_onnx=validate_onnx,
         expected_lstm_nodes=10,
         npu_graph=True,
     )
@@ -448,15 +389,13 @@ def export_frame_bucket(
     model: nn.Module,
     frame_inputs: dict[str, Tensor],
     style: Tensor,
-    output_dir: str | Path,
+    output_paths: dict[str, Path],
     frame_max_length: int,
     seed: int,
     stft_pad_mode: str,
     stft_phase_mode: str,
     f0_norm_mode: str,
     opset: int,
-    validate_onnx: bool,
-    phase_on_npu: bool,
 ) -> FrameBucketExport:
     core = (
         FrameCoreStatic(
@@ -470,8 +409,6 @@ def export_frame_bucket(
         .eval()
         .cpu()
     )
-    root = Path(output_dir).expanduser().resolve()
-    bucket_key = frame_bucket_key(frame_max_length)
     feed = {
         "encoded": frame_inputs["encoded"].detach().cpu(),
         "asr": frame_inputs["asr"].detach().cpu(),
@@ -490,46 +427,17 @@ def export_frame_bucket(
     feeds: dict[str, dict[str, Tensor]] = {}
     outputs: dict[str, dict[str, Tensor]] = {}
 
-    if phase_on_npu:
-        module = FrameSynthesisStatic(core).eval()
-        synthesis_feed = {**feed, "generator_norm_scales": generator_norm_scales}
-        with torch.no_grad():
-            waveform = module(*tuple(synthesis_feed.values()))
-        expected = {"waveform": waveform}
-        artifact, _ = _export_partition(
-            role=FRAME_SYNTHESIS_ROLE,
-            module=module,
-            feed=synthesis_feed,
-            expected=expected,
-            output_path=(
-                root / FRAME_SYNTHESIS_ROLE / bucket_key / f"kokoro_frame_synthesis_b1_f{frame_max_length}.onnx"
-            ),
-            opset=opset,
-            simplify=False,
-            validate_onnx=validate_onnx,
-            expected_lstm_nodes=2,
-            npu_graph=True,
-        )
-        graphs[FRAME_SYNTHESIS_ROLE] = artifact
-        feeds[FRAME_SYNTHESIS_ROLE] = {
-            name: value.detach().cpu().contiguous() for name, value in synthesis_feed.items()
-        }
-        outputs[FRAME_SYNTHESIS_ROLE] = {"waveform": waveform.detach().cpu().contiguous()}
-        return FrameBucketExport(graphs, feeds, outputs, waveform.detach().cpu())
-
     acoustic_module = FrameAcousticStatic(core).eval()
     with torch.no_grad():
         acoustic_values = acoustic_module(*tuple(feed.values()))
-    acoustic_outputs = dict(zip(("decoder_feature", "f0", "phase_increments"), acoustic_values, strict=True))
-    acoustic_artifact, _ = _export_partition(
+    acoustic_outputs = dict(zip(("decoder_feature", "f0"), acoustic_values, strict=True))
+    acoustic_artifact = _export_partition(
         role=FRAME_ACOUSTIC_ROLE,
         module=acoustic_module,
         feed=feed,
         expected=acoustic_outputs,
-        output_path=(root / FRAME_ACOUSTIC_ROLE / bucket_key / f"kokoro_frame_acoustic_b1_f{frame_max_length}.onnx"),
+        output_path=output_paths[FRAME_ACOUSTIC_ROLE],
         opset=opset,
-        simplify=False,
-        validate_onnx=validate_onnx,
         expected_lstm_nodes=2,
         npu_graph=True,
     )
@@ -538,19 +446,17 @@ def export_frame_bucket(
     outputs[FRAME_ACOUSTIC_ROLE] = {name: value.detach().cpu().contiguous() for name, value in acoustic_outputs.items()}
 
     phase_module = PhaseCoreStatic(core).eval()
-    phase_feed = {"phase_increments": acoustic_outputs["phase_increments"]}
+    phase_feed = {"f0": acoustic_outputs["f0"]}
     with torch.no_grad():
         sine = phase_module(*tuple(phase_feed.values()))
     phase_outputs = {"sine": sine}
-    phase_artifact, _ = _export_partition(
+    phase_artifact = _export_partition(
         role=PHASE_CORE_ROLE,
         module=phase_module,
         feed=phase_feed,
         expected=phase_outputs,
-        output_path=(root / PHASE_CORE_ROLE / bucket_key / f"kokoro_phase_core_b1_f{frame_max_length}.onnx"),
+        output_path=output_paths[PHASE_CORE_ROLE],
         opset=opset,
-        simplify=False,
-        validate_onnx=validate_onnx,
         expected_lstm_nodes=0,
         npu_graph=False,
     )
@@ -570,15 +476,13 @@ def export_frame_bucket(
     with torch.no_grad():
         waveform = generator_module(*tuple(generator_feed.values()))
     generator_outputs = {"waveform": waveform}
-    generator_artifact, _ = _export_partition(
+    generator_artifact = _export_partition(
         role=GENERATOR_ISTFT_ROLE,
         module=generator_module,
         feed=generator_feed,
         expected=generator_outputs,
-        output_path=(root / GENERATOR_ISTFT_ROLE / bucket_key / f"kokoro_generator_istft_b1_f{frame_max_length}.onnx"),
+        output_path=output_paths[GENERATOR_ISTFT_ROLE],
         opset=opset,
-        simplify=False,
-        validate_onnx=validate_onnx,
         expected_lstm_nodes=0,
         npu_graph=True,
     )
@@ -590,14 +494,12 @@ def export_frame_bucket(
 
 __all__ = [
     "FRAME_ACOUSTIC_ROLE",
-    "FRAME_SYNTHESIS_ROLE",
     "GENERATOR_ISTFT_ROLE",
     "PHASE_CORE_ROLE",
     "TEXT_DURATION_ROLE",
     "FrameAcousticStatic",
     "FrameBucketExport",
     "FrameCoreStatic",
-    "FrameSynthesisStatic",
     "GeneratorISTFTStatic",
     "PhaseCoreStatic",
     "TextBucketExport",
