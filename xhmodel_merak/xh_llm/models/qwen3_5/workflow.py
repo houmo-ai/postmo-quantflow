@@ -101,11 +101,13 @@ class Qwen35Workflow(BaseLLMWorkflow):
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         quant_cfg = workflow_config.quant
         if quant_cfg is None:
-            return QuantResult(
-                raw_model_dir=self.model_dir,
-                skipped=True,
+            return self._prepare_export_head(
+                QuantResult(raw_model_dir=self.model_dir, skipped=True),
+                workflow_config, device,
             )
 
+        from .quant_adapter import _head_recipe_kwargs
+        _head_recipe_kwargs(quant_cfg, workflow_config.export["model"])
         self._validate_group_size(quant_cfg)
         algorithm = str(quant_cfg.get("algorithm") or "gptqmodel").lower().replace("-", "_")
         artifact_format = self._resolve_artifact_format(quant_cfg)
@@ -151,6 +153,8 @@ class Qwen35Workflow(BaseLLMWorkflow):
     ) -> ExportResult:
         self._validate_lora_export(config_overrides)
         self._validate_export_model(config_overrides)
+        workflow_config = self.workflow_config.with_overrides(config_overrides)
+        quant_result = self._prepare_export_head(quant_result, workflow_config, device)
         export_result = super().export(
             quant_result=quant_result,
             output_dir=output_dir,
@@ -166,6 +170,28 @@ class Qwen35Workflow(BaseLLMWorkflow):
         if not model_type.endswith("_visual"):
             finalize_qwen35_merak_runtime_config(export_result)
         return export_result
+
+    def _prepare_export_head(self, quant_result, workflow_config, device):
+        from .quant_adapter import _head_recipe_kwargs, prepare_head_checkpoint_api
+
+        # The established skip flag supplies quant=None for this call. Retain
+        # the YAML's head requirement/calibration settings without quantizing
+        # the backbone again.
+        quant_cfg = workflow_config.quant
+        if quant_cfg is None:
+            quant_cfg = self.workflow_config.quant or {}
+        export_cfg = workflow_config.export["model"]
+        if not _head_recipe_kwargs(quant_cfg, export_cfg):
+            return quant_result
+        result = prepare_head_checkpoint_api(
+            raw_model_dir=self.model_dir,
+            model_dir=self._resolve_export_model_dir(quant_result),
+            quant_cfg=quant_cfg, export_model_cfg=export_cfg,
+            device=device, workflow_seed=self.seed,
+        )
+        if result.quanted_model_dir == self._resolve_export_model_dir(quant_result):
+            return quant_result
+        return result
 
     def _validate_lora_export(self, config_overrides: Mapping[str, Any] | None) -> None:
         """Fail before creating an output directory or loading the base model."""

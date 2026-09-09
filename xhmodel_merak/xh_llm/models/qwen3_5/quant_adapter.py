@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,7 @@ def quantize_with_autoround_api(
     return QuantResult(
         raw_model_dir=model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
+        meta=_result_provenance(result),
     )
 
 
@@ -76,6 +78,7 @@ def quantize_with_gptqmodel_api(
     return QuantResult(
         raw_model_dir=model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
+        meta=_result_provenance(result),
     )
 
 
@@ -148,6 +151,7 @@ def build_qwen35_autoround_kwargs(
             }
         )
         kwargs["format"] = str(quant_cfg.get("format", quant_cfg.get("autoround_format", "auto_round:gptqmodel")))
+    kwargs.update(_head_recipe_kwargs(quant_cfg, export_model_cfg))
     return {key: value for key, value in kwargs.items() if value is not None}
 
 
@@ -224,7 +228,68 @@ def build_qwen35_gptqmodel_kwargs(
                 "moe": {"routing": moe_cfg.get("routing", moe_cfg.get("moe_routing", "bypass"))},
             }
         )
+    kwargs.update(_head_recipe_kwargs(quant_cfg, export_model_cfg))
     return {key: value for key, value in kwargs.items() if value is not None}
+
+
+def _head_recipe_kwargs(quant_cfg: Mapping[str, Any], export_model_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    if "scope" in quant_cfg:
+        raise ValueError("quant.scope is not supported; use the existing --export-from-quanted-model option")
+    if str(export_model_cfg.get("model_type", "")).endswith("_visual"):
+        return {}
+    scheme = export_model_cfg.get("quant_scheme") or {}
+    head_scheme = (scheme.get("nodes") or {}).get("lm_head") or {}
+    quant_type = head_scheme.get("quant_type", scheme.get("quant_type", ""))
+    match = re.match(r"w(\d+)a", str(quant_type).lower())
+    export_bits = int(match.group(1)) if match else None
+    head = _section(quant_cfg, "head")
+    if not head:
+        if export_bits is not None and export_bits < 8:
+            raise ValueError(f"export lm_head W{export_bits} requires matching quant.head.bits={export_bits}")
+        return {}
+    bits = head.get("bits")
+    if bits not in (4, 5, 8):
+        raise ValueError("quant.head.bits must be 4, 5 or 8")
+    if head.get("group_size", 64) != 64:
+        raise ValueError("quant.head.group_size must be 64")
+    if head.get("algorithm", "inherit") not in {"inherit", "gptq", "autoround"}:
+        raise ValueError("quant.head.algorithm must be inherit, gptq or autoround")
+    if export_bits != bits:
+        raise ValueError(f"quant.head.bits={bits} conflicts with export lm_head quant_type={quant_type!r}")
+    if bits >= 8:
+        return {}
+    if _rotation_value(quant_cfg):
+        raise ValueError("Qwen head calibration currently requires quant.rotation=false")
+    return {"head": {"iters": int(quant_cfg.get("iters", 400)), **head}}
+
+
+def prepare_head_checkpoint_api(*, model_dir, raw_model_dir, device, quant_cfg,
+                                export_model_cfg, workflow_seed) -> QuantResult:
+    """Validate/reuse or complete a checkpoint through GPTQModel before export."""
+    kwargs = _head_recipe_kwargs(quant_cfg, export_model_cfg)
+    if not kwargs:
+        return QuantResult(raw_model_dir=raw_model_dir, quanted_model_dir=model_dir)
+    calibration = _section(quant_cfg, "calibration")
+    value = calibration.get("jsonl", calibration.get("dataset", DEFAULT_AUTOROUND_DATASET))
+    # Resolve repository URIs without requiring calibration data to exist for
+    # the already-packed skip path. GPTQModel opens data only when needed.
+    text = str(value)
+    if _is_repo_resource(text):
+        relative = text.split("://", 1)[1].lstrip("/")
+        text = str(Path(__file__).resolve().parents[4] / relative)
+    else:
+        text = _resolve_calibration_value(text)
+    source_key = "calibration_jsonl" if _is_path_like_value(text) or Path(text).is_file() else "calibration_dataset"
+    recipe = _load_callable("gptqmodel.recipes.qwen35_head", "quantize_qwen35_head",
+                            "Low-bit Qwen head requires the GPTQModel qwen35_head recipe API.")
+    result = recipe(model_dir=model_dir, **kwargs, **{source_key: text}, device=device,
+                    nsamples=int(calibration.get("nsamples", 256)),
+                    seqlen=int(calibration.get("seqlen", 2048)),
+                    calibration_text_key=calibration.get("text_key", "text"),
+                    seed=int(quant_cfg.get("seed", workflow_seed)))
+    return QuantResult(raw_model_dir=raw_model_dir,
+                       quanted_model_dir=_normalize_path(_result_output_dir(result, model_dir)),
+                       meta=_result_provenance(result))
 
 
 def validate_rotation_mtp_compatibility(quant_cfg: Mapping[str, Any], export_model_cfg: Mapping[str, Any]) -> None:
@@ -299,6 +364,11 @@ def _result_output_dir(result: Any, fallback: str) -> str:
     return str(getattr(result, "output_dir", None) or getattr(result, "quanted_model_dir", None) or fallback)
 
 
+def _result_provenance(result: Any) -> dict[str, Any]:
+    provenance = result.get("provenance") if isinstance(result, Mapping) else getattr(result, "provenance", None)
+    return dict(provenance) if isinstance(provenance, Mapping) else {}
+
+
 def _validate_artifact_format(quant_cfg: Mapping[str, Any]) -> None:
     artifact_format = quant_cfg.get("artifact_format")
     output_format = quant_cfg.get("output_format")
@@ -347,6 +417,8 @@ def _quant_output_path(output_dir: str, quant_cfg: Mapping[str, Any]) -> str:
 
 def _resolve_calibration_value(value: Any) -> str:
     text = os.path.expanduser(os.path.expandvars(str(value)))
+    if _is_repo_resource(text):
+        return _resolve_repo_resource(text)
     if text.startswith("gptqmodel://"):
         return _resolve_gptqmodel_resource(text)
     return text

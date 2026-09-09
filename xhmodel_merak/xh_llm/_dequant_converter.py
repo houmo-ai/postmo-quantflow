@@ -268,6 +268,7 @@ def gptqmodel_torch_qlinear_packed_converter(module: nn.Module) -> nn.Module:
         scales=module.scales,
         g_idx=module.g_idx,
         bits=int(module.bits),
+        logical_bits=int(getattr(module, "logical_bits", int(module.maxq).bit_length())),
         group_size=int(module.group_size),
         in_features=int(module.in_features),
         out_features=int(module.out_features),

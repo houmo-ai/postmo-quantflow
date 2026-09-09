@@ -67,6 +67,33 @@ recipe 的输出目录交给 ModelZoo 的 [QuantResult](../../xhmodel_merak/xh_l
 迁移旧兼容逻辑需先有可用的后端版本与消费回归，不能仅因文档划了边界就删除仍在用的修补。
 各路径的迁移状态以上表为准，不能由某个 recipe 已接通推断其他模型也已完成。
 
+## 主输出 head 的校准与复用
+
+Qwen3.5/Qwen3.6 仅在 export head 小于 8 bit 时要求独立校准，并校验
+`quant.head.bits` 与导出 head 位宽一致。现有 W8 YAML 无需新增字段；W8 head
+允许保留浮点，由导出侧沿用 RTN SEFP。此规则不依赖主体是否已经量化。
+
+原生 HF 输入使用原有完整 recipe；主体与 head 的阶段划分是 GPTQModel 内部实现，
+不增加 workflow scope。完整流程最终输出一个 checkpoint。tied head 先复制为独立
+Linear，保留 embedding 数值；保存时同步解除配置绑定，重载不得重新共享。
+
+已有 GPTQModel 产物沿用现有跳过量化入口。workflow 保留原 YAML 的 head 配置：
+兼容的 packed head 直接复用原路径；浮点 head 通过 GPTQModel 补校准，并 warning
+提示同级 `<输入目录名>_head_w{bits}` 新路径及后续复用方式。输出已存在时不覆盖。
+packed head 不符合要求时拒绝自动二次量化。是否兼容由量化库检查实际 head 张量与
+metadata，ModelZoo 不通过目录名称猜测格式。
+
+head 算法默认跟随主体生产算法；AutoRound 产物的 GPTQ 格式标签不代表 GPTQ 算法。
+采集 head 输入时使用已量化主体的实际前向、原始 MoE 路由与 final norm。
+GPTQModel 负责解绑定、校准、分块内存控制和 checkpoint 保留；ModelZoo 只负责
+配置映射、quant/export 一致性、路径选择和结果封装。跳过主体不能跳过低位宽 head
+校验；直接调用 export 也检查实际输入产物。
+
+本地 W5 使用 8 bit 存储槽位、5 bit 数值范围。GPTQModel 提供 `logical_bits=5`，
+ModelZoo 将其与 packed 张量传给 xhquant，图精度按逻辑位宽选择，解包按存储位宽
+进行。该契约不引入官方 `gptq_p` 布局。用法见
+[Qwen MoE README](../../examples_merak/llm/qwen3_5_moe/README.md#qwen36-35b-a3b-head-w4--w5)。
+
 ## 验证边界
 
 ModelZoo 的新增测试统一位于 [当前 CI](../../benchmark_test/ci_test_transformer5.16.0/README.md)，
