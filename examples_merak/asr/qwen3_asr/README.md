@@ -25,6 +25,13 @@ Qwen3-ASR 依赖 `qwen_asr`，该包会带入对应的 `transformers` 版本约�
 configs_merak/workflows/xh2a/other_models/qwen3_asr/0_6b/qwen3_asr.yaml
 ```
 
+Qwen3-ASR 月辉支持 0.6B 和 1.7B，对应导出配置：
+
+```text
+configs_merak/workflows/yuehui/other_models/qwen3_asr/0_6b/qwen3_asr_0_6b.yaml
+configs_merak/workflows/yuehui/other_models/qwen3_asr/1_7b/qwen3_asr_1_7b.yaml
+```
+
 `--model-dir` 必须显式传入。默认输出目录是相对当前工作目录的字符串路径：
 
 - 量化目录：`work_dirs/qwen3_asr_quant`
@@ -38,6 +45,32 @@ YAML 默认导出两个组件：
 workflow 会在导出前把实际使用的 YAML dump 到导出目录，文件名使用 workflow 配置文件名。`AutoWorkflow` 会通过 YAML 中的 `export.model.type` 解析模型，并绑定到 `Qwen3ASRWorkflow`。
 
 ## 导出
+
+Qwen3-ASR-1.7B 月辉导出：
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
+python examples_merak/asr/qwen3_asr/qwen3_asr_workflow.py \
+  --model-dir /data01/nfs_shared/ASR_TTS/Qwen3-ASR-1.7B \
+  --config-path configs_merak/workflows/yuehui/other_models/qwen3_asr/1_7b/qwen3_asr_1_7b.yaml \
+  --export-output-dir work_dirs/qwen3_asr_1_7b_yuehui_export \
+  --device cuda:0 \
+  --overwrite
+```
+
+0.6B 使用同一工作流，替换模型和配置路径：
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
+python examples_merak/asr/qwen3_asr/qwen3_asr_workflow.py \
+  --model-dir /data01/nfs_shared/ASR_TTS/Qwen3-ASR-0.6B \
+  --config-path configs_merak/workflows/yuehui/other_models/qwen3_asr/0_6b/qwen3_asr_0_6b.yaml \
+  --export-output-dir work_dirs/qwen3_asr_0_6b_yuehui_export \
+  --device cuda:0 \
+  --overwrite
+```
+
+XH2a 默认配置导出：
 
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \

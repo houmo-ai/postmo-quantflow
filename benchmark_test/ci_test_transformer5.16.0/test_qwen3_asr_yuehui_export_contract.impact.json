@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen3-asr-yuehui-export-contract",
+      "patterns": [
+        "configs_merak/workflows/yuehui/other_models/qwen3_asr/**",
+        "xhmodel_merak/xh_other_model/models/qwen3_asr/workflow.py"
+      ]
+    }
+  ]
+}

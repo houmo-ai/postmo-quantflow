@@ -575,9 +575,13 @@ def _select_torch_device(device: str) -> str:
 
 
 def _to_xh_device_type(target_device: str, device_type_cls: Any) -> Any:
-    if target_device != "XH2a":
-        raise ValueError(f"Qwen3-ASR workflow currently supports target_device='XH2a', got {target_device!r}")
-    return device_type_cls.XH2a
+    device_type = device_type_cls(target_device)
+    if device_type not in (device_type_cls.XH2a, device_type_cls.YueHui):
+        raise ValueError(
+            "Qwen3-ASR workflow supports target_device in "
+            f"{{'XH2a', 'YueHui'}}, got {target_device!r}"
+        )
+    return device_type
 
 
 def _torch_cuda_available() -> bool:
