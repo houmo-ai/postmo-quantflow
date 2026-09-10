@@ -1044,9 +1044,14 @@ def _build_quant_config(target_device: str, quant_type: str):
 def _to_xh_device_type(target_device: str):
     from xhquant.api import DeviceType
 
-    if target_device != "XH2a":
-        raise ValueError(f"Qwen3-TTS workflow currently supports target_device='XH2a', got {target_device!r}")
-    return DeviceType.XH2a
+    if target_device == "XH2a":
+        return DeviceType.XH2a
+    if target_device == "YueHui":
+        return DeviceType.YueHui
+    raise ValueError(
+        "Qwen3-TTS workflow currently supports target_device='XH2a' or "
+        f"'YueHui', got {target_device!r}"
+    )
 
 
 def _component_meta(work_dir: Path, result: Mapping[str, Any]) -> dict[str, Any]:

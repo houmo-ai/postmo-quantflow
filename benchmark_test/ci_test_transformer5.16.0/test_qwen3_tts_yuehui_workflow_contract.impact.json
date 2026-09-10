@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen3-tts-device-contract",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/qwen3_tts/workflow.py"
+      ]
+    },
+    {
+      "id": "qwen3-tts-workflow-configs",
+      "patterns": [
+        "configs_merak/workflows/xh2a/other_models/qwen3_tts/**",
+        "configs_merak/workflows/yuehui/other_models/qwen3_tts/**"
+      ]
+    }
+  ]
+}

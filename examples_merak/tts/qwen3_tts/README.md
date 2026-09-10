@@ -45,6 +45,24 @@ python examples_merak/tts/qwen3_tts/qwen3_tts_workflow.py \
   --overwrite
 ```
 
+### YueHui 导出
+
+YueHui 与 XH2a 支持相同的三个模型版本
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
+python examples_merak/tts/qwen3_tts/qwen3_tts_workflow.py \
+  --variant 0_6B_customvoice \
+  --config-path \
+    configs_merak/workflows/yuehui/other_models/qwen3_tts/0_6b_customvoice/qwen3_tts_12hz_0_6b_customvoice.yaml \
+  --model-dir <qwen3_tts_model_dir> \
+  --export-output-dir work_dirs/Qwen3-TTS-12Hz-0.6B-CustomVoice_YueHui_W8A8 \
+  --device cuda:0 \
+  --overwrite
+```
+
+后续 Demo 和评估：XH2a 默认目录为 `work_dirs/Qwen3-TTS-12Hz-0.6B-CustomVoice_XH2a`；YueHui 使用 `work_dirs/Qwen3-TTS-12Hz-0.6B-CustomVoice_YueHui_W8A8`。
+
 ## HMONNX 普通 Demo
 
 ```bash
@@ -77,7 +95,7 @@ HMONNX demo 和评估脚本会从导出目录读取顶层 `export_meta_info.json
 
 ## Golden 生成
 
-golden 数据只通过 `dump_golden` 生成。需要同时导出并生成 golden 时，在 workflow 脚本中加入 `--dump-golden`：
+golden 数据只通过 `dump_golden` 生成。以下示例使用 XH2a 默认配置；YueHui 在上面的导出命令中加入 `--dump-golden`。
 
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
