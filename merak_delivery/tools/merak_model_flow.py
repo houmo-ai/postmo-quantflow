@@ -33,6 +33,8 @@ WORK_DIRS_DELIVERY_ROOT = ROOT / "work_dirs" / "merak_delivery"
 SCHEMA_PATH = DELIVERY_ROOT / "schemas/merak_model_card.schema.json"
 REQUIRED_TOP_LEVEL_KEYS = ("schema_version", "external", "internal")
 EXPECTED_ACTIONS = ["quant", "export", "dump_golden", "eval"]
+SUPPORTED_CHIPS = ("m50", "a20", "m66")
+DEFAULT_CHIP = "m50"
 
 
 class DeliveryValidationError(ValueError):
@@ -70,79 +72,82 @@ def _require_list(mapping: dict[str, Any], key: str, path: Path, prefix: str) ->
     return value
 
 
-def validate_delivery_file(path: Path) -> dict[str, Any]:
+def validate_delivery_file(path: Path, *, allow_legacy: bool = False) -> dict[str, Any]:
     """Validate one Merak model card against schema v2 and delivery rules."""
     data = _load_yaml(path)
 
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-    try:
-        validate_schema_instance(data, schema)
-    except ModelCardSchemaValidationError as error:
-        raise DeliveryValidationError(f"{path}: schema violation at `{error.field}`: {error}") from error
+    if allow_legacy and data.get("schema_version") == 1:
+        data = normalize_model_card(data)
+    else:
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        try:
+            validate_schema_instance(data, schema)
+        except ModelCardSchemaValidationError as error:
+            raise DeliveryValidationError(f"{path}: schema violation at `{error.field}`: {error}") from error
 
-    for key in REQUIRED_TOP_LEVEL_KEYS:
-        if key not in data:
-            raise DeliveryValidationError(f"{path}: missing top-level key `{key}`")
-    allowed_keys = set(REQUIRED_TOP_LEVEL_KEYS)
-    extra_keys = set(data) - allowed_keys
-    if extra_keys:
-        extra = ", ".join(sorted(extra_keys))
-        raise DeliveryValidationError(f"{path}: unexpected top-level key(s): {extra}")
+        for key in REQUIRED_TOP_LEVEL_KEYS:
+            if key not in data:
+                raise DeliveryValidationError(f"{path}: missing top-level key `{key}`")
+        allowed_keys = set(REQUIRED_TOP_LEVEL_KEYS)
+        extra_keys = set(data) - allowed_keys
+        if extra_keys:
+            extra = ", ".join(sorted(extra_keys))
+            raise DeliveryValidationError(f"{path}: unexpected top-level key(s): {extra}")
 
-    if data["schema_version"] != 2:
-        raise DeliveryValidationError(f"{path}: `schema_version` must be 2")
+        if data["schema_version"] != 2:
+            raise DeliveryValidationError(f"{path}: `schema_version` must be 2")
 
-    external = _require_mapping(data, "external", path)
-    internal = _require_mapping(data, "internal", path)
-    _require_mapping(external, "model", path)
-    parameters = _require_mapping(external, "parameters", path)
-    compute = _require_mapping(external, "compute", path)
-    precision = _require_mapping(external, "precision", path)
-    if not isinstance(external.get("owner"), str):
-        raise DeliveryValidationError(f"{path}: `external.owner` must be a string")
-    if parameters.get("status") not in {"verified", "inferred", "missing"}:
-        raise DeliveryValidationError(f"{path}: `external.parameters.status` must be verified, inferred, or missing")
-    if compute.get("status") not in {"verified", "inferred", "missing"}:
-        raise DeliveryValidationError(f"{path}: `external.compute.status` must be verified, inferred, or missing")
-    if compute.get("unit") != "TFLOPs":
-        raise DeliveryValidationError(f"{path}: `external.compute.unit` must be TFLOPs")
-    if compute.get("status") != "missing":
-        input_shape = compute.get("input_shape")
-        if (
-            not isinstance(input_shape, list)
-            or len(input_shape) < 2
-            or any(not isinstance(size, int) or isinstance(size, bool) or size <= 0 for size in input_shape)
-        ):
-            raise DeliveryValidationError(
-                f"{path}: non-missing `external.compute.input_shape` must contain batch and at least one input dimension"
-            )
-        prefill = compute.get("prefill")
-        if not isinstance(prefill, (int, float)) or isinstance(prefill, bool) or prefill < 0:
-            raise DeliveryValidationError(
-                f"{path}: non-missing `external.compute.prefill` must be a non-negative number"
-            )
-        decode = compute.get("decode")
-        if decode is not None and (
-            not isinstance(decode, (int, float)) or isinstance(decode, bool) or decode < 0
-        ):
-            raise DeliveryValidationError(
-                f"{path}: `external.compute.decode` must be null or a non-negative number"
-            )
-    if "note" in compute and not isinstance(compute["note"], str):
-        raise DeliveryValidationError(f"{path}: `external.compute.note` must be a string")
-    comparisons = precision.get("comparisons")
-    if comparisons is not None and not isinstance(comparisons, list):
-        raise DeliveryValidationError(f"{path}: `external.precision.comparisons` must be a list")
-    _require_mapping(internal, "model", path)
-    _require_mapping(internal, "io", path)
-    _require_mapping(internal, "presentation", path)
-    components = internal.get("components")
-    if not isinstance(components, list) or not components:
-        raise DeliveryValidationError(f"{path}: `internal.components` must be a non-empty list")
-    if not any(isinstance(component, dict) and component.get("id") == "model" for component in components):
-        raise DeliveryValidationError(f"{path}: `internal.components` must include the main `model` component")
+        external = _require_mapping(data, "external", path)
+        internal = _require_mapping(data, "internal", path)
+        _require_mapping(external, "model", path)
+        parameters = _require_mapping(external, "parameters", path)
+        compute = _require_mapping(external, "compute", path)
+        precision = _require_mapping(external, "precision", path)
+        if not isinstance(external.get("owner"), str):
+            raise DeliveryValidationError(f"{path}: `external.owner` must be a string")
+        if parameters.get("status") not in {"verified", "inferred", "missing"}:
+            raise DeliveryValidationError(f"{path}: `external.parameters.status` must be verified, inferred, or missing")
+        if compute.get("status") not in {"verified", "inferred", "missing"}:
+            raise DeliveryValidationError(f"{path}: `external.compute.status` must be verified, inferred, or missing")
+        if compute.get("unit") != "TFLOPs":
+            raise DeliveryValidationError(f"{path}: `external.compute.unit` must be TFLOPs")
+        if compute.get("status") != "missing":
+            input_shape = compute.get("input_shape")
+            if (
+                not isinstance(input_shape, list)
+                or len(input_shape) < 2
+                or any(not isinstance(size, int) or isinstance(size, bool) or size <= 0 for size in input_shape)
+            ):
+                raise DeliveryValidationError(
+                    f"{path}: non-missing `external.compute.input_shape` must contain batch and at least one input dimension"
+                )
+            prefill = compute.get("prefill")
+            if not isinstance(prefill, (int, float)) or isinstance(prefill, bool) or prefill < 0:
+                raise DeliveryValidationError(
+                    f"{path}: non-missing `external.compute.prefill` must be a non-negative number"
+                )
+            decode = compute.get("decode")
+            if decode is not None and (
+                not isinstance(decode, (int, float)) or isinstance(decode, bool) or decode < 0
+            ):
+                raise DeliveryValidationError(
+                    f"{path}: `external.compute.decode` must be null or a non-negative number"
+                )
+        if "note" in compute and not isinstance(compute["note"], str):
+            raise DeliveryValidationError(f"{path}: `external.compute.note` must be a string")
+        comparisons = precision.get("comparisons")
+        if comparisons is not None and not isinstance(comparisons, list):
+            raise DeliveryValidationError(f"{path}: `external.precision.comparisons` must be a list")
+        _require_mapping(internal, "model", path)
+        _require_mapping(internal, "io", path)
+        _require_mapping(internal, "presentation", path)
+        components = internal.get("components")
+        if not isinstance(components, list) or not components:
+            raise DeliveryValidationError(f"{path}: `internal.components` must be a non-empty list")
+        if not any(isinstance(component, dict) and component.get("id") == "model" for component in components):
+            raise DeliveryValidationError(f"{path}: `internal.components` must include the main `model` component")
 
-    data = normalize_model_card(data)
+        data = normalize_model_card(data)
 
     model = _require_mapping(data, "model", path)
     model_id = _require_non_empty_string(model, "id", path, "model")
@@ -220,6 +225,71 @@ def _resolve_path(value: str) -> Path:
     return path if path.is_absolute() else ROOT / path
 
 
+def _validate_chip(chip: str) -> str:
+    chip = (chip or DEFAULT_CHIP).lower()
+    if chip not in SUPPORTED_CHIPS:
+        raise DeliveryValidationError(f"unsupported chip `{chip}`; expected one of {', '.join(SUPPORTED_CHIPS)}")
+    return chip
+
+
+def _chip_model_card_root(root: Path, chip: str = DEFAULT_CHIP) -> Path:
+    chip = _validate_chip(chip)
+    if root.is_file():
+        return root
+    if root.name == "examples_merak":
+        return root
+    if root.name in SUPPORTED_CHIPS and root.parent.name == "model_cards":
+        return root
+    if root.name == "model_cards" and (root / chip).is_dir():
+        return root / chip
+    candidate = root / "model_cards" / chip
+    if candidate.is_dir():
+        return candidate
+    return root
+
+
+def _is_model_card_file(path: Path, *, chip: str | None = None) -> bool:
+    if not path.is_file() or path.suffix.lower() not in {".yaml", ".yml"}:
+        return False
+    if path.parent.name in SUPPORTED_CHIPS and path.parent.parent.name == "model_cards":
+        return chip is None or path.parent.name == chip
+    if path.parent.name == "model_cards" and chip is None:
+        return True
+    return False
+
+
+def _find_model_cards_by_name(filename: str, chip: str = DEFAULT_CHIP) -> list[Path]:
+    chip = _validate_chip(chip)
+    root = _chip_model_card_root(ROOT / "examples_merak", chip)
+    return sorted(candidate for candidate in root.rglob(filename) if _is_model_card_file(candidate, chip=chip))
+
+
+def _resolve_model_card_path(value: str) -> Path:
+    path = _resolve_path(value)
+    if path.is_file():
+        return path
+
+    matches = _find_model_cards_by_name(path.name)
+    if matches:
+        if len(matches) > 1:
+            candidates = ", ".join(_relative_or_str(candidate) for candidate in matches)
+            raise DeliveryValidationError(f"model card path is ambiguous: {path}; candidates: {candidates}")
+        return matches[0]
+
+    legacy_root = DELIVERY_ROOT / "model_cards" / "merak"
+    try:
+        path.relative_to(legacy_root)
+    except ValueError:
+        raise DeliveryValidationError(f"model card does not exist: {path}") from None
+
+    matches = _find_model_cards_by_name(path.name)
+    if not matches:
+        raise DeliveryValidationError(f"model card does not exist and no migrated card was found: {path}")
+    if len(matches) > 1:
+        candidates = ", ".join(_relative_or_str(candidate) for candidate in matches)
+        raise DeliveryValidationError(f"legacy model card path is ambiguous: {path}; candidates: {candidates}")
+    return matches[0]
+
 def _relative_or_str(path: Path) -> str:
     try:
         return str(path.resolve().relative_to(ROOT))
@@ -228,7 +298,7 @@ def _relative_or_str(path: Path) -> str:
 
 
 def _load_model_card(path: Path) -> dict[str, Any]:
-    return validate_delivery_file(path)
+    return validate_delivery_file(path, allow_legacy=True)
 
 
 def _extract_export_summary(workflow_config_path: Path, golden_meta_path: Path) -> dict[str, Any]:
@@ -511,12 +581,14 @@ def _run_build_catalog(
     release_root: Path | None = None,
     catalog_root: Path | None = None,
     model_card_root: Path | None = None,
+    chip: str = DEFAULT_CHIP,
 ) -> int:
     return build_catalog_command(
         argparse.Namespace(
             release_root=str(release_root) if release_root else "",
             catalog_root=str(catalog_root) if catalog_root else "",
             model_card_root=str(model_card_root) if model_card_root else "",
+            chip=chip,
         )
     )
 
@@ -688,16 +760,18 @@ def register_release_command(args: argparse.Namespace) -> int:
     return 0
 
 
-def discover_model_cards(root: Path) -> list[Path]:
+def discover_model_cards(root: Path, *, chip: str = DEFAULT_CHIP) -> list[Path]:
     if root.is_file():
         return [root]
+    root = _chip_model_card_root(root, chip)
     if not root.is_dir():
         raise DeliveryValidationError(f"model card root does not exist: {root}")
-    return sorted(path for path in root.rglob("*.yaml") if path.is_file() and path.parent.name == "model_cards")
+    chip = _validate_chip(chip)
+    return sorted(path for path in root.rglob("*.yaml") if _is_model_card_file(path, chip=chip))
 
 
-def _find_model_cards(root: Path | None = None) -> list[Path]:
-    return discover_model_cards(root or (ROOT / "examples_merak"))
+def _find_model_cards(root: Path | None = None, *, chip: str = DEFAULT_CHIP) -> list[Path]:
+    return discover_model_cards(root or (ROOT / "examples_merak"), chip=chip)
 
 
 def _latest_release_for(model_id: str, release_root: Path | None = None) -> tuple[dict[str, Any] | None, Path | None]:
@@ -815,15 +889,19 @@ def _collect_catalog_data(
     *,
     release_root: Path | None = None,
     model_card_root: Path | None = None,
+    chip: str = DEFAULT_CHIP,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+    chip = _validate_chip(chip)
     release_root = release_root or _default_release_root()
     model_card_root = model_card_root or ROOT / "examples_merak"
     index_models = []
     all_models = []
     generated_models = []
-    model_cards = [(card_path, _load_model_card(card_path)) for card_path in _find_model_cards(model_card_root)]
+    model_cards = [
+        (card_path, _load_model_card(card_path)) for card_path in _find_model_cards(model_card_root, chip=chip)
+    ]
     model_cards.sort(key=lambda item: (str(item[1]["model"]["family"]), str(item[1]["model"]["id"])))
     for card_path, card in model_cards:
         model_id = card["model"]["id"]
@@ -845,6 +923,7 @@ def _collect_catalog_data(
         detail = {
             "schema_version": 1,
             "generated_at": generated_at,
+            "chip": chip,
             "model_id": model_id,
             "external": card["external"],
             "internal": card["internal"],
@@ -862,6 +941,7 @@ def _collect_catalog_data(
         index_models.append(
             {
                 "model_id": model_id,
+                "chip": chip,
                 "display_name": card["model"]["display_name"],
                 "family": card["model"]["family"],
                 "modality": card["model"]["modality"],
@@ -900,6 +980,7 @@ def _collect_catalog_data(
         generated_models.append(
             {
                 "model_id": model_id,
+                "chip": chip,
                 "name": card["model"]["display_name"],
                 "family": card["model"]["family"],
                 "category": _catalog_model_category(card),
@@ -937,9 +1018,9 @@ def _collect_catalog_data(
             }
         )
     return {
-        "index": {"schema_version": 1, "generated_at": generated_at, "models": index_models},
-        "models": {"schema_version": 1, "generated_at": generated_at, "models": all_models},
-        "generated": {"last_updated": generated_at, "models": generated_models},
+        "index": {"schema_version": 1, "generated_at": generated_at, "chip": chip, "models": index_models},
+        "models": {"schema_version": 1, "generated_at": generated_at, "chip": chip, "models": all_models},
+        "generated": {"last_updated": generated_at, "chip": chip, "models": generated_models},
     }
 
 
@@ -950,7 +1031,11 @@ def build_catalog_command(args: argparse.Namespace) -> int:
     data_dir = catalog_root / "data"
     models_dir = data_dir / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
-    catalog = _collect_catalog_data(release_root=release_root, model_card_root=model_card_root)
+    catalog = _collect_catalog_data(
+        release_root=release_root,
+        model_card_root=model_card_root,
+        chip=getattr(args, "chip", DEFAULT_CHIP),
+    )
     current_detail_paths: set[Path] = set()
     for detail in catalog["models"]["models"]:
         detail_path = models_dir / f"{detail['model_id']}.json"
@@ -972,7 +1057,11 @@ def build_catalog_command(args: argparse.Namespace) -> int:
 def query_catalog_command(args: argparse.Namespace) -> int:
     release_root = _resolve_path(getattr(args, "release_root", "")) if getattr(args, "release_root", "") else _default_release_root()
     model_card_root = _resolve_path(getattr(args, "model_card_root", "")) if getattr(args, "model_card_root", "") else ROOT / "examples_merak"
-    catalog = _collect_catalog_data(release_root=release_root, model_card_root=model_card_root)
+    catalog = _collect_catalog_data(
+        release_root=release_root,
+        model_card_root=model_card_root,
+        chip=getattr(args, "chip", DEFAULT_CHIP),
+    )
     print(json.dumps(catalog["generated"], indent=2, ensure_ascii=False))
     return 0
 
@@ -981,6 +1070,7 @@ def render_readme_command(args: argparse.Namespace) -> int:
     model_id = args.model_id
     catalog_root = _resolve_path(getattr(args, "catalog_root", "")) if getattr(args, "catalog_root", "") else _default_catalog_root()
     release_root = _resolve_path(getattr(args, "release_root", "")) if getattr(args, "release_root", "") else _default_release_root()
+    chip = getattr(args, "chip", DEFAULT_CHIP)
     detail_path = catalog_root / "data" / "models" / f"{model_id}.json"
     if not detail_path.is_file():
         build_catalog_command(
@@ -988,6 +1078,7 @@ def render_readme_command(args: argparse.Namespace) -> int:
                 release_root=str(release_root),
                 catalog_root=str(catalog_root),
                 model_card_root="",
+                chip=chip,
             )
         )
     detail = _read_json(detail_path)
@@ -1029,7 +1120,7 @@ def validate_command(args: argparse.Namespace) -> int:
     json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
     root = (ROOT / args.root).resolve() if not Path(args.root).is_absolute() else Path(args.root)
-    files = iter_delivery_files(root)
+    files = discover_model_cards(root, chip=getattr(args, "chip", DEFAULT_CHIP))
     if not files:
         raise DeliveryValidationError(f"no model card YAML files found under {root}")
     for delivery_file in files:
@@ -1049,6 +1140,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="examples_merak",
         help="model card YAML file or directory",
     )
+    validate_parser.add_argument("--chip", choices=SUPPORTED_CHIPS, default=DEFAULT_CHIP, help="model card chip")
     validate_parser.set_defaults(func=validate_command)
 
     run_parser = subparsers.add_parser("run-workflow", help="run real Merak workflow and collect delivery metadata")
@@ -1127,17 +1219,20 @@ def build_parser() -> argparse.ArgumentParser:
     catalog_parser.add_argument("--release-root", default="", help="release root directory")
     catalog_parser.add_argument("--catalog-root", default="", help="catalog root directory")
     catalog_parser.add_argument("--model-card-root", default="", help="model card root directory; defaults to examples_merak")
+    catalog_parser.add_argument("--chip", choices=SUPPORTED_CHIPS, default=DEFAULT_CHIP, help="model card chip")
     catalog_parser.set_defaults(func=build_catalog_command)
 
     query_catalog_parser = subparsers.add_parser("query-catalog", help="print frontend catalog JSON without writing files")
     query_catalog_parser.add_argument("--release-root", default="", help="release root directory")
     query_catalog_parser.add_argument("--model-card-root", default="", help="model card root directory; defaults to examples_merak")
+    query_catalog_parser.add_argument("--chip", choices=SUPPORTED_CHIPS, default=DEFAULT_CHIP, help="model card chip")
     query_catalog_parser.set_defaults(func=query_catalog_command)
 
     readme_parser = subparsers.add_parser("render-readme", help="render README from catalog/release data")
     readme_parser.add_argument("--model-id", required=True, help="model id to render")
     readme_parser.add_argument("--release-root", default="", help="release root directory")
     readme_parser.add_argument("--catalog-root", default="", help="catalog root directory")
+    readme_parser.add_argument("--chip", choices=SUPPORTED_CHIPS, default=DEFAULT_CHIP, help="model card chip")
     readme_parser.set_defaults(func=render_readme_command)
     return parser
 
@@ -1158,6 +1253,7 @@ configure_core(
     infer_eval_model_id=_infer_eval_model_id,
     load_model_card=_load_model_card,
     relative_or_str=_relative_or_str,
+    resolve_model_card_path=_resolve_model_card_path,
     resolve_path=_resolve_path,
     run_build_catalog=lambda *args, **kwargs: _run_build_catalog(*args, **kwargs),
     run_check_artifact=lambda *args, **kwargs: _run_check_artifact(*args, **kwargs),

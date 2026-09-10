@@ -14,7 +14,7 @@ SPEC.loader.exec_module(syncer)
 
 
 def _write_card(root: Path, model_id: str, model_dir: str, precision: str) -> Path:
-    path = root / "examples_merak/llm/demo/model_cards" / f"{model_id}.yaml"
+    path = root / "examples_merak/llm/demo/model_cards/m50" / f"{model_id}.yaml"
     path.parent.mkdir(parents=True)
     card = syncer.to_v2_model_card(
         {
@@ -143,3 +143,28 @@ def test_demo():
 
     assert result["matched_cases"] == 0
     assert "benchmark" not in card["internal"]
+
+
+def test_sync_keeps_chip_roots_separate(tmp_path: Path):
+    m50_card = _write_card(tmp_path, "demo_1b", "/models/Demo-1B", "w8a8h1_sefp")
+    a20_card = tmp_path / "examples_merak/llm/demo/model_cards/a20/demo_1b.yaml"
+    a20_card.parent.mkdir(parents=True)
+    a20_card.write_text(m50_card.read_text(encoding="utf-8"), encoding="utf-8")
+    benchmark_root = tmp_path / "benchmark_test"
+    benchmark_root.mkdir()
+    (benchmark_root / "benchmark_test_demo_1b.py").write_text(
+        """
+import allure
+
+@allure.title("Demo-1B 测试")
+def test_demo():
+    command = ["python", "export.py", "--model", "/models/Demo-1B", "--quant-type", "w8a8h1_sefp"]
+    eval_ppl_path = "work_dirs/Demo-1B/eval_ppl.txt"
+""",
+        encoding="utf-8",
+    )
+
+    syncer.sync(tmp_path, chip="a20")
+
+    assert "benchmark" not in yaml.safe_load(m50_card.read_text(encoding="utf-8"))["internal"]
+    assert yaml.safe_load(a20_card.read_text(encoding="utf-8"))["internal"]["benchmark"]["status"] == "covered"

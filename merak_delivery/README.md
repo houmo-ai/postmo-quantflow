@@ -40,8 +40,9 @@ merak_delivery/
 ```
 
 默认运行产物写入仓库根目录下的 `work_dirs/merak_delivery/`，而不是写入源码目录。
-模型卡随模型示例放在 `examples_merak/<类别>/<模型目录>/model_cards/`，
-`merak_delivery` 工具默认递归扫描这些 `model_cards/*.yaml`。
+模型卡随模型示例放在 `examples_merak/<类别>/<模型目录>/model_cards/<chip>/`，
+`merak_delivery` 工具默认递归扫描 `model_cards/m50/*.yaml`。当前支持的 chip 为
+`m50`、`a20`、`m66`，可通过 `--chip` 切换。
 
 ## 完整流程
 
@@ -80,7 +81,7 @@ python merak_delivery/tools/merak_model_flow.py validate
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py validate \
-  --root examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml
+  --root examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml
 ```
 
 ### 2. 查看流转计划
@@ -89,7 +90,7 @@ python merak_delivery/tools/merak_model_flow.py validate \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-workflow \
-  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml \
   --dry-run
 ```
 
@@ -99,7 +100,7 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-workflow \
-  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml \
   --dump-golden
 ```
 
@@ -120,7 +121,7 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-workflow \
-  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml \
   --dump-golden \
   --run-eval \
   --eval-backend hmonnx \
@@ -149,7 +150,7 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-workflow \
-  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml \
   --dump-golden \
   --run-eval \
   --eval-backend hmonnx \
@@ -167,7 +168,7 @@ python merak_delivery/tools/merak_model_flow.py run-workflow \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-eval \
-  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml \
   --eval-backend hmonnx \
   --eval-datasets ceval mmlu_pro \
   --hmonnx-meta work_dirs/path/to/golden_meta_info.json
@@ -178,7 +179,7 @@ python merak_delivery/tools/merak_model_flow.py run-eval \
 
 ```bash
 python merak_delivery/tools/merak_model_flow.py run-eval \
-  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml \
   --eval-backend float
 ```
 
@@ -214,7 +215,7 @@ python merak_delivery/tools/merak_model_flow.py run-eval \
 
 ```bash
 python merak_delivery/tools/collect_merak_delivery_manifest.py \
-  --model-card examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml \
+  --model-card examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml \
   --work-dir work_dirs/merak_delivery/qwen3_0_6b/example \
   --export-dir work_dirs/path/to/export \
   --golden-meta work_dirs/path/to/golden_meta_info.json \
@@ -254,13 +255,17 @@ python merak_delivery/tools/render_merak_readme.py \
 
 模型卡是完整流转的唯一输入定义。当前示例：
 
-- `examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml`
-- `examples_merak/llm/qwen3_5/model_cards/qwen3_5_9b.yaml`
-- `examples_merak/llm/gemma4_series/model_cards/gemma4_e4b.yaml`
+- `examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml`
+- `examples_merak/llm/qwen3_5/model_cards/m50/qwen3_5_9b.yaml`
+- `examples_merak/llm/gemma4_series/model_cards/m50/gemma4_e4b.yaml`
 
-模型卡统一放在对应示例目录下的 `model_cards/` 子目录。一个基础模型只对应一张卡片；
+模型卡统一放在对应示例目录下的 `model_cards/<chip>/` 子目录。一个基础模型在每个 chip 下只对应一张卡片；
 同一模型尺寸存在多个 workflow 时优先选择标准 `full` 配置作为主配置，GPTQ、MTP、
 DFlash、no-quant、visual-only 等技术变体不会生成重复的前端模型卡。
+
+流转命令在迁移期兼容原 `merak_delivery/model_cards/merak/<family>/<model>.yaml`
+路径和 schema v1 卡片；旧路径会解析到 `examples_merak` 中默认 `m50` 的唯一同名卡片，并在
+Manifest 中记录新路径。仓库内模型卡校验仍严格要求 schema v2。
 
 可以从 `examples_merak` 中实际引用的 workflow YAML 自动生成卡片草稿：
 

@@ -108,7 +108,7 @@ def test_generate_supports_absolute_output_root(tmp_path: Path, monkeypatch, cap
     capsys.readouterr()
     report = json.loads(report_path.read_text(encoding="utf-8"))
 
-    assert report["cards"][0]["card"] == str(output_root / "llm" / "demo" / "model_cards" / "demo_1b.yaml")
+    assert report["cards"][0]["card"] == str(output_root / "llm" / "demo" / "model_cards" / "m50" / "demo_1b.yaml")
 
 
 def test_formats_qwen_model_names():
@@ -157,7 +157,7 @@ def test_groups_workflow_variants_and_prefers_full(tmp_path: Path, monkeypatch, 
     result = json.loads(capsys.readouterr().out)
     assert result["cards"] == 1
     card = yaml.safe_load(
-        (root / args.output_root / "llm" / "qwen3_5" / "model_cards" / "qwen3_5_4b.yaml").read_text(
+        (root / args.output_root / "llm" / "qwen3_5" / "model_cards" / "m50" / "qwen3_5_4b.yaml").read_text(
             encoding="utf-8"
         )
     )
@@ -210,7 +210,7 @@ def test_card_output_path_uses_nested_model_cards_with_dot_family(tmp_path: Path
         [],
         examples_root,
         examples_root,
-    ) == example_dir / "model_cards" / "mineru2_5_pro.yaml"
+    ) == example_dir / "model_cards" / "m50" / "mineru2_5_pro.yaml"
 
 
 def test_card_output_path_prefers_family_dir_over_stale_single_evidence(tmp_path: Path, monkeypatch):
@@ -229,7 +229,7 @@ def test_card_output_path_prefers_family_dir_over_stale_single_evidence(tmp_path
         [qwen35],
         examples_root,
         examples_root,
-    ) == moe / "model_cards" / "qwen3_5_122b_a10b.yaml"
+    ) == moe / "model_cards" / "m50" / "qwen3_5_122b_a10b.yaml"
 
 
 def test_overwrite_preserves_accuracy_and_benchmark(tmp_path: Path, monkeypatch, capsys):
@@ -251,7 +251,7 @@ def test_overwrite_preserves_accuracy_and_benchmark(tmp_path: Path, monkeypatch,
     )
     assert generator.generate(args) == 0
     capsys.readouterr()
-    card_path = tmp_path / args.output_root / "llm" / "demo" / "model_cards" / "demo_1b.yaml"
+    card_path = tmp_path / args.output_root / "llm" / "demo" / "model_cards" / "m50" / "demo_1b.yaml"
     card = yaml.safe_load(card_path.read_text(encoding="utf-8"))
     card["internal"]["source"]["provider"] = "ModelScope"
     card["internal"]["source"]["url"] = "https://modelscope.cn/models/demo"

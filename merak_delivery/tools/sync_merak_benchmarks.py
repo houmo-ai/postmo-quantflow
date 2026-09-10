@@ -31,6 +31,8 @@ RESULT_RE = re.compile(r"['\"]([^'\"]*eval_ppl[^'\"]*\.txt)['\"]", re.IGNORECASE
 THRESHOLD_RE = re.compile(r"assert\s+ppl_value\s*([<>]=?)\s*([0-9]+(?:\.[0-9]+)?)")
 PARAM_RE = re.compile(r"@pytest\.mark\.parametrize\(\s*['\"](w_bit|a_bit)['\"]\s*,\s*\[([^]]+)]")
 SEMANTIC_QUALIFIERS = {"embedding", "reranker", "asr", "tts", "forcealigner", "coder"}
+SUPPORTED_CHIPS = ("m50", "a20", "m66")
+DEFAULT_CHIP = "m50"
 
 
 def _normalize(value: str) -> str:
@@ -225,13 +227,53 @@ def _benchmark_summary(cases: list[dict[str, Any]]) -> tuple[str, str]:
     return "missing", "未找到与当前模型匹配的 benchmark_test 脚本。"
 
 
-def _discover_model_cards(card_root: Path) -> list[Path]:
+def _validate_chip(chip: str) -> str:
+    chip = (chip or DEFAULT_CHIP).lower()
+    if chip not in SUPPORTED_CHIPS:
+        raise ValueError(f"unsupported chip `{chip}`; expected one of {', '.join(SUPPORTED_CHIPS)}")
+    return chip
+
+
+def _chip_model_card_root(card_root: Path, chip: str = DEFAULT_CHIP) -> Path:
+    chip = _validate_chip(chip)
+    if card_root.is_file():
+        return card_root
+    if card_root.name == "examples_merak":
+        return card_root
+    if card_root.name in SUPPORTED_CHIPS and card_root.parent.name == "model_cards":
+        return card_root
+    if card_root.name == "model_cards" and (card_root / chip).is_dir():
+        return card_root / chip
+    candidate = card_root / "model_cards" / chip
+    if candidate.is_dir():
+        return candidate
+    return card_root
+
+
+def _is_model_card_file(path: Path, *, chip: str | None = None) -> bool:
+    if not path.is_file() or path.suffix.lower() not in {".yaml", ".yml"}:
+        return False
+    if path.parent.name in SUPPORTED_CHIPS and path.parent.parent.name == "model_cards":
+        return chip is None or path.parent.name == chip
+    if path.parent.name == "model_cards" and chip is None:
+        return True
+    return False
+
+
+def _discover_model_cards(card_root: Path, *, chip: str = DEFAULT_CHIP) -> list[Path]:
     if card_root.is_file():
         return [card_root]
-    return sorted(path for path in card_root.rglob("*.yaml") if path.is_file() and path.parent.name == "model_cards")
+    card_root = _chip_model_card_root(card_root, chip)
+    chip = _validate_chip(chip)
+    return sorted(path for path in card_root.rglob("*.yaml") if _is_model_card_file(path, chip=chip))
 
 
-def sync(root: Path = ROOT, card_root: Path | None = None, benchmark_root: Path | None = None) -> dict[str, int]:
+def sync(
+    root: Path = ROOT,
+    card_root: Path | None = None,
+    benchmark_root: Path | None = None,
+    chip: str = DEFAULT_CHIP,
+) -> dict[str, int]:
     card_root = card_root or root / "examples_merak"
     benchmark_root = benchmark_root or root / "benchmark_test"
     if not card_root.is_absolute():
@@ -241,7 +283,7 @@ def sync(root: Path = ROOT, card_root: Path | None = None, benchmark_root: Path 
     benchmarks = [_scan_script(root, path) for path in sorted(benchmark_root.glob("benchmark_test_*.py"))]
     updated = 0
     matched_cases = 0
-    for card_path in _discover_model_cards(card_root):
+    for card_path in _discover_model_cards(card_root, chip=chip):
         card = yaml.safe_load(card_path.read_text(encoding="utf-8")) or {}
         normalized_card = normalize_model_card(card)
         cases = [case for benchmark in benchmarks if (case := _match_case(normalized_card, benchmark)) is not None]
@@ -271,8 +313,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--card-root", type=Path)
     parser.add_argument("--benchmark-root", type=Path)
+    parser.add_argument("--chip", choices=SUPPORTED_CHIPS, default=DEFAULT_CHIP)
     args = parser.parse_args()
-    result = sync(ROOT, args.card_root, args.benchmark_root)
+    result = sync(ROOT, args.card_root, args.benchmark_root, chip=args.chip)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

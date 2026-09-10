@@ -9,7 +9,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 FLOW = ROOT / "merak_delivery/tools/merak_model_flow.py"
-MODEL_CARD = ROOT / "examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml"
+MODEL_CARD = ROOT / "examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml"
+OLD_EXAMPLE_MODEL_CARD = "examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml"
 OLD_MODEL_CARD = "merak_delivery/model_cards/merak/qwen3/qwen3_0_6b.yaml"
 MODEL_ID = "qwen3_0_6b"
 VERSION_ID = "qwen3_0_6b_w8a16h1_sefp_draft"
@@ -60,7 +61,7 @@ def test_run_workflow_dry_run_plans_real_workflow_without_running_heavy_steps(tm
     result = run_flow(
         "run-workflow",
         "--model-card",
-        str(MODEL_CARD.relative_to(ROOT)),
+        OLD_EXAMPLE_MODEL_CARD,
         "--work-dir",
         str(tmp_path / "flow"),
         "--model-dir",
@@ -429,7 +430,7 @@ def test_query_catalog_reads_modelzoo_cards_without_writing_catalog(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert not catalog_root.exists()
     payload = json.loads(result.stdout)
-    cards = list((ROOT / "examples_merak").glob("**/model_cards/*.yaml"))
+    cards = list((ROOT / "examples_merak").glob("**/model_cards/m50/*.yaml"))
     assert len(payload["models"]) == len(cards)
     qwen = next(model for model in payload["models"] if model["model_id"] == MODEL_ID)
     metadata_gate = next(gate for gate in qwen["gates"] if gate["name"] == "metadata_valid")

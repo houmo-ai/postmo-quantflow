@@ -46,14 +46,16 @@ def test_cli_builds_existing_commands():
 
 
 def test_model_card_discovery_only_reads_model_cards_directories(tmp_path: Path):
-    card = tmp_path / "examples_merak" / "llm" / "demo" / "model_cards" / "demo.yaml"
+    card = tmp_path / "examples_merak" / "llm" / "demo" / "model_cards" / "m50" / "demo.yaml"
+    other_chip = tmp_path / "examples_merak" / "llm" / "demo" / "model_cards" / "a20" / "demo.yaml"
     unrelated = tmp_path / "examples_merak" / "llm" / "demo" / "workflow.yaml"
     nested = card.parent / "archive" / "old.yaml"
-    for path in (card, unrelated, nested):
+    for path in (card, other_chip, unrelated, nested):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("model: {}\n", encoding="utf-8")
 
     assert flow.discover_model_cards(tmp_path / "examples_merak") == [card]
+    assert flow.discover_model_cards(tmp_path / "examples_merak", chip="a20") == [other_chip]
 
 
 def test_catalog_precision_uses_workflow_weight_bits_for_delivery_label(

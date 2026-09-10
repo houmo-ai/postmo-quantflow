@@ -10,9 +10,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 DELIVERY_FILES = [
-    ROOT / "examples_merak/llm/gemma4_series/model_cards/gemma4_e4b.yaml",
-    ROOT / "examples_merak/llm/qwen3/model_cards/qwen3_0_6b.yaml",
-    ROOT / "examples_merak/llm/qwen3_5/model_cards/qwen3_5_9b.yaml",
+    ROOT / "examples_merak/llm/gemma4_series/model_cards/m50/gemma4_e4b.yaml",
+    ROOT / "examples_merak/llm/qwen3/model_cards/m50/qwen3_0_6b.yaml",
+    ROOT / "examples_merak/llm/qwen3_5/model_cards/m50/qwen3_5_9b.yaml",
 ]
 
 
@@ -58,7 +58,7 @@ def test_phase1_delivery_samples_have_expected_minimal_shape():
 
 def test_default_quantization_policy_uses_w4a8_except_for_small_models():
     special_formats = {"w16a16_sefp", "w8a16_sefp", "w8a16h0_ssfp", "w8a16h1_sefp", "w4a8h0_ssfp"}
-    for card_path in (ROOT / "examples_merak").glob("**/model_cards/*.yaml"):
+    for card_path in (ROOT / "examples_merak").glob("**/model_cards/m50/*.yaml"):
         card = yaml.safe_load(card_path.read_text(encoding="utf-8"))
         total = card["external"]["parameters"]["total"]
         quantized_format = card["external"]["precision"]["quantized_format"]
@@ -69,7 +69,7 @@ def test_default_quantization_policy_uses_w4a8_except_for_small_models():
 
 
 def test_catalog_cards_have_complete_public_capacity_metrics():
-    for card_path in (ROOT / "examples_merak").glob("**/model_cards/*.yaml"):
+    for card_path in (ROOT / "examples_merak").glob("**/model_cards/m50/*.yaml"):
         card = yaml.safe_load(card_path.read_text(encoding="utf-8"))
         parameters = card["external"]["parameters"]
         compute = card["external"]["compute"]
@@ -81,7 +81,7 @@ def test_catalog_cards_have_complete_public_capacity_metrics():
 
 
 def test_phase1_validate_command_accepts_all_samples():
-    model_card_count = len(list((ROOT / "examples_merak").glob("**/model_cards/*.yaml")))
+    model_card_count = len(list((ROOT / "examples_merak").glob("**/model_cards/m50/*.yaml")))
     result = subprocess.run(
         [
             sys.executable,

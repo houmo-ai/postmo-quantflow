@@ -22,7 +22,7 @@ class MerakModelFlow:
     ) -> None:
         services = get_services()
         self.args = args
-        self.model_card_path = model_card_path or services.resolve_path(args.model_card)
+        self.model_card_path = model_card_path or services.resolve_model_card_path(args.model_card)
         self.card = card or services.load_model_card(self.model_card_path)
         self.model_id = self.card["model"]["id"]
         self.version_id = self.card["release"]["version_id"]

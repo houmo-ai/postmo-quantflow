@@ -31,6 +31,8 @@ from model_card_schema import normalize_model_card, to_v2_model_card
 CONFIG_RE = re.compile(r"(?:\.\.?/)?(configs_merak/workflows/xh2a/[A-Za-z0-9_./-]+\.ya?ml)")
 URL_RE = re.compile(r"https?://[^\s)`\"'<>]+")
 SUPPORTED_CATEGORIES = {"llm_models", "audio_models", "other_models"}
+SUPPORTED_CHIPS = ("m50", "a20", "m66")
+DEFAULT_CHIP = "m50"
 
 
 def _sanitize(value: str) -> str:
@@ -239,18 +241,37 @@ def _card_output_path(
     example_dirs: list[Path],
     examples_root: Path,
     output_root: Path,
+    chip: str = DEFAULT_CHIP,
 ) -> Path:
+    chip = _validate_chip(chip)
     example_dir = _example_dir_for_card(card, config_path, example_dirs, examples_root)
     try:
         relative_example = example_dir.resolve().relative_to(examples_root.resolve())
     except ValueError:
         relative_example = Path(_sanitize(example_dir.name))
     base = examples_root if output_root.resolve() == examples_root.resolve() else output_root
-    return base / relative_example / "model_cards" / f"{card['model']['id']}.yaml"
+    return base / relative_example / "model_cards" / chip / f"{card['model']['id']}.yaml"
 
 
 def _legacy_card_path(card: dict[str, Any]) -> Path:
     return ROOT / "merak_delivery" / "model_cards" / "merak" / card["model"]["family"] / f"{card['model']['id']}.yaml"
+
+
+def _legacy_example_card_path(
+    card: dict[str, Any],
+    config_path: str,
+    example_dirs: list[Path],
+    examples_root: Path,
+) -> Path:
+    example_dir = _example_dir_for_card(card, config_path, example_dirs, examples_root)
+    return example_dir / "model_cards" / f"{card['model']['id']}.yaml"
+
+
+def _validate_chip(chip: str) -> str:
+    chip = (chip or DEFAULT_CHIP).lower()
+    if chip not in SUPPORTED_CHIPS:
+        raise ValueError(f"unsupported chip `{chip}`; expected one of {', '.join(SUPPORTED_CHIPS)}")
+    return chip
 
 
 def _preserve_existing_fields(card: dict[str, Any], existing: dict[str, Any]) -> None:
@@ -507,6 +528,7 @@ def _make_card(
 
 
 def generate(args: argparse.Namespace) -> int:
+    chip = _validate_chip(getattr(args, "chip", DEFAULT_CHIP))
     examples_root = (ROOT / args.examples_root).resolve()
     workflow_root = (ROOT / args.workflow_root).resolve()
     output_root = (ROOT / args.output_root).resolve()
@@ -553,8 +575,9 @@ def generate(args: argparse.Namespace) -> int:
             key = str(directory.relative_to(examples_root))
             urls.extend(example_urls.get(key, []))
         card, warnings = _make_card(config_path, config, dirs, urls, examples_root)
-        output = _card_output_path(card, config_path, dirs, examples_root, output_root)
-        existing_path = output if output.is_file() else _legacy_card_path(card)
+        output = _card_output_path(card, config_path, dirs, examples_root, output_root, chip=chip)
+        legacy_paths = [_legacy_example_card_path(card, config_path, dirs, examples_root), _legacy_card_path(card)]
+        existing_path = output if output.is_file() else next((path for path in legacy_paths if path.is_file()), output)
         if existing_path.is_file():
             try:
                 existing = yaml.safe_load(_read(existing_path)) or {}
@@ -600,6 +623,7 @@ def main() -> int:
     parser.add_argument("--examples-root", default="examples_merak")
     parser.add_argument("--workflow-root", default="configs_merak/workflows/xh2a")
     parser.add_argument("--output-root", default="examples_merak")
+    parser.add_argument("--chip", choices=SUPPORTED_CHIPS, default=DEFAULT_CHIP)
     parser.add_argument("--report", default="work_dirs/merak_delivery/card_generation_report.json")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
