@@ -24,7 +24,7 @@ def test_minicpm5_gptq_config_uses_wikitext_and_w4a8_export() -> None:
     assert config.quant["bits"] == 4
     assert config.quant["group_size"] == 64
     assert config.quant["calibration"] == {
-        "jsonl": "path-to-minicpm5-calibration-jsonl",
+        "jsonl": "xh2modelzoo://data/calib_data/minicpm5_calibration.jsonl",
         "text_key": "text",
         "nsamples": 8,
         "seqlen": 256,

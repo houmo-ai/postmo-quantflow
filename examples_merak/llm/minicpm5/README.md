@@ -18,9 +18,10 @@ HMONNX generation path.
 
 For GPTQModel native AutoRound W4A8, use
 `configs_merak/workflows/xh2a/llm_models/minicpm5/15b_a2_5b/minicpm5_15b_a2_5b_xh2a_w4a8_autoround.yaml`.
-Replace the portable `path-to-minicpm5-calibration-jsonl` placeholder with the
-calibration JSONL path before quantization. The W8A8 floating-point export is
-provided by `minicpm5_15b_a2_5b_xh2a_w8a8.yaml`.
+The YAML already points at the committed calibration JSONL
+`data/calib_data/minicpm5_calibration.jsonl`, so no placeholder replacement is
+required. The W8A8 floating-point export is provided by
+`minicpm5_15b_a2_5b_xh2a_w8a8.yaml`.
 
 The W4A8 GPTQModel checkpoint uses mixed-precision MoE quantization: routed
 experts use W4 weights, while attention, shared experts, and dense MLP use W8
@@ -35,22 +36,23 @@ The mixed calibration file contains one `{"text": "..."}` record per line.
 The repository script combines WikiText-2 training text with rendered MMLU
 multiple-choice text, then interleaves tokenized segments. The default recipe
 uses 128 randomly selected MMLU records and writes eight 256-token segments.
+The generated file is committed to the repository at
+`data/calib_data/minicpm5_calibration.jsonl`.
 
 Generate it with:
 
 ```bash
 python examples_merak/llm/minicpm5/build_calibration.py \
   --model-dir $PATH/MiniCPM5-15B-A2.5B-0518-job_366159_step_12000_hybrid_thinking \
-  --output path-to-minicpm5-calibration-jsonl \
+  --output data/calib_data/minicpm5_calibration.jsonl \
   --mmlu-samples 128 \
   --segment-count 8 \
   --segment-length 256 \
   --seed 42
 ```
 
-Replace `path-to-minicpm5-calibration-jsonl` in the AutoRound YAML with the
-generated file. A GPTQModel-provided calibration JSONL can also be used when
-it contains a `text` field in each record.
+A GPTQModel-provided calibration JSONL can also be used when it contains a
+`text` field in each record.
 
 ## Generation demos
 

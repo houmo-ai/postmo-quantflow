@@ -10,9 +10,11 @@ quant:
   iters: 8
   lr: 0.001
   calibration:
-    # 可使用本仓库脚本(examples_merak/llm/minicpm5/build_calibration.py)或 GPTQModel 自带校准集生成 JSONL 文件。
-    # 将下面路径替换为实际文件路径。
-    jsonl: path-to-minicpm5-calibration-jsonl
+    # 校准集由本仓库脚本生成：
+    #   examples_merak/llm/minicpm5/build_calibration.py
+    #     --mmlu-samples 128 --segment-count 8 --segment-length 256 --seed 42
+    # 生成物已提交到代码库：data/calib_data/minicpm5_calibration.jsonl
+    jsonl: xh2modelzoo://data/calib_data/minicpm5_calibration.jsonl
     text_key: text
     nsamples: 8
     seqlen: 256

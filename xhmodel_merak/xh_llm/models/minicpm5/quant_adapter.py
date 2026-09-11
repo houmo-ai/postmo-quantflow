@@ -1,5 +1,6 @@
 """GPTQModel quantization adapter for MiniCPM5-MoE."""
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +33,24 @@ def _resolve_calibration_jsonl_path(calibration_cfg: Mapping[str, Any]) -> str |
 
 
 def _resolve_calibration_jsonl(value: str) -> Path:
-    return Path(value.strip()).expanduser()
+    text = os.path.expanduser(os.path.expandvars(str(value).strip()))
+    if text.startswith(("xh2modelzoo://", "repo://")):
+        relative_path = text.split("://", 1)[1].lstrip("/")
+        candidate = _repo_root() / relative_path
+        if not candidate.is_file():
+            raise FileNotFoundError(f"MiniCPM5 GPTQ calibration JSONL does not exist: {candidate}")
+        return candidate.resolve()
+    path = Path(text)
+    if path.is_file():
+        return path.resolve()
+    raise FileNotFoundError(f"MiniCPM5 GPTQ calibration JSONL does not exist: {text}")
+
+
+def _repo_root() -> Path:
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "configs_merak").is_dir() and (parent / "xhmodel_merak").is_dir():
+            return parent
+    return Path(__file__).resolve().parents[4]
 
 
 def _normalize_moe_routing(moe_cfg: Mapping[str, Any]) -> tuple[str, int | None, int | str | None]:

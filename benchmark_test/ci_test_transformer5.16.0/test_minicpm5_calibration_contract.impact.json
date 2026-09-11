@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm5-calibration-contract",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm5/quant_adapter.py",
+        "configs_merak/workflows/xh2a/llm_models/minicpm5/15b_a2_5b/minicpm5_15b_a2_5b_xh2a_w4a8_autoround.yaml",
+        "data/calib_data/minicpm5_calibration.jsonl"
+      ]
+    }
+  ]
+}
