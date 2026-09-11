@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "zipformer-quant-export",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/zipformer/workflow.py"
+      ]
+    }
+  ]
+}
