@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "build-export-mode",
+    "patterns": [
+      "benchmark_test/ci_test_transformer5.16.0/test_build_export_mode.py",
+      "xhmodel_merak/_environment.py",
+      "xhmodel_merak/model_catalog/**",
+      "xhmodel_merak/model_build/**",
+      "xhmodel_merak/model_integrations/_shared.py",
+      "xhmodel_merak/model_integrations/*/plugin.py",
+      "xhmodel_merak/xh_llm/utils.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
+      "xhmodel_merak/xh_llm/models/qwen3_next/qwen3_next_model.py",
+      "xhmodel_merak/xh_llm/models/ling_3_flash/ling_3_flash_model.py"
+    ]
+  }]
+}

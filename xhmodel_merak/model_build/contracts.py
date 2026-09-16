@@ -103,6 +103,7 @@ class BuildPlan:
     source_bindings: dict[str, dict[str, JSONValue]] = field(default_factory=dict)
     worker_capabilities: tuple[str, ...] = ()
     required_runtime_files: tuple[str, ...] = ()
+    low_memory: bool = False
 
     def __post_init__(self) -> None:
         for name in (

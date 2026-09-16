@@ -17,6 +17,7 @@ from xhmodel_merak.errors import ErrorCode, ModelError, invalid_parameter
 from xhmodel_merak.model_catalog.contracts import ModelRecipe, ResolvedPrecision, VariantRecipe
 from xhmodel_merak.model_catalog.identity import build_artifact_name as _build_artifact_name
 from xhmodel_merak.model_catalog.identity import matches_manifest_length as _matches_manifest_length
+from xhmodel_merak.model_catalog.precision import deployment_precision_from_workflow, resolve_deployment_precision
 from xhmodel_merak.model_catalog.registry import get_artifact_format_spec
 
 from . import MANIFEST_NAME as _MANIFEST_NAME
@@ -163,6 +164,7 @@ def validate_recipe_contract(
             "actual": manifest_model_name,
         }
 
+    effective_data = None
     if effective_workflow_valid and effective_workflow is not None:
         try:
             effective_data = yaml.safe_load(effective_workflow.read_text(encoding="utf-8"))
@@ -232,9 +234,25 @@ def validate_recipe_contract(
     precision_data = parameters.get("precision")
     checkpoint_precision = precision_data.get("checkpoint") if isinstance(precision_data, Mapping) else None
     deployment_precision = precision_data.get("deployment") if isinstance(precision_data, Mapping) else None
-    if deployment_precision != recipe.deployment_precision:
+    deployment_valid = isinstance(deployment_precision, Mapping)
+    if deployment_valid:
+        try:
+            editable = {
+                component for binding in recipe.deployment_precision_bindings for component in binding.components
+            }
+            resolved_deployment = resolve_deployment_precision(
+                recipe, {key: value for key, value in deployment_precision.items() if key in editable}
+            )
+            deployment_valid = deployment_precision == resolved_deployment
+            if effective_data is not None and recipe.deployment_precision_bindings:
+                deployment_valid = deployment_valid and (
+                    deployment_precision == deployment_precision_from_workflow(recipe, effective_data)
+                )
+        except ValueError:
+            deployment_valid = False
+    if not deployment_valid:
         mismatches["parameters.precision.deployment"] = {
-            "expected": recipe.deployment_precision,
+            "expected": "registered component precisions matching the inventoried effective workflow",
             "actual": deployment_precision,
         }
 
@@ -292,9 +310,10 @@ def validate_recipe_contract(
             "actual": profile,
         }
     quant_method = parameters.get("quant_method")
-    if quant_method is not None and quant_method not in recipe.quant_methods:
+    checkpoint_methods = set(recipe.quant_methods) | set(recipe.quant_checkpoint_methods)
+    if quant_method is not None and quant_method not in checkpoint_methods:
         mismatches["parameters.quant_method"] = {
-            "expected": [*recipe.quant_methods, None],
+            "expected": [*sorted(checkpoint_methods), None],
             "actual": quant_method,
         }
 
@@ -355,6 +374,7 @@ def validate_manifest_files(
     *,
     runtime_components: Sequence[str] = (),
 ) -> None:
+    """Check delivered files; runtime may add regular cache/temporary files."""
     files = artifact.get("files")
     if not isinstance(files, list):
         raise ModelError(
@@ -418,17 +438,11 @@ def validate_manifest_files(
             non_regular_nodes.append(relative)
     symlinks.sort()
     non_regular_nodes.sort()
-    unlisted = sorted(
-        relative
-        for relative in actual - inventoried
-        if not _is_ephemeral_runtime_file(Path(relative), runtime_components)
-    )
     missing = sorted(inventoried - actual)
-    if symlinks or non_regular_nodes or unlisted or missing:
+    if symlinks or non_regular_nodes or missing:
         raise ModelError(
             ErrorCode.ARTIFACT_VALIDATION_FAILED,
-            "Manifest file inventory does not exactly match the Artifact",
-            unlisted_files=unlisted,
+            "Artifact file inventory contains missing files or unsafe filesystem nodes",
             missing_files=missing,
             symlinks=symlinks,
             non_regular_nodes=non_regular_nodes,

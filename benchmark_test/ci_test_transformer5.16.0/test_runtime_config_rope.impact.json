@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "runtime-config-rope",
+    "patterns": [
+      "benchmark_test/ci_test_transformer5.16.0/test_runtime_config_rope.py",
+      "xhmodel_merak/model_build/runtime_assets.py",
+      "xhmodel_merak/model_build/checkpoint.py",
+      "xhmodel_merak/model_catalog/contracts.py",
+      "xhmodel_merak/model_integrations/qwen/plugin.py",
+      "xhmodel_merak/model_integrations/autoregressive/build.py"
+    ]
+  }]
+}

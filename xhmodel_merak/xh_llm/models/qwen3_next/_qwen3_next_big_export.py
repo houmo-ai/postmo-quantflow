@@ -108,6 +108,61 @@ class Qwen3NextBigHFModel(BigHFModelExportHelper):
         "LinearQwen3NextSparseMoeBlock",
     ]
 
+    def _load_module_from_safetensor(self, module, module_prefix: str) -> dict[str, int]:
+        """Load split native experts into the current HF fused layout, one block at a time."""
+        experts = getattr(module, "experts", None)
+        gate_up = getattr(experts, "gate_up_proj", None)
+        down = getattr(experts, "down_proj", None)
+        prefix = f"{module_prefix}.experts" if module_prefix else "experts"
+        weight_map = self._weight_mapping.weight_map
+        if (
+            not isinstance(gate_up, torch.nn.Parameter)
+            or not isinstance(down, torch.nn.Parameter)
+            or f"{prefix}.gate_up_proj" in weight_map
+            or f"{prefix}.down_proj" in weight_map
+            or not any(name.startswith(prefix + ".0.") for name in weight_map)
+        ):
+            return super()._load_module_from_safetensor(module, module_prefix)
+
+        # This is a temporary checkpoint layout, not another execution model.
+        # The common loader still validates every source key and tensor shape.
+        count, twice_intermediate, hidden = gate_up.shape
+        intermediate = twice_intermediate // 2
+        if twice_intermediate % 2 or tuple(down.shape) != (count, hidden, intermediate):
+            raise ValueError(f"Invalid fused expert layout in {module_prefix!r}")
+        split = torch.nn.ModuleList()
+        for _ in range(count):
+            expert = torch.nn.Module()
+            for name, in_features, out_features, parameter in (
+                ("gate_proj", hidden, intermediate, gate_up),
+                ("up_proj", hidden, intermediate, gate_up),
+                ("down_proj", intermediate, hidden, down),
+            ):
+                linear = torch.nn.Linear(
+                    in_features, out_features, bias=False, device="meta", dtype=parameter.dtype,
+                )
+                linear.weight.requires_grad_(parameter.requires_grad)
+                expert.add_module(name, linear)
+            split.append(expert)
+        module.experts = split
+        try:
+            audit = super()._load_module_from_safetensor(module, module_prefix)
+        finally:
+            module.experts = experts
+
+        # Match HF's MergeModulelist(dim=0), Concatenate(dim=1), preserving
+        # numeric expert order and [gate, up] order without loading other blocks.
+        loaded_gate_up = torch.empty_like(gate_up, device="cpu")
+        loaded_down = torch.empty_like(down, device="cpu")
+        with torch.no_grad():
+            for index, expert in enumerate(split):
+                loaded_gate_up[index, :intermediate].copy_(expert.gate_proj.weight)
+                loaded_gate_up[index, intermediate:].copy_(expert.up_proj.weight)
+                loaded_down[index].copy_(expert.down_proj.weight)
+        experts.gate_up_proj = torch.nn.Parameter(loaded_gate_up, requires_grad=gate_up.requires_grad)
+        experts.down_proj = torch.nn.Parameter(loaded_down, requires_grad=down.requires_grad)
+        return audit
+
     @staticmethod
     def _preprocess_quantized_hf_model(
         hf_model,

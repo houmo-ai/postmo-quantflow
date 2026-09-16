@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "placeholder-quant-metadata",
+    "patterns": [
+      "xhmodel_merak/xh_llm/hmonnx/deterministic_export.py",
+      "xhmodel_merak/xh_llm/big_hf_model_helper.py",
+      "xhmodel_merak/xh_llm/base_model.py"
+    ]
+  }]
+}

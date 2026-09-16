@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from xhmodel_merak.model_catalog.contracts import ResolvedPrecision, VariantRecipe
+from xhmodel_merak.model_catalog.contracts import DeploymentPrecisionBinding, ResolvedPrecision, VariantRecipe
 
 
 AUTOREGRESSIVE_BUILD = "autoregressive.build"
@@ -17,9 +17,6 @@ KOKORO_INFERENCE = "kokoro.inference"
 GPTQ_REQUIREMENTS = ("gptqmodel>=5.8,<5.9",)
 AUTOROUND_REQUIREMENTS = ("auto-round>=0.12.0.dev0,<0.13.0", *GPTQ_REQUIREMENTS)
 PILE10K_RESOURCE = ("calibration", "data/calib_data/NeelNanda-pile-10k.jsonl")
-XHQUANT_INITIALIZER_CACHE_CAPABILITY = (
-    "python-predicate:xhquant.xhonnxruntime.llm_hmonnx_loader:initializer_digest_cache_disable_available"
-)
 
 
 def text_media_input_schema(media: tuple[str, ...]) -> dict[str, Any]:
@@ -56,6 +53,7 @@ def variant(
     speculative_mode: str | None = None,
     requires_lora: bool = False,
     context_workflows: tuple[tuple[int, str], ...] = (),
+    export_modes: tuple[str, ...] = ("standard",),
 ) -> VariantRecipe:
     required_sources = ("dflash",) if speculative_mode == "dflash" else ()
     extra_components = (speculative_mode,) if speculative_mode else (("lora",) if requires_lora else ())
@@ -67,11 +65,31 @@ def variant(
         required_sources=required_sources,
         extra_components=extra_components,
         context_workflows=context_workflows,
+        export_modes=export_modes,
     )
 
 
 def llm_deployment_precision(components: tuple[str, ...]) -> dict[str, str]:
     return {component: "w8a8h1_sefp" for component in components}
+
+
+def autoregressive_precision_bindings(components: tuple[str, ...]) -> tuple[DeploymentPrecisionBinding, ...]:
+    choices = ("w8a8h1_sefp", "w8a16h1_sefp")
+    language = tuple(component for component in components if component in {"prefill", "decode"})
+    bindings = [DeploymentPrecisionBinding(language, "export.model.quant_scheme", choices)] if language else []
+    for component in components:
+        if component in {"visual", "video_visual", "audio"}:
+            bindings.append(
+                DeploymentPrecisionBinding(
+                    (component,),
+                    f"export.model.{component}_config.quant_scheme",
+                    choices,
+                    inherit_from="export.model.visual_config.quant_scheme"
+                    if component == "video_visual"
+                    else "export.model.quant_scheme",
+                )
+            )
+    return tuple(bindings)
 
 
 def moe_precision() -> ResolvedPrecision:
@@ -98,8 +116,8 @@ __all__ = [
     "PI05_INFERENCE",
     "PILE10K_RESOURCE",
     "QWEN_INFERENCE",
-    "XHQUANT_INITIALIZER_CACHE_CAPABILITY",
     "llm_deployment_precision",
+    "autoregressive_precision_bindings",
     "moe_precision",
     "text_media_input_schema",
     "text_output_schema",

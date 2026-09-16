@@ -13,7 +13,9 @@ import torch
 import yaml
 from safetensors.torch import save_file as save_safetensors
 
+from xhmodel_merak._requirements import validate_worker_capabilities, validate_worker_requirements
 from xhmodel_merak.errors import ErrorCode, ModelError
+from xhmodel_merak.model_build import build_model
 from xhmodel_merak.model_build.checkpoint import inspect_quant_artifact, verify_quant_model_identity
 from xhmodel_merak.model_build.contracts import BuildResult, ResolvedPrecision
 from xhmodel_merak.model_build.embeddings import write_embedding_bins
@@ -317,13 +319,63 @@ def _plan(source: Path, quant: Path, output: Path):
     )
 
 
+def test_gemma_e2b_build_reaches_workflow_without_a_digest_cache_disable_api(monkeypatch, tmp_path):
+    from xhquant.xhonnxruntime import llm_hmonnx_loader as loader
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "gemma4",
+                "architectures": ["Gemma4ForConditionalGeneration"],
+                "text_config": {"hidden_size": 1536, "num_hidden_layers": 35, "enable_moe_block": False},
+            }
+        )
+    )
+    # Keep both real preflights, including the selected AutoRound capability.
+    # Stop at workflow creation: this regression must not quantize a full E2B.
+    monkeypatch.delattr(loader, "initializer_digest_cache_disable_available", raising=False)
+    monkeypatch.setattr("xhmodel_merak.model_build.executor.validate_worker_requirements", validate_worker_requirements)
+    monkeypatch.setattr("xhmodel_merak.model_build.executor.validate_worker_capabilities", validate_worker_capabilities)
+    reached = []
+
+    def create_workflow(model_dir, config_path):
+        reached.append((model_dir, yaml.safe_load(Path(config_path).read_text())))
+        raise RuntimeError("reached workflow after real dependency checks")
+
+    monkeypatch.setattr("xhmodel_merak.model_build.workflow.create_workflow", create_workflow)
+    with pytest.raises(ModelError, match="reached workflow") as exc_info:
+        build_model(
+            model_id="gemma4-e2b",
+            model_dir=str(source),
+            output_dir=str(tmp_path / "artifact"),
+            device="cuda",
+            quant_output_dir=str(tmp_path / "quantized_model"),
+        )
+    assert exc_info.value.code == ErrorCode.EXPORT_FAILED
+    assert len(reached) == 1
+    assert reached[0][0] == str(source)
+    assert reached[0][1]["quant"] is not None
+    assert not (tmp_path / "artifact").exists()
+    assert not (tmp_path / "quantized_model").exists()
+
+
+@pytest.mark.parametrize("explicit_output", [False, True])
 def test_executor_materializes_dynamic_vit_flattens_legacy_root_and_writes_manifest(
+    explicit_output,
     monkeypatch,
     source_and_quant,
     tmp_path,
 ):
     source, quant = source_and_quant
-    output = tmp_path / "artifact"
+    # Exercise the real capability preflight. The workflow below is a small
+    # transaction fixture, not a full-model export or numerical accuracy test.
+    monkeypatch.setattr(
+        "xhmodel_merak.model_build.executor.validate_worker_capabilities",
+        validate_worker_capabilities,
+    )
+    monkeypatch.chdir(tmp_path)
     captured = {}
 
     def create_workflow(model_dir, config_path):
@@ -336,8 +388,12 @@ def test_executor_materializes_dynamic_vit_flattens_legacy_root_and_writes_manif
         lambda *_args, **_kwargs: None,
     )
 
-    plan = _plan(source, quant, output)
-    result = execute_build(plan)
+    request = {"model_id": "qwen3.5-9b", "model_dir": str(source), "quant_checkpoint": str(quant)}
+    if explicit_output:
+        request["output_dir"] = str(tmp_path / "artifact")
+    plan = resolve_build_plan(**request)
+    output = Path(plan.output_dir)
+    result = build_model(**request)
 
     visual = captured["effective"]["export"]["model"]["visual_config"]
     model_config = captured["effective"]["export"]["model"]
@@ -348,7 +404,8 @@ def test_executor_materializes_dynamic_vit_flattens_legacy_root_and_writes_manif
     assert result.output_dir == str(output.resolve())
     assert not any(path.is_dir() for path in output.glob("hmquant_*"))
     assert (output / "prefill.hmonnx").is_file()
-    assert (output / f"{plan.artifact_name}_weights.bin").read_bytes() == b"weights"
+    # The fixture's unrelated weight file is not referenced by any graph.
+    assert not (output / f"{plan.artifact_name}_weights.bin").exists()
     assert not any("448x448" in path.name or "20260825" in path.name for path in output.rglob("*"))
     assert (output / "effective_workflow.yaml").is_file()
     assert not (output / "workflow_override.yaml").exists()
@@ -369,6 +426,7 @@ def test_executor_materializes_dynamic_vit_flattens_legacy_root_and_writes_manif
     assert "artifact_name" not in result.to_dict()
     assert manifest["export"]["artifact_name"] == plan.artifact_name
     assert manifest["parameters"]["vision_profile"] == "visualm96-196-384-704-1536"
+    assert manifest["parameters"]["low_memory"] is plan.low_memory
     assert manifest["artifact"]["requires_source"] is False
     assert manifest["artifact"]["loadable"] is True
     assert result.loadable is True
@@ -499,8 +557,7 @@ def test_executor_removes_logs_raw_workflows_and_provenance_paths(
     assert list(output.rglob("*.log")) == []
     assert not any("provenance" in path.name.lower() for path in output.rglob("*"))
     assert [path.relative_to(output).as_posix() for path in output.rglob("*.yaml")] == ["effective_workflow.yaml"]
-    notes = json.loads((output / "runtime_notes.json").read_text(encoding="utf-8"))
-    assert notes["message"] == "model=source://model/config.json"
+    assert not (output / "runtime_notes.json").exists()
     published_text = "\n".join(
         path.read_text(encoding="utf-8")
         for path in output.rglob("*")
@@ -522,6 +579,10 @@ def test_executor_rejects_invalid_utf8_published_text_with_a_source_path(
             result = super().export(*args, **kwargs)
             export_root = next(Path(result.work_dir).glob("hmquant_*"))
             (export_root / "runtime_notes.txt").write_bytes(str(source.resolve()).encode("utf-8") + b"\xff")
+            meta_path = export_root / "golden_meta_info.json"
+            meta = json.loads(meta_path.read_text())
+            meta["runtime_resource"] = "runtime_notes.txt"
+            meta_path.write_text(json.dumps(meta))
             return result
 
     monkeypatch.setattr(
@@ -744,7 +805,7 @@ def test_quant_inspection_requires_metadata_provider_and_weights(source_and_quan
 
     (quant / "config.json").write_text(model_config, encoding="utf-8")
     (quant / "quantization_config.json").write_text(json.dumps({"bits": 4}), encoding="utf-8")
-    with pytest.raises(ModelError, match="AutoRound provider"):
+    with pytest.raises(ModelError, match="one supported checkpoint producer"):
         inspect_quant_artifact(str(quant), plan)
 
     (quant / "quantization_config.json").write_text(
@@ -1337,6 +1398,55 @@ def test_executor_rejects_a_replaced_recipe_before_publish(monkeypatch, source_a
     assert not output.exists()
 
 
+@pytest.mark.parametrize("provider, expected", [("auto-round", "autoround"), ("gptqmodel", "gptq")])
+def test_reused_checkpoint_selects_its_producer_without_running_quant(source_and_quant, tmp_path, provider, expected):
+    from xhmodel_merak.model_build.workflow import resolve_quant_result
+
+    source, quant = source_and_quant
+    (quant / "quantization_config.json").write_text(json.dumps({"bits": 4, "provider": provider}))
+    plan = _plan(source, quant, tmp_path / "artifact")
+    assert plan.quant_method == expected
+    assert plan.field_sources["quant_method"] == "checkpoint_metadata"
+    assert not any(requirement.startswith("auto-round") for requirement in plan.worker_requirements)
+    # No quant method exists on this object; reuse must only inspect and return the checkpoint.
+    result, quant_root, identity, metadata = resolve_quant_result(object(), plan, tmp_path / "artifact")
+    assert result.quanted_model_dir == str(quant)
+    assert result.skipped is False
+    assert quant_root is None and identity is None
+    assert metadata["method"] == expected
+    assert metadata["verification"] == "checkpoint_verified"
+
+
+def test_explicit_checkpoint_producer_does_not_enable_an_unregistered_quantizer(source_and_quant, tmp_path):
+    source, quant = source_and_quant
+    (quant / "quantization_config.json").write_text(json.dumps({"bits": 4, "provider": "gptqmodel"}))
+    plan = resolve_build_plan(
+        model_id="qwen3.5-9b",
+        model_dir=str(source),
+        output_dir=str(tmp_path / "artifact"),
+        quant_checkpoint=str(quant),
+        quant_method="gptq",
+    )
+    assert inspect_quant_artifact(str(quant), plan)["method"] == "gptq"
+    with pytest.raises(ModelError, match="allowed methods"):
+        resolve_build_plan(
+            model_id="qwen3.5-9b",
+            model_dir=str(source),
+            output_dir=str(tmp_path / "artifact"),
+            quant_method="gptq",
+        )
+
+
+@pytest.mark.parametrize("providers", [["unknown"], ["qat", "auto-round"], ["qat", "gptq"]])
+def test_checkpoint_producer_requires_unambiguous_evidence(source_and_quant, tmp_path, providers):
+    source, quant = source_and_quant
+    (quant / "quantization_config.json").write_text(
+        json.dumps({"bits": 4, "evidence": [{"provider": p} for p in providers]})
+    )
+    with pytest.raises(ModelError, match="one supported checkpoint producer"):
+        _plan(source, quant, tmp_path / "artifact")
+
+
 def test_quant_provider_matching_is_exact(source_and_quant):
     source, quant = source_and_quant
     plan = _plan(source, quant, quant.parent / "unused")
@@ -1346,7 +1456,18 @@ def test_quant_provider_matching_is_exact(source_and_quant):
         encoding="utf-8",
     )
 
-    with pytest.raises(ModelError, match="AutoRound provider"):
+    with pytest.raises(ModelError, match="checkpoint producer does not match"):
+        inspect_quant_artifact(str(quant), plan)
+
+
+@pytest.mark.parametrize("provider", ["auto-round", "gptq"])
+def test_inspection_rejects_conflicting_producer_added_after_plan(source_and_quant, tmp_path, provider):
+    source, quant = source_and_quant
+    metadata = quant / "quantization_config.json"
+    metadata.write_text(json.dumps({"bits": 4, "provider": provider}))
+    plan = _plan(source, quant, tmp_path / "artifact")
+    metadata.write_text(json.dumps({"bits": 4, "provider": provider, "quant_method": "qat"}))
+    with pytest.raises(ModelError, match="one supported checkpoint producer"):
         inspect_quant_artifact(str(quant), plan)
 
 
@@ -1394,6 +1515,50 @@ def test_quant_inspection_requires_embedding_and_complete_source_layer_coverage(
         assert exc_info.value.details["has_embedding"] is False
     else:
         assert exc_info.value.details["missing_layers"] == [31]
+
+
+@pytest.mark.parametrize("prefix", ["model", "model.language_model", "language_model"])
+def test_checkpoint_head_norms_are_not_residual_stream_norms(source_and_quant, prefix):
+    source, quant = source_and_quant
+    tensors = {key.replace("model.", f"{prefix}.", 1): value for key, value in _checkpoint_tensors(32).items()}
+    tensors[f"{prefix}.layers.0.self_attn.q_norm.weight"] = torch.ones((256,), dtype=torch.float16)
+    tensors[f"{prefix}.layers.0.self_attn.k_norm.weight"] = torch.ones((256,), dtype=torch.float16)
+    tensors[f"{prefix}.layers.1.self_attn.q_norm.weight"] = torch.ones((512,), dtype=torch.float16)
+    save_safetensors(tensors, quant / "model.safetensors")
+    plan = _plan(source, quant, quant.parent / "unused")
+    assert inspect_quant_artifact(str(quant), plan)["verification"] == "checkpoint_verified"
+    tensors[f"{prefix}.layers.0.input_layernorm.weight"] = torch.ones((256,), dtype=torch.float16)
+    save_safetensors(tensors, quant / "model.safetensors")
+    with pytest.raises(ModelError) as caught:
+        inspect_quant_artifact(str(quant), plan)
+    assert [item["tensor"] for item in caught.value.details["shape_mismatches"]] == [
+        f"{prefix}.layers.0.input_layernorm.weight"
+    ]
+
+
+@pytest.mark.parametrize("mutation", [None, "missing_main", "extra_layer", "wrong_embedding", "undeclared_auxiliary"])
+def test_ling_checkpoint_layout_accepts_only_declared_auxiliary_layers(tmp_path, mutation):
+    from xhmodel_merak.model_build.checkpoint import _validate_quant_weight_container, _verify_named_checkpoint_tensors
+
+    config = {"hidden_size": 2560, "num_hidden_layers": 42, "num_nextn_predict_layers": 1}
+    if mutation == "undeclared_auxiliary":
+        config["num_nextn_predict_layers"] = 0
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    tensors = _checkpoint_tensors(44 if mutation == "extra_layer" else 43, hidden_size=2560)
+    tensors["model.word_embeddings.weight"] = tensors.pop("model.embed_tokens.weight")
+    if mutation == "wrong_embedding":
+        tensors["model.word_embeddings.weight"] = torch.ones((2, 8), dtype=torch.float16)
+    if mutation == "missing_main":
+        tensors = {name: value for name, value in tensors.items() if not name.startswith("model.layers.10.")}
+    weight_path = tmp_path / "model.safetensors"
+    save_safetensors(tensors, weight_path)
+    plan = SimpleNamespace(model_id="ling-3.0-flash", model_dir=str(tmp_path))
+    summary = {**_validate_quant_weight_container(weight_path, plan), "path": weight_path}
+    if mutation is None:
+        _verify_named_checkpoint_tensors(tmp_path, [summary], {}, plan)
+    else:
+        with pytest.raises(ModelError, match="verifiably complete"):
+            _verify_named_checkpoint_tensors(tmp_path, [summary], {}, plan)
 
 
 def test_quant_inspection_rejects_wrong_embedding_and_norm_shapes(source_and_quant):

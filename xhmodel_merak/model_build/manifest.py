@@ -54,6 +54,7 @@ def build_manifest(
                 "deployment": plan.deployment_precision,
             },
             "quant_method": plan.quant_method,
+            "low_memory": plan.low_memory,
             "profile": plan.profile,
             "context_length": plan.context_length,
             "prefill_chunk_length": plan.prefill_chunk_length,

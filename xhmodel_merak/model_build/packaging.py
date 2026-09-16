@@ -268,13 +268,14 @@ def _replace_string_values(value: Any, old: str, new: str) -> Any:
     return value
 
 
-def validate_onnx_external_locations(stage_path: Path) -> None:
+def validate_onnx_external_locations(stage_path: Path, *, graphs: list[Path] | None = None) -> set[Path]:
     import onnx
 
     workspace.reject_artifact_symlinks(stage_path)
     root = stage_path.resolve()
+    external_files: set[Path] = set()
     invalid: list[dict[str, str]] = []
-    for onnx_path in _graph_paths(stage_path):
+    for onnx_path in _graph_paths(stage_path) if graphs is None else graphs:
         try:
             model = onnx.load_model(str(onnx_path), load_external_data=False)
             onnx.checker.check_model(str(onnx_path), full_check=False)
@@ -310,6 +311,7 @@ def validate_onnx_external_locations(stage_path: Path) -> None:
                         reason = "external data file does not exist"
                     else:
                         reason = _validate_external_data_range(external_path, entries)
+                        external_files.add(external_path)
                 if reason is not None:
                     invalid.append(
                         {
@@ -324,6 +326,7 @@ def validate_onnx_external_locations(stage_path: Path) -> None:
             "Published ONNX files contain unsafe or missing external-data locations",
             invalid_external_data=invalid,
         )
+    return external_files
 
 
 def _graph_paths(root: Path) -> list[Path]:

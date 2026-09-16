@@ -326,6 +326,9 @@ class XHBaseModel(DeviceMixin):
                     auto_release_unused_parameters=auto_release_unused_parameters,
                     infer_shape=infer_shape,
                 )
+                from .hmonnx.deterministic_export import flatten_placeholder_quant_metadata
+
+                flatten_placeholder_quant_metadata(quanted_model)
         elif state == LLMModelState.QUANTED_DISABLE:
             pass
         else:

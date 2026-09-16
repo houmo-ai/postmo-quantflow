@@ -5,7 +5,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from xhmodel_merak._environment import scoped_environment
 from xhmodel_merak._requirements import validate_worker_capabilities, validate_worker_requirements
 from xhmodel_merak.errors import ErrorCode, ModelError, invalid_parameter
 from xhmodel_merak.model_artifact.files import artifact_file
@@ -86,10 +85,7 @@ def inference_model(
         )
 
     _remove_stale_golden_outputs(root, artifact, recipe.golden_components)
-    validate_manifest_files(
-        root,
-        artifact,
-    )
+    validate_manifest_files(root, artifact)
     meta_file = artifact_file(
         root,
         manifest,
@@ -105,18 +101,17 @@ def inference_model(
     validate_worker_requirements(recipe.worker_requirements, model=recipe.model_id, operation="inference")
     validate_worker_capabilities(recipe.worker_capabilities, model=recipe.model_id, operation="inference")
     try:
-        with scoped_environment({"XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE": "1"}):
-            result = adapter.run(
-                recipe=recipe,
-                root=root,
-                manifest=manifest,
-                meta_file=meta_file,
-                inputs=runtime_inputs,
-                device=device,
-                components=components,
-                selected_golden=selected_golden,
-                golden_artifacts=golden_artifacts,
-            )
+        result = adapter.run(
+            recipe=recipe,
+            root=root,
+            manifest=manifest,
+            meta_file=meta_file,
+            inputs=runtime_inputs,
+            device=device,
+            components=components,
+            selected_golden=selected_golden,
+            golden_artifacts=golden_artifacts,
+        )
         validate_manifest_files(
             root,
             artifact,

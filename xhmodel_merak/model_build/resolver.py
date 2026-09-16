@@ -43,13 +43,15 @@ def resolve_build_plan(
     *,
     model_id: str,
     model_dir: str,
-    output_dir: str,
+    output_dir: str | None = None,
     device: str | None = None,
+    low_memory: bool | None = None,
     quant_output_dir: str | None = None,
     sources: Mapping[str, SourceRef | Mapping[str, Any] | str] | None = None,
     resources: Mapping[str, Any] | None = None,
     profile: str | None = None,
     precision: PrecisionRequest | Mapping[str, Any] | None = None,
+    deployment_precision: Mapping[str, str] | None = None,
     quant_method: str | None | UnsetType = UNSET,
     quant_checkpoint: str | None = None,
     context_length: int | None = None,
@@ -72,6 +74,7 @@ def resolve_build_plan(
     speculative_request = _coerce_speculative(model, speculative)
     lora_request = _coerce_lora(model, lora)
     variant = _select_variant(recipe, speculative_request, lora_request)
+    resolved_low_memory = _resolve_low_memory(model, variant, low_memory)
     _validate_sources(model, variant, source_refs)
     _validate_resources(recipe, resource_refs)
     resource_refs.update(_resolve_bundled_resources(recipe))
@@ -101,7 +104,6 @@ def resolve_build_plan(
         overrides["export.model.context_max_length"] = context
     if prefill is not None:
         overrides["export.model.prefill_chunk_length"] = prefill
-    overrides["export.model.model_name"] = recipe.export_name
     if resolved_method is None:
         overrides["quant"] = None
     if speculative_request and speculative_request.num_draft_tokens is not None:
@@ -110,6 +112,9 @@ def resolve_build_plan(
         overrides["export.model.lora.path"] = list(lora_request.paths)
 
     config_replacements = dict(recipe.config_replacements)
+    # This is installed recipe metadata, not a user override of an existing
+    # YAML field. Other-model workflows may omit model_name entirely.
+    config_replacements["export.model.model_name"] = recipe.export_name
     for resource_name, config_path in recipe.resource_config_bindings:
         config_replacements[config_path] = resource_refs[resource_name].path
     if recipe.max_pe_length is not None:
@@ -123,6 +128,10 @@ def resolve_build_plan(
         prefill,
         context,
     )
+    if output_dir is None:
+        from datetime import datetime
+
+        output_dir = f"{expected_artifact_name}_{datetime.now():%Y%m%d}"
     output_path = _normalize_output_path(model, output_dir)
     quant_output_path = _normalize_quant_output_path(model, quant_output_dir, output_path)
     if quant_output_path is not None and checkpoint_path is not None:
@@ -153,10 +162,15 @@ def resolve_build_plan(
     _validate_source_constraints(recipe, source_dir)
     workflow_config = _select_context_workflow(recipe, variant, context)
     config_path = resolve_workflow_config(workflow_config)
-    source_config_sha256, family_replacements = resolve_recipe_config(
-        recipe, variant, config_path, model_dir=source_dir, sources=source_refs
+    recipe_config = resolve_recipe_config(
+        recipe,
+        variant,
+        config_path,
+        model_dir=source_dir,
+        sources=source_refs,
+        deployment_precision=deployment_precision,
     )
-    config_replacements.update(family_replacements)
+    config_replacements.update(recipe_config.replacements)
     _verify_source_bindings_during_resolution(recipe.model_id, source_dir, source_refs, source_bindings)
     lora_paths = lora_request.paths if lora_request is not None else ()
     lora_sha256 = tuple(_resource_sha256(Path(path)) for path in lora_paths)
@@ -171,11 +185,13 @@ def resolve_build_plan(
     field_sources = {
         "variant": "user_explicit" if speculative_request or lora_request else "recipe_default",
         "precision": precision_source,
+        "deployment_precision": "user_explicit" if deployment_precision is not None else "recipe_default",
         "quant_method": method_source,
         "context_length": "user_explicit" if context_length is not None else "recipe_default",
         "prefill_chunk_length": "user_explicit" if prefill_chunk_length is not None else "recipe_default",
         "components": "user_explicit" if components is not None else "recipe_default",
         "profile": "user_explicit" if profile is not None else "recipe_default",
+        "low_memory": "user_explicit" if low_memory is not None else "recipe_default",
     }
     return BuildPlan(
         model_id=recipe.model_id,
@@ -184,7 +200,7 @@ def resolve_build_plan(
         modalities=recipe.modalities,
         variant=variant.name,
         config_path=str(config_path),
-        source_config_sha256=source_config_sha256,
+        source_config_sha256=recipe_config.sha256,
         model_dir=str(source_dir),
         output_dir=str(output_path),
         quant_output_dir=str(quant_output_path) if quant_output_path is not None else None,
@@ -192,7 +208,7 @@ def resolve_build_plan(
         export_name=recipe.export_name,
         profile=resolved_profile,
         precision=resolved_precision,
-        deployment_precision=dict(recipe.deployment_precision),
+        deployment_precision=recipe_config.deployment_precision,
         quant_method=resolved_method,
         quant_checkpoint=checkpoint_path,
         context_length=context,
@@ -213,12 +229,30 @@ def resolve_build_plan(
         artifact_format=recipe.artifact_format,
         required_runtime_files=recipe.required_runtime_files,
         worker_requirements=tuple(dict.fromkeys(worker_requirements)),
-        environment=dict(recipe.environment),
+        # Always bind this switch, including False, so the caller's environment
+        # cannot silently select a different export path. The executor restores it.
+        environment={**recipe.environment, "HUGE_MODEL_EXPORT_ENABLED": "1" if resolved_low_memory else "0"},
+        low_memory=resolved_low_memory,
         device=resolved_device.strip(),
         workflow_config=workflow_config,
         source_bindings=source_bindings,
         worker_capabilities=tuple(dict.fromkeys(worker_capabilities)),
     )
+
+
+def _resolve_low_memory(model: str, variant: VariantRecipe, value: bool | None) -> bool:
+    if value is not None and not isinstance(value, bool):
+        raise invalid_parameter(model, "low_memory", value, "must be a bool or None")
+    mode = variant.export_modes[0] if value is None else ("low_memory" if value else "standard")
+    if mode not in variant.export_modes:
+        raise unsupported_combination(
+            model,
+            "Export mode is not registered for this variant",
+            variant=variant.name,
+            export_mode=mode,
+            allowed_modes=list(variant.export_modes),
+        )
+    return mode == "low_memory"
 
 
 def _resolve_autoregressive_lengths(
@@ -317,7 +351,7 @@ def _resolve_precision(
             recipe.model_id,
             "precision.components",
             request.components,
-            "component precision overrides must be selected through a registered deployment profile",
+            "checkpoint component widths are fixed by the recipe; graph precision uses deployment_precision",
         )
     if (weight, activation) not in recipe.supported_precisions:
         raise invalid_parameter(
@@ -337,6 +371,18 @@ def _resolve_quant_method(
     quant_checkpoint: str | None,
 ) -> tuple[str | None, str]:
     if isinstance(value, UnsetType):
+        if quant_checkpoint and precision.weight != "w16":
+            from .checkpoint import detect_checkpoint_method
+
+            method = detect_checkpoint_method(quant_checkpoint, model=recipe.model_id)
+            if method not in recipe.quant_checkpoint_methods:
+                raise unsupported_combination(
+                    recipe.model_id,
+                    "Checkpoint producer is not supported by this model exporter",
+                    quant_method=method,
+                    supported_methods=list(recipe.quant_checkpoint_methods),
+                )
+            return method, "checkpoint_metadata"
         if not recipe.quant_methods:
             return None, "recipe_default"
         if precision.weight == "w16":
@@ -360,12 +406,13 @@ def _resolve_quant_method(
         return None, "user_explicit"
 
     normalized = str(value).strip().lower()
-    if normalized not in recipe.quant_methods:
+    allowed_methods = recipe.quant_checkpoint_methods if quant_checkpoint else recipe.quant_methods
+    if normalized not in allowed_methods:
         raise invalid_parameter(
             recipe.model_id,
             "quant_method",
             value,
-            f"allowed methods are {list(recipe.quant_methods)!r} or null for W16",
+            f"allowed methods are {list(allowed_methods)!r} or null for W16",
         )
     if precision.weight == "w16":
         raise unsupported_combination(

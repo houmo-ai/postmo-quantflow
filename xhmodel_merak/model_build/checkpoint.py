@@ -18,6 +18,7 @@ from .contracts import BuildPlan
 from .runtime_assets import (
     behavior_config_mismatches as _behavior_config_mismatches,
 )
+from .runtime_assets import explicit_rope_config
 from .runtime_assets import (
     quant_runtime_asset_paths as _quant_runtime_asset_paths,
 )
@@ -34,15 +35,12 @@ _QUANT_METADATA_NAMES = (
 )
 
 
-def inspect_quant_artifact(path_value: str | None, plan: BuildPlan) -> dict[str, Any] | None:
-    if path_value is None or plan.quant_method is None:
-        return None
-    path = Path(path_value).resolve()
+def _read_quant_metadata(path: Path, model: str) -> list[tuple[Path, Mapping[str, Any]]]:
     if not path.is_dir():
         raise ModelError(
             ErrorCode.QUANT_ARTIFACT_MISMATCH,
             f"Quant Artifact is not an existing directory: {path}",
-            model=plan.model_id,
+            model=model,
             path=str(path),
         )
     metadata_files = [candidate for name in _QUANT_METADATA_NAMES if (candidate := path / name).is_file()]
@@ -50,22 +48,17 @@ def inspect_quant_artifact(path_value: str | None, plan: BuildPlan) -> dict[str,
         raise ModelError(
             ErrorCode.QUANT_ARTIFACT_MISMATCH,
             "Quant Artifact contains no supported quantization metadata",
-            model=plan.model_id,
+            model=model,
             path=str(path),
         )
 
-    metadata: list[dict[str, Any]] = []
-    payloads: list[Any] = []
-    named_payloads: list[tuple[Path, Mapping[str, Any]]] = []
-    base_bit_values: set[int] = set()
-    discovered_bit_values: set[int] = set()
-    providers: set[str] = set()
+    result = []
     for metadata_path in metadata_files:
         if metadata_path.is_symlink():
             raise ModelError(
                 ErrorCode.QUANT_ARTIFACT_MISMATCH,
                 f"Quant Artifact metadata must not be a symlink: {metadata_path}",
-                model=plan.model_id,
+                model=model,
                 path=str(metadata_path),
             )
         try:
@@ -74,18 +67,62 @@ def inspect_quant_artifact(path_value: str | None, plan: BuildPlan) -> dict[str,
             raise ModelError(
                 ErrorCode.QUANT_ARTIFACT_MISMATCH,
                 f"Cannot parse Quant Artifact metadata {metadata_path}: {exc}",
-                model=plan.model_id,
+                model=model,
                 path=str(metadata_path),
             ) from exc
         if not isinstance(payload, Mapping):
             raise ModelError(
                 ErrorCode.QUANT_ARTIFACT_MISMATCH,
                 f"Quant Artifact metadata must contain an object: {metadata_path}",
-                model=plan.model_id,
+                model=model,
                 path=str(metadata_path),
             )
-        payloads.append(payload)
-        named_payloads.append((metadata_path, payload))
+        result.append((metadata_path, payload))
+    return result
+
+
+def detect_checkpoint_method(path_value: str, *, model: str) -> str:
+    """Read provider evidence only; tensor/identity verification still runs before export."""
+    providers = {
+        provider
+        for _, payload in _read_quant_metadata(Path(path_value).expanduser().resolve(), model)
+        for provider in _find_quant_providers(payload)
+    }
+    return _checkpoint_method(providers, model=model, path=path_value)
+
+
+def _checkpoint_method(providers: set[str], *, model: str, path: str) -> str:
+    providers = {_normalize_quant_provider(provider) for provider in providers}
+    methods = set()
+    if providers & {"autoround", "auto-round"}:
+        # AutoRound commonly saves GPTQ-compatible weights and declares both.
+        methods.add("autoround")
+    elif providers & {"gptq", "gptqmodel"}:
+        methods.add("gptq")
+    if "qat" in providers:
+        methods.add("qat")
+    if len(methods) != 1:
+        raise ModelError(
+            ErrorCode.QUANT_ARTIFACT_MISMATCH,
+            "Quant Artifact must declare one supported checkpoint producer",
+            model=model,
+            path=path,
+            providers=sorted(providers),
+        )
+    return methods.pop()
+
+
+def inspect_quant_artifact(path_value: str | None, plan: BuildPlan) -> dict[str, Any] | None:
+    if path_value is None or plan.quant_method is None:
+        return None
+    path = Path(path_value).resolve()
+    named_payloads = _read_quant_metadata(path, plan.model_id)
+    payloads = [payload for _, payload in named_payloads]
+    metadata: list[dict[str, Any]] = []
+    base_bit_values: set[int] = set()
+    discovered_bit_values: set[int] = set()
+    providers: set[str] = set()
+    for metadata_path, payload in named_payloads:
         metadata.append(
             {
                 "file": metadata_path.name,
@@ -134,29 +171,14 @@ def inspect_quant_artifact(path_value: str | None, plan: BuildPlan) -> dict[str,
             actual_bits=discovered_bits,
         )
     region_bits = _verify_quant_regions(payloads, plan, discovered_bits)
-    normalized_providers = {_normalize_quant_provider(provider) for provider in providers}
-    has_autoround = bool(normalized_providers & {"auto-round", "autoround"})
-    has_gptq = bool(normalized_providers & {"gptq", "gptqmodel"})
-    has_qat = "qat" in normalized_providers
-    if plan.quant_method == "autoround" and not has_autoround:
+    method = _checkpoint_method(providers, model=plan.model_id, path=str(path))
+    if method != plan.quant_method:
         raise ModelError(
             ErrorCode.QUANT_ARTIFACT_MISMATCH,
-            "Quant Artifact does not declare an AutoRound provider",
+            "Quant Artifact checkpoint producer does not match requested quant_method",
             model=plan.model_id,
-            providers=sorted(providers),
-        )
-    if plan.quant_method == "gptq" and (not has_gptq or has_autoround):
-        raise ModelError(
-            ErrorCode.QUANT_ARTIFACT_MISMATCH,
-            "Quant Artifact does not prove a non-AutoRound GPTQ provider",
-            model=plan.model_id,
-            providers=sorted(providers),
-        )
-    if plan.quant_method == "qat" and not has_qat:
-        raise ModelError(
-            ErrorCode.QUANT_ARTIFACT_MISMATCH,
-            "Quant Artifact does not declare a QAT provider",
-            model=plan.model_id,
+            expected=plan.quant_method,
+            actual=method,
             providers=sorted(providers),
         )
 
@@ -246,7 +268,9 @@ def verify_quant_model_identity(
                 path=str(artifact_path),
                 source_constraint_mismatches=constraint_mismatches,
             )
-        config_mismatches = _behavior_config_mismatches(source_config, checkpoint_config)
+        config_mismatches = _behavior_config_mismatches(
+            source_config, checkpoint_config, type_aliases=get_recipe(plan.model_id).config_type_aliases
+        )
         if config_mismatches:
             raise ModelError(
                 ErrorCode.QUANT_ARTIFACT_MISMATCH,
@@ -284,6 +308,10 @@ def _model_config_identity(value: Mapping[str, Any]) -> dict[str, Any]:
         "rope_theta",
     ):
         candidate = text_config.get(field) if text_config is not None and field in text_config else value.get(field)
+        if field == "rope_theta" and candidate is None:
+            rope = explicit_rope_config(text_config if text_config is not None else value).get("rope_parameters")
+            if isinstance(rope, Mapping):
+                candidate = rope.get("rope_theta")
         if isinstance(candidate, (str, int, float)) and not isinstance(candidate, bool):
             identity[field] = candidate
     architectures = value.get("architectures")
@@ -716,7 +744,9 @@ def _verify_named_checkpoint_tensors(
             layer_tensors.setdefault(int(match.group(1)), []).append(name)
     actual_layers = set(layer_tensors)
     required_layers = set(range(expected_layers))
-    has_embedding = any(name.endswith("embed_tokens.weight") for name in tensor_locations)
+    recipe = get_recipe(plan.model_id)
+    allowed_layers = required_layers | _auxiliary_checkpoint_layers(plan, expected_layers)
+    has_embedding = any(name.endswith(recipe.checkpoint_embedding_suffixes) for name in tensor_locations)
     has_final_norm = any(
         re.search(r"(?:^|\.)(?:model(?:\.language_model)?|language_model)\.norm\.weight$", name)
         for name in tensor_locations
@@ -739,7 +769,8 @@ def _verify_named_checkpoint_tensors(
         tensor_count < 2
         or element_count <= 1
         or max_rank < 2
-        or actual_layers != required_layers
+        or not required_layers.issubset(actual_layers)
+        or not actual_layers.issubset(allowed_layers)
         or not has_embedding
         or not has_final_norm
         or incomplete_layer_groups
@@ -755,12 +786,31 @@ def _verify_named_checkpoint_tensors(
             max_rank=max_rank,
             expected_num_hidden_layers=expected_layers,
             missing_layers=sorted(required_layers - actual_layers),
-            unexpected_layers=sorted(actual_layers - required_layers),
+            unexpected_layers=sorted(actual_layers - allowed_layers),
             incomplete_layer_groups=incomplete_layer_groups,
             has_embedding=has_embedding,
             has_final_norm=has_final_norm,
             shape_mismatches=shape_mismatches,
         )
+
+
+def _auxiliary_checkpoint_layers(plan: BuildPlan, main_layers: int) -> set[int]:
+    """Allow configured trailing draft layers without requiring them for a base export."""
+    field = get_recipe(plan.model_id).checkpoint_auxiliary_layers_field
+    if field is None:
+        return set()
+    config = json.loads((Path(plan.model_dir) / "config.json").read_text(encoding="utf-8"))
+    text = config.get("text_config", config)
+    count = text.get(field, 0)
+    if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= main_layers:
+        raise ModelError(
+            ErrorCode.QUANT_ARTIFACT_MISMATCH,
+            "Checkpoint auxiliary layer count must be a non-negative integer no larger than the main layer count",
+            model=plan.model_id,
+            field=field,
+            value=count,
+        )
+    return set(range(main_layers, main_layers + count))
 
 
 def _checkpoint_shape_mismatches(
@@ -776,10 +826,11 @@ def _checkpoint_shape_mismatches(
     identity = _model_config_identity(config) if isinstance(config, Mapping) else {}
     hidden_size = identity.get("hidden_size")
     vocab_size = identity.get("vocab_size")
+    embedding_suffixes = get_recipe(plan.model_id).checkpoint_embedding_suffixes
     mismatches: list[dict[str, Any]] = []
     for name, shape in tensor_shapes.items():
         expected_shape: tuple[int, ...] | None = None
-        if name.endswith("embed_tokens.weight") and isinstance(hidden_size, int):
+        if name.endswith(embedding_suffixes) and isinstance(hidden_size, int):
             expected_shape = (
                 vocab_size if isinstance(vocab_size, int) else shape[0] if len(shape) == 2 else -1,
                 hidden_size,
@@ -788,7 +839,13 @@ def _checkpoint_shape_mismatches(
             isinstance(hidden_size, int)
             and name.endswith("norm.weight")
             and (
-                layer_pattern.search(name) is not None
+                # Only residual-stream norms directly on a decoder layer have
+                # hidden_size channels. Attention Q/K norms use head_dim;
+                # recurrent and MLA norms have other model-specific widths.
+                (
+                    (layer_match := layer_pattern.search(name)) is not None
+                    and "." not in name[layer_match.end() :].removesuffix(".weight")
+                )
                 or re.search(
                     r"(?:^|\.)(?:model(?:\.language_model)?|language_model)\.norm\.weight$",
                     name,

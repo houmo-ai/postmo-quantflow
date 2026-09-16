@@ -84,6 +84,90 @@ def _normalized_module_target(module_target: str) -> str:
     return re.sub(r"[^0-9A-Za-z_]+", "_", module_target).strip("_")
 
 
+def flatten_placeholder_quant_metadata(quanted_model: Any) -> int:
+    """Resolve placeholder tuple ports while FX still retains getitem indices.
+
+    The SDK's QuantedInfo records one value per FX node, but omits literal
+    getitem arguments. Resolve only placeholder boundaries before serialization;
+    the executable graph is unchanged. The merger then sees explicit, ordered
+    tensor ports, including unused outputs, in the metadata's own namespace.
+    """
+    import operator
+
+    from xhquant.nn.modules import GetItem, PlaceHolderModule
+
+    placeholders = [
+        (node, quanted_model.get_submodule(node.target))
+        for node in quanted_model.graph.nodes
+        if node.op == "call_module" and isinstance(quanted_model.get_submodule(node.target), PlaceHolderModule)
+    ]
+    if not placeholders:
+        return 0
+    quant_meta = quanted_model.graph_meta.quant_meta
+    encoded = quant_meta.get(_QUANT_META_KEY)
+    if not encoded:
+        raise RuntimeError("Placeholder quant metadata is missing after PTQ.")
+    model = onnx.ModelProto()
+    model.ParseFromString(base64.b64decode(encoded, validate=True))
+    nodes = {node.name: node for node in model.graph.node}
+    removed = set()
+    for fx_node, module in placeholders:
+        placeholder = nodes.get(fx_node.name)
+        count = module.num_outputs
+        if (
+            placeholder is None
+            or not placeholder.op_type.endswith("QPlaceHolderModule")
+            or len(placeholder.output) != 1
+            or not isinstance(count, int)
+            or count < 1
+        ):
+            raise RuntimeError(f"Invalid quant-metadata placeholder boundary: {fx_node.name}")
+        outputs = [f"{fx_node.name}_unused_output_{index}" for index in range(count)]
+        seen_indices = set()
+        for user in fx_node.users:
+            is_getitem = (
+                user.op == "call_function" and user.target is operator.getitem
+            ) or (
+                user.op == "call_module" and isinstance(quanted_model.get_submodule(user.target), GetItem)
+            )
+            if (
+                not is_getitem
+                or len(user.args) != 2
+                or user.args[0] is not fx_node
+                or type(user.args[1]) is not int
+                or not 0 <= user.args[1] < count
+                or user.args[1] in seen_indices
+            ):
+                raise RuntimeError(f"Invalid placeholder tuple access: {user.format_node()}")
+            index = user.args[1]
+            getitem = nodes.get(user.name)
+            attrs = (
+                {}
+                if getitem is None
+                else {attr.name: onnx.helper.get_attribute_value(attr) for attr in getitem.attribute}
+            )
+            if (
+                getitem is None
+                or not (
+                    getitem.op_type.endswith("QGetItem")
+                    or (getitem.op_type == "Unknown" and attrs.get("target_name") == b"getitem")
+                )
+                or list(getitem.input) != list(placeholder.output)
+                or len(getitem.output) != 1
+            ):
+                raise RuntimeError(f"Quant metadata does not match FX tuple access: {user.name}")
+            outputs[index] = getitem.output[0]
+            seen_indices.add(index)
+            removed.add(getitem.name)
+        del placeholder.output[:]
+        placeholder.output.extend(outputs)
+    retained = [node for node in model.graph.node if node.name not in removed]
+    del model.graph.node[:]
+    model.graph.node.extend(retained)
+    quant_meta[_QUANT_META_KEY] = base64.b64encode(model.SerializeToString(deterministic=True)).decode("ascii")
+    return len(placeholders)
+
+
 def merge_placeholder_quant_metadata(
     main_model: onnx.ModelProto,
     subgraph_model: onnx.ModelProto,

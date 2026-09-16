@@ -995,6 +995,16 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         else:
             self.wrap_cfg.pop("output_post_norm_hidden", None)
 
+    def _configure_verify_decode(self):
+        """Use the same multi-token/cache ABI for main and streamed decode graphs."""
+        if self.config.spec_decode_mode not in ("mtp", "dflash"):
+            return
+        self.wrap_cfg["verify_output_intermediates"] = True
+        self.wrap_cfg["num_logits_to_keep"] = 0
+        if self.config.spec_decode_mode == "mtp":
+            self.wrap_cfg["output_post_norm_hidden"] = True
+        self.set_input_sequence_length(self.config.num_draft_tokens + 1)
+
     def _to_fronted(self, wrap_model):
         # 将模型转换成前端图，准备进行量化
         self.set_prefill()
@@ -1019,12 +1029,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         spec_decode_mode = self.config.spec_decode_mode
         if spec_decode_mode in ("mtp", "dflash"):
-            spec_seq_len = self.config.num_draft_tokens + 1
-            self.wrap_cfg["verify_output_intermediates"] = True
-            self.wrap_cfg["num_logits_to_keep"] = 0
-            if spec_decode_mode == "mtp":
-                self.wrap_cfg["output_post_norm_hidden"] = True
-            self.set_input_sequence_length(spec_seq_len)
+            self._configure_verify_decode()
 
             def _apply_spec_flags(module):
                 if hasattr(module, "num_logits_to_keep"):
@@ -1495,6 +1500,20 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
                 f"{placeholder_types}, but missing {missing_types}."
             )
 
+    def _prepare_placeholder_graphs(self, big_hf_model):
+        """Capture each traced graph's mode before materializing its real layers."""
+        self._restore_prefill_wrap_cfg()
+        self.set_prefill()
+        prefill_wrap_cfg = copy.deepcopy(self.get_wrap_cfg())
+        big_hf_model.register_layer_as_place_holder(self._frontend_model.prefill)
+        self.set_decode()
+        # _to_fronted restores prefill flags after tracing the verify graph.
+        # set_decode alone selects one-token decoding; replay the verify ABI.
+        self._configure_verify_decode()
+        decode_wrap_cfg = copy.deepcopy(self.get_wrap_cfg())
+        big_hf_model.register_layer_as_place_holder(self._frontend_model.decode)
+        return prefill_wrap_cfg, decode_wrap_cfg
+
     def _export_big_language_hmonnx(self, exported_info: ExportData) -> VLLMModelMeta:
         """使用 placeholder 分层导出 Qwen3.5 文本模型，降低峰值内存占用。
 
@@ -1581,12 +1600,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         # prefill 与 decode 的输入 shape、线性注意力模式和缓存契约不同，需在各自
         # 模式下保存 wrap 配置，并将两张前端图中的目标模块替换为 PlaceHolderModule。
-        self.set_prefill()
-        prefill_wrap_cfg = copy.deepcopy(self.get_wrap_cfg())
-        big_hf_model.register_layer_as_place_holder(self._frontend_model.prefill)
-        self.set_decode()
-        decode_wrap_cfg = copy.deepcopy(self.get_wrap_cfg())
-        big_hf_model.register_layer_as_place_holder(self._frontend_model.decode)
+        prefill_wrap_cfg, decode_wrap_cfg = self._prepare_placeholder_graphs(big_hf_model)
         decode_placeholder_exported_dir = str(Path(exported_dir) / "decode" / "placeholders")
 
         # 同一 module target 的真实权重只加载一次，再分别按 prefill/decode 配置导出；
@@ -1607,6 +1621,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
 
         # 导出包含 PlaceHolder 节点的整体 prefill/decode 主图。主图量化阶段不会再次
         # 展开已经独立导出的模块，因此无需同时持有所有层的真实权重。
+        self._restore_prefill_wrap_cfg()
         self.set_prefill()
         self._export_language_hmonnx_impl(exported_info)
         export_meta = cast(VLLMModelMeta, exported_info.meta)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -152,10 +153,12 @@ def collect_golden_dirs(
 def _golden_dirs_for_component(root: Path, component: str) -> list[str]:
     paths = []
     for path in root.rglob("step_*"):
+        if re.fullmatch(r"step_[0-9]+", path.name) is None:
+            continue
         if not path.is_dir() or not any(child.is_file() for child in path.rglob("*")):
             continue
         relative = path.relative_to(root)
-        if any(matches_component_directory(part.lower(), component.lower()) for part in relative.parts[:-1]):
+        if any(matches_component_directory(part, component) for part in relative.parts[:-1]):
             paths.append(relative.as_posix())
     return sorted(paths)
 

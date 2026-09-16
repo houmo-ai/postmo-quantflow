@@ -50,7 +50,7 @@ def test_distributed_catalog_preserves_the_full_public_description_snapshot():
     # First-release API: one public model_id; export naming stays internal.
     payload = json.dumps(descriptions, sort_keys=True, separators=(",", ":")).encode()
 
-    assert hashlib.sha256(payload).hexdigest() == "6fbaf4ee9883fb1ad26f9f3f542286c12e176c98245838a8b06747105deb1550"
+    assert hashlib.sha256(payload).hexdigest() == "c45f9efeb20b07af5d1e886ab862f081bcfa2b2ec87f55e6316a88cbf1c318d7"
 
 
 @pytest.mark.parametrize("model_id", EXPECTED_VARIANTS)
@@ -61,7 +61,7 @@ def test_default_description_only_lists_editable_build_arguments(model_id):
     json.dumps(parameters)
     assert set(parameters) <= set(inspect.signature(build_model).parameters)
     assert parameters["model_dir"]["required"] is True
-    assert parameters["output_dir"]["required"] is True
+    assert parameters["output_dir"]["default"] is None
     assert parameters["device"]["default"] is None
     assert not set(parameters) & {
         "model_id",
@@ -70,7 +70,6 @@ def test_default_description_only_lists_editable_build_arguments(model_id):
         "attention",
         "profile",
         "max_pe_length",
-        "deployment_precision",
     }
     assert all("required" in item or "default" in item for item in parameters.values())
 
@@ -82,7 +81,9 @@ def test_qwen_description_has_editable_defaults_and_correlated_choices():
         "model_dir",
         "output_dir",
         "device",
+        "low_memory",
         "precision",
+        "deployment_precision",
         "quant_method",
         "quant_checkpoint",
         "quant_output_dir",
@@ -135,12 +136,14 @@ def test_editable_description_returns_independent_nested_copies():
     parameters["precision"]["choices"][0]["weight"] = "changed"
     parameters["speculative"]["mode"]["choices"].clear()
     parameters["sources"]["required_by_variant"]["dflash"].clear()
+    parameters["deployment_precision"]["components"]["visual"]["choices"].clear()
 
     fresh = describe_model("qwen3.5-9b")
     assert fresh["precision"]["default"]["weight"] == "w4"
     assert fresh["precision"]["choices"][0]["weight"] == "w4"
     assert fresh["speculative"]["mode"]["choices"] == ["mtp", "dflash"]
     assert fresh["sources"]["required_by_variant"] == {"dflash": ["dflash"]}
+    assert fresh["deployment_precision"]["components"]["visual"]["choices"] == ["w8a8h1_sefp", "w8a16h1_sefp"]
 
 
 @pytest.mark.parametrize("full", [None, 0, 1, "false", [], {}])
@@ -225,6 +228,7 @@ def test_paddleocr_vl_description_exposes_document_runtime_contract():
             "required_sources": [],
             "extra_components": [],
             "context_workflows": [],
+            "export_modes": ["standard"],
         }
     ]
     assert description["input_schema"]["required"] == ["prompt", "image"]
@@ -237,6 +241,8 @@ def test_paddleocr_vl_description_exposes_document_runtime_contract():
     assert description["defaults"]["vision_profile"] == "visualm96-196-384-704-1024-1280"
     assert description["vision"]["image_token_gears"] == [96, 196, 384, 704, 1024, 1280]
     assert description["required_resources"] == ["calibration"]
+    assert description["quant_checkpoint_methods"] == ["autoround"]
+    assert description["worker_capabilities"] == []
 
 
 def test_describe_model_returns_independent_schema_copies():
@@ -280,16 +286,16 @@ def test_all_public_workflow_configs_exist_and_match_registered_quantization():
                 else:
                     assert quant is None, config_path
                 if recipe.artifact_format == "autoregressive":
-                    model_config = data["export"]["model"]
-                    quant_type = model_config["quant_scheme"]["quant_type"]
-                    visual_quant_type = quant_type
-                    if quant.get("quantize_vision"):
-                        visual_quant_type = model_config["visual_config"]["quant_scheme"]["quant_type"]
-                    expected_precision = {
-                        component: visual_quant_type if component == "visual" else quant_type
-                        for component in recipe.components
-                    }
-                    assert recipe.deployment_precision == expected_precision, config_path
+                    model = data["export"]["model"]
+                    assert set(recipe.deployment_precision) == set(recipe.components), config_path
+                    for component, precision in recipe.deployment_precision.items():
+                        component_config = model.get(f"{component}_config") or {}
+                        scheme = component_config.get("quant_scheme")
+                        if scheme is None and component == "video_visual":
+                            scheme = (model.get("visual_config") or {}).get("quant_scheme")
+                        if scheme is None:
+                            scheme = model["quant_scheme"]
+                        assert precision == scheme["quant_type"], (config_path, component)
                 for resource_name, dotted_path in recipe.resource_config_bindings:
                     if resource_name in recipe.required_resources:
                         continue
@@ -345,9 +351,6 @@ def test_registry_listing_does_not_import_model_runtime_dependencies():
 
 
 def test_registry_exposes_executable_worker_dependency_profiles(monkeypatch):
-    digest_cache_capability = (
-        "python-predicate:xhquant.xhonnxruntime.llm_hmonnx_loader:initializer_digest_cache_disable_available"
-    )
     assert "transformers>=5.13.0,<5.17.0" in describe_model("gemma4-12b-unified", full=True)["worker_requirements"]
     assert "transformers>=5.5.0,<5.17.0" in describe_model("qwen3.5-4b", full=True)["worker_requirements"]
     assert describe_model("qwen3.5-4b", full=True)["quant_requirements"]["autoround"] == [
@@ -379,9 +382,9 @@ def test_registry_exposes_executable_worker_dependency_profiles(monkeypatch):
         "transformers>=5.3.0,<5.4.0",
         "lerobot==0.5.1",
     ]
-    assert describe_model("qwen3.5-4b", full=True)["worker_capabilities"] == [digest_cache_capability]
-    assert describe_model("gemma4-e2b", full=True)["worker_capabilities"] == [digest_cache_capability]
-    assert describe_model("ling-3.0-flash", full=True)["worker_capabilities"] == [digest_cache_capability]
+    assert describe_model("qwen3.5-4b", full=True)["worker_capabilities"] == []
+    assert describe_model("gemma4-e2b", full=True)["worker_capabilities"] == []
+    assert describe_model("ling-3.0-flash", full=True)["worker_capabilities"] == []
     assert describe_model("pi0.5-libero", full=True)["worker_capabilities"] == []
     assert describe_model("gemma4-e2b", full=True)["bundled_resources"] == {
         "calibration": "data/calib_data/NeelNanda-pile-10k.jsonl"

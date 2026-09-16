@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "component-deployment-precision",
+    "patterns": [
+      "benchmark_test/ci_test_transformer5.16.0/test_component_deployment_precision.py",
+      "xhmodel_merak/model_catalog/**",
+      "xhmodel_merak/model_integrations/_shared.py",
+      "xhmodel_merak/model_integrations/*/plugin.py",
+      "xhmodel_merak/model_integrations/qwen/planning.py",
+      "xhmodel_merak/model_build/**",
+      "xhmodel_merak/xh_llm/workflows/config.py",
+      "configs_merak/workflows/xh2a/llm_models/qwen3_5*/**",
+      "configs_merak/workflows/xh2a/llm_models/qwen3_next/**",
+      "configs_merak/workflows/xh2a/llm_models/gemma4_series/**",
+      "configs_merak/workflows/xh2a/llm_models/ling_3_flash/**",
+      "configs_merak/workflows/xh2a/other_models/kokoro/**",
+      "configs_merak/workflows/xh2a/other_models/pi05/**"
+    ]
+  }]
+}

@@ -8,7 +8,6 @@ from xhmodel_merak.model_integrations._shared import (
     GPTQ_REQUIREMENTS,
     LING_INFERENCE,
     PILE10K_RESOURCE,
-    XHQUANT_INITIALIZER_CACHE_CAPABILITY,
     llm_deployment_precision,
     text_media_input_schema,
     text_output_schema,
@@ -29,7 +28,13 @@ def _recipe() -> ModelRecipe:
         export_name="ling_3_flash",
         task="text-generation",
         modalities=("text",),
-        variants=(variant("full", f"{_LING3}/ling_3_flash_autoround.yaml"),),
+        variants=(
+            variant(
+                "full",
+                f"{_LING3}/ling_3_flash_autoround.yaml",
+                export_modes=("low_memory", "standard"),
+            ),
+        ),
         default_precision=ResolvedPrecision(
             weight="wmix",
             activation="amix",
@@ -42,6 +47,9 @@ def _recipe() -> ModelRecipe:
         ),
         supported_precisions=(("wmix", "amix"),),
         quant_methods=("autoround",),
+        quant_checkpoint_methods=("gptq", "autoround"),
+        checkpoint_embedding_suffixes=("word_embeddings.weight",),
+        checkpoint_auxiliary_layers_field="num_nextn_predict_layers",
         deployment_precision=llm_deployment_precision(("prefill", "decode")),
         components=("prefill", "decode"),
         golden_components=(),
@@ -66,10 +74,8 @@ def _recipe() -> ModelRecipe:
             ("num_hidden_layers", 42),
         ),
         worker_requirements=("xhquant", "transformers>=5.5.0,<5.17.0"),
-        worker_capabilities=(XHQUANT_INITIALIZER_CACHE_CAPABILITY,),
         quant_requirements=(("autoround", AUTOROUND_REQUIREMENTS),),
         quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
-        environment={"HUGE_MODEL_EXPORT_ENABLED": "1"},
     )
 
 

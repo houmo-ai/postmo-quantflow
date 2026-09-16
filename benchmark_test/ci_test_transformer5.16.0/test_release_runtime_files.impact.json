@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "release-runtime-files",
+    "patterns": [
+      "benchmark_test/ci_test_transformer5.16.0/test_release_runtime_files.py",
+      "xhmodel_merak/model_build/runtime_assets.py",
+      "xhmodel_merak/model_build/packaging.py",
+      "xhmodel_merak/model_integrations/autoregressive/build.py"
+    ]
+  }]
+}

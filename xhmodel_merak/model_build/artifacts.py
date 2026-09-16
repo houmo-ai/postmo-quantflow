@@ -14,13 +14,34 @@ def flatten_single_export_root(stage_path: Path) -> str:
             export_roots=[path.name for path in export_roots],
         )
     export_root = export_roots[0]
-    collisions = sorted(path.name for path in export_root.iterdir() if (stage_path / path.name).exists())
+    empty_directories = []
+    collisions = []
+    for child in export_root.iterdir():
+        destination = stage_path / child.name
+        if not destination.exists() and not destination.is_symlink():
+            continue
+        # Some exporters remove their intermediate files but leave an empty
+        # component work directory (e.g. Gemma audio). Only that empty shell
+        # may be replaced; never merge trees or overwrite a file/symlink.
+        if (
+            child.is_dir()
+            and not child.is_symlink()
+            and destination.is_dir()
+            and not destination.is_symlink()
+            and not any(destination.iterdir())
+        ):
+            empty_directories.append(destination)
+        else:
+            collisions.append(child.name)
+    collisions.sort()
     if collisions:
         raise ModelError(
             ErrorCode.ARTIFACT_VALIDATION_FAILED,
             f"Cannot flatten exported Artifact because names collide: {collisions}",
             collisions=collisions,
         )
+    for directory in empty_directories:
+        directory.rmdir()
     for child in list(export_root.iterdir()):
         child.replace(stage_path / child.name)
     export_root.rmdir()

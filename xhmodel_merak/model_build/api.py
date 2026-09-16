@@ -45,13 +45,15 @@ def build_model(
     *,
     model_id: str,
     model_dir: str,
-    output_dir: str,
+    output_dir: str | None = None,
     device: str | None = None,
+    low_memory: bool | None = None,
     quant_output_dir: str | None = None,
     sources: Mapping[str, SourceRef | Mapping[str, Any] | str] | None = None,
     resources: Mapping[str, ResourceRef | Mapping[str, Any] | str] | None = None,
     profile: str | None = None,
     precision: PrecisionRequest | Mapping[str, Any] | None = None,
+    deployment_precision: Mapping[str, str] | None = None,
     quant_method: QuantMethod | None | UnsetType = UNSET,
     quant_checkpoint: str | None = None,
     context_length: int | None = None,
@@ -62,11 +64,15 @@ def build_model(
     speculative: SpeculativeRequest | Mapping[str, Any] | None = None,
     lora: LoRARequest | Mapping[str, Any] | None = None,
 ) -> BuildResult:
-    """Resolve a public Recipe and execute it through the existing Workflow layer."""
+    """Build directly into output_dir, or a dated release directory in the cwd.
+
+    The destination must not exist. Intermediate export files are not published.
+    """
 
     plan = resolve_build_plan(
         model_id=model_id,
         device=device,
+        low_memory=low_memory,
         model_dir=model_dir,
         output_dir=output_dir,
         quant_output_dir=quant_output_dir,
@@ -74,6 +80,7 @@ def build_model(
         resources=resources,
         profile=profile,
         precision=precision,
+        deployment_precision=deployment_precision,
         quant_method=quant_method,
         quant_checkpoint=quant_checkpoint,
         context_length=context_length,

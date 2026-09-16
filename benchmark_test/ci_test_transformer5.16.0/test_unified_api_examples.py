@@ -118,11 +118,12 @@ def test_invalid_cli_arguments_exit_before_execution(module, args):
 
 
 @pytest.mark.parametrize("reuse_checkpoint", [False, True])
-def test_build_forwards_defaults_and_overrides(reuse_checkpoint, monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize("explicit_output", [False, True])
+def test_build_forwards_defaults_and_overrides(reuse_checkpoint, explicit_output, monkeypatch, capsys, tmp_path):
     signature = inspect.signature(build.build_model)
     calls = []
     model_dir = str(tmp_path / "model")
-    output_dir = str(tmp_path / "artifact")
+    output_dir = str(tmp_path / "artifact") if explicit_output else None
     checkpoint_dir = str(tmp_path / "quantized")
 
     def execute(**kwargs):
@@ -131,7 +132,9 @@ def test_build_forwards_defaults_and_overrides(reuse_checkpoint, monkeypatch, ca
         return SimpleNamespace(to_dict=lambda: {"output_dir": kwargs["output_dir"], "loadable": True})
 
     monkeypatch.setattr(build, "build_model", execute)
-    args = ["--model-id", MODEL_ID, "--model-dir", model_dir, "--output-dir", output_dir]
+    args = ["--model-id", MODEL_ID, "--model-dir", model_dir]
+    if explicit_output:
+        args += ["--output-dir", output_dir]
     if reuse_checkpoint:
         args += [
             "--quant-checkpoint",
@@ -142,6 +145,8 @@ def test_build_forwards_defaults_and_overrides(reuse_checkpoint, monkeypatch, ca
             "256",
             "--device",
             "cuda:1",
+            "--deployment-precision",
+            '{"visual":"w8a16h1_sefp"}',
         ]
     build.main(args)
 
@@ -152,6 +157,8 @@ def test_build_forwards_defaults_and_overrides(reuse_checkpoint, monkeypatch, ca
             "output_dir": output_dir,
             "device": "cuda:1" if reuse_checkpoint else None,
             "quant_checkpoint": checkpoint_dir if reuse_checkpoint else None,
+            "low_memory": None,
+            "deployment_precision": {"visual": "w8a16h1_sefp"} if reuse_checkpoint else None,
             "context_length": 4096 if reuse_checkpoint else None,
             "prefill_chunk_length": 256 if reuse_checkpoint else None,
         }

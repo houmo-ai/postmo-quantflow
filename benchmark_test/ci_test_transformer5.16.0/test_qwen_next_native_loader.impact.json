@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "qwen-next-native-expert-loading",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/qwen3_next/_qwen3_next_big_export.py",
+      "xhmodel_merak/xh_llm/models/qwen3_next/qwen3_next_model.py",
+      "xhmodel_merak/xh_llm/big_hf_model_helper.py"
+    ]
+  }]
+}

@@ -232,7 +232,16 @@ class HybridGatedAttentionMixin:
         return self
 
 
-def _unpack_split_conv_cache_outputs(linear_outputs, *, owner: str):
+def _split_conv_cache_layout(module):
+    """Static flat output counts: all Q snapshots, then K, V and state."""
+    recurrent = module.linear_attention_mode == "recurrent"
+    steps = module.input_sequence_length if recurrent and module._verify_output_intermediates else 1
+    state_is_cache = bool(getattr(getattr(module, "chunk_scan_op", None), "state_is_cache", False))
+    suppress = (module.suppress_recurrent_state_outputs or state_is_cache) and not recurrent
+    return 3 * steps, 0 if suppress else steps
+
+
+def _unpack_split_conv_cache_outputs(linear_outputs, *, owner: str, flat_layout=None):
     """Normalize split-cache outputs across eager and FX leaf-module ABIs.
 
     Eager modules may return ``(hidden, (q, k, v), recurrent)`` while export
@@ -240,6 +249,20 @@ def _unpack_split_conv_cache_outputs(linear_outputs, *, owner: str):
     prefill updates its recurrent CacheTensor in place, so FX drops the
     trailing ``None`` and exposes ``(hidden, q, k, v)``.
     """
+    if isinstance(linear_outputs, torch.fx.Proxy) or (
+        flat_layout is not None
+        and isinstance(linear_outputs, (tuple, list))
+        and not any(isinstance(item, (tuple, list)) for item in linear_outputs)
+    ):
+        if flat_layout is None:
+            raise RuntimeError(f"{owner} must declare its flat cache output layout for FX tracing")
+        conv_count, state_count = flat_layout
+        if not isinstance(linear_outputs, torch.fx.Proxy) and len(linear_outputs) != 1 + conv_count + state_count:
+            raise RuntimeError(f"{owner} output count does not match its declared cache layout")
+        conv_cache_out = tuple(linear_outputs[index] for index in range(1, 1 + conv_count))
+        states = tuple(linear_outputs[index] for index in range(1 + conv_count, 1 + conv_count + state_count))
+        recurrent_state_out = states[0] if state_count == 1 else (states or None)
+        return linear_outputs[0], conv_cache_out, recurrent_state_out
     hidden_states = linear_outputs[0]
     if len(linear_outputs) == 3 and isinstance(linear_outputs[1], (list, tuple)):
         conv_cache_out = tuple(linear_outputs[1])
@@ -292,6 +315,7 @@ class HybridDecoderLayerMixin:
                     _unpack_split_conv_cache_outputs(
                         linear_outputs,
                         owner="Split Qwen3.5 linear attention",
+                        flat_layout=getattr(self.linear_attn, "split_conv_cache_output_layout", None),
                     )
                 )
             else:
@@ -466,6 +490,25 @@ class HybridGatedDeltaNetMixin:
     """
 
     _uses_packed_input_projections = False
+
+    @property
+    def split_conv_cache_output_layout(self):
+        return _split_conv_cache_layout(self)
+
+    def graph_forward(
+        self, hidden_states, conv_cache=None, recurrent_state=None,
+        linear_attn_mask=None, current_input_length=None,
+    ):
+        # Standalone placeholder subgraphs and their main-graph leaves must
+        # expose the same flat tensor ABI. Keep eager's nested return intact.
+        hidden, conv, state = HybridGatedDeltaNetMixin.forward(
+            self, hidden_states, conv_cache, recurrent_state,
+            linear_attn_mask, current_input_length,
+        )
+        if not self.split_conv_cache:
+            return hidden, conv, state
+        states = state if isinstance(state, (tuple, list)) else (() if state is None else (state,))
+        return hidden, *conv, *states
 
     def _project_qkvzba(self, hidden_states: Tensor):
         """Project Q/K/V/Z/B/A using Qwen3.5's separate checkpoint layout."""

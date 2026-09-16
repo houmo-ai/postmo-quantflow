@@ -136,6 +136,45 @@ def test_paddleocr_visual_token_gears_convert_image_capacity_to_patch_capacity()
         gears.patch_token_capacity(0, spatial_merge_size=2)
 
 
+@pytest.mark.parametrize("in_size,out_size", [(2, 6), (6, 2), (4, 4), (1, 6), (6, 1)])
+def test_position_interpolation_matches_native_aligned_corners(in_size, out_size):
+    gears = _load_visual_token_gears()
+    positions = torch.arange(in_size, dtype=torch.float32).square()
+    indices, weights = gears._linear_indices_weights(out_size, in_size, device=torch.device("cpu"))
+
+    actual = (positions[indices] * weights).sum(0)
+    expected = torch.nn.functional.interpolate(
+        positions.reshape(1, 1, -1), size=out_size, mode="linear", align_corners=True
+    ).flatten()
+
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("grid_hw", [(2, 6), (6, 2), (2, 2), (4, 4)])
+@pytest.mark.parametrize("merge_major", [False, True])
+def test_position_geometry_matches_native_bilinear_embedding_with_padding(grid_hw, merge_major):
+    gears = _load_visual_token_gears()
+    h, w = grid_hw
+    capacity = h * w + 4
+    positions = torch.arange(4 * 4 * 3, dtype=torch.float32).reshape(4, 4, 3).square()
+    geometry = gears.build_visual_token_gear_inputs(
+        torch.tensor([[1, h, w]]), patch_capacity=capacity, num_positions=16,
+        dtype=torch.float32, merge_major=merge_major,
+    )
+    actual = (
+        positions.reshape(16, 3)[geometry["position_ids"]]
+        * geometry["position_weights"].unsqueeze(-1)
+    ).sum(0)
+    expected = torch.nn.functional.interpolate(
+        positions.permute(2, 0, 1).unsqueeze(0), size=(h, w), mode="bilinear", align_corners=True
+    )[0].permute(1, 2, 0)
+    if merge_major:
+        expected = expected.reshape(h // 2, 2, w // 2, 2, 3).permute(0, 2, 1, 3, 4)
+
+    torch.testing.assert_close(actual[:h * w], expected.reshape(-1, 3), rtol=1e-6, atol=1e-5)
+    torch.testing.assert_close(actual[h * w:], torch.zeros(4, 3), rtol=0, atol=0)
+
+
 def test_paddleocr_visual_token_gears_reorder_non_square_patches_to_merge_major_before_padding():
     gears = _load_visual_token_gears()
     pixel_values = torch.arange(8, dtype=torch.float32).reshape(1, 8, 1, 1, 1)

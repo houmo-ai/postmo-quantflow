@@ -11,14 +11,34 @@ def describe_build_parameters(recipe: ModelRecipe) -> dict[str, Any]:
     parameters: dict[str, Any] = {
         "model_dir": {"required": True, "description": "Local source weights directory."},
         "output_dir": {
-            "required": True,
-            "description": "New artifact directory; its parent must already exist.",
+            "default": None,
+            "description": (
+                "Final artifact directory, without an extra nested release folder. "
+                "None creates <release_name>_<YYYYMMDD> in the current directory. "
+                "The destination must not exist and its parent must exist."
+            ),
         },
         "device": {
             "default": None,
             "description": "None uses XHMODEL_BUILD_DEVICE, falling back to cuda:0.",
         },
     }
+
+    if any(len(variant.export_modes) > 1 for variant in recipe.variants):
+        parameters["low_memory"] = {
+            "default": None,
+            "variants": {
+                variant.name: {
+                    "default": variant.export_modes[0] == "low_memory",
+                    "choices": [mode == "low_memory" for mode in variant.export_modes],
+                }
+                for variant in recipe.variants
+            },
+            "description": (
+                "None uses the selected variant's default, independent of environment variables. "
+                "True uses its layer-wise placeholder exporter. This controls export, not inference."
+            ),
+        }
 
     if len(recipe.supported_precisions) > 1:
         parameters["precision"] = {
@@ -29,7 +49,28 @@ def describe_build_parameters(recipe: ModelRecipe) -> dict[str, Any]:
             "choices": [
                 {"weight": weight, "activation": activation} for weight, activation in recipe.supported_precisions
             ],
-            "description": "Choose a weight/activation pair; per-component overrides are not supported.",
+            "description": (
+                "Choose the checkpoint weight/activation pair; graph component choices use deployment_precision."
+            ),
+        }
+
+    if recipe.deployment_precision_bindings:
+        parameters["deployment_precision"] = {
+            "default": None,
+            "components": {
+                component: {
+                    "default": recipe.deployment_precision[component],
+                    "choices": list(binding.choices),
+                    "shared_with": list(binding.components),
+                }
+                for binding in recipe.deployment_precision_bindings
+                for component in binding.components
+            },
+            "description": (
+                "Component to base quant_type; omitted components follow the selected variant/context YAML. "
+                "Components sharing one exporter scheme change together. "
+                "Packed checkpoint weights and YAML node/operator exceptions are preserved."
+            ),
         }
 
     methods: list[str | None] = list(recipe.quant_methods)
@@ -44,7 +85,11 @@ def describe_build_parameters(recipe: ModelRecipe) -> dict[str, Any]:
     if recipe.quant_methods:
         parameters["quant_checkpoint"] = {
             "default": None,
-            "description": "Reuse a quantized checkpoint instead of quantizing again; requires a quant_method.",
+            "methods": list(recipe.quant_checkpoint_methods),
+            "description": (
+                "Reuse existing weights without quantizing again. Omit quant_method to read its producer "
+                "from metadata; an explicit method must match."
+            ),
         }
         parameters["quant_output_dir"] = {
             "default": None,
@@ -96,5 +141,5 @@ def describe_build_parameters(recipe: ModelRecipe) -> dict[str, Any]:
         }
 
     # components, vision and attention only accept the registered, fixed values.
-    # max_pe_length and deployment precision are not build_model arguments.
+    # max_pe_length is fixed by the recipe, not a build_model argument.
     return parameters

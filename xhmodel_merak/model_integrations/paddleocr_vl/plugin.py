@@ -8,7 +8,6 @@ from xhmodel_merak.model_integrations._shared import (
     AUTOREGRESSIVE_BUILD,
     AUTOROUND_REQUIREMENTS,
     GPTQ_REQUIREMENTS,
-    XHQUANT_INITIALIZER_CACHE_CAPABILITY,
     text_output_schema,
     variant,
 )
@@ -59,6 +58,7 @@ def _recipe() -> ModelRecipe:
         ),
         supported_precisions=(("w8", "a8"),),
         quant_methods=("autoround",),
+        quant_checkpoint_methods=("autoround",),
         deployment_precision={
             "visual": "w8a16h1_sefp",
             "prefill": "w8a8_sefp",
@@ -86,7 +86,6 @@ def _recipe() -> ModelRecipe:
             ("architectures.0", "PaddleOCRVLForConditionalGeneration"),
         ),
         worker_requirements=("xhquant", "transformers>=5.16.0,<5.17.0"),
-        worker_capabilities=(XHQUANT_INITIALIZER_CACHE_CAPABILITY,),
         quant_requirements=(("autoround", AUTOROUND_REQUIREMENTS),),
         quant_capabilities=(("autoround", ("recipes.paddleocr_vl:quantize_paddleocr_vl",)),),
         quant_checkpoint_requirements=GPTQ_REQUIREMENTS,

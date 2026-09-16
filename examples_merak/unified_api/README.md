@@ -31,8 +31,16 @@ python -m examples_merak.unified_api.build \
   --device cuda:0
 ```
 
-脚本直接调用 `build_model()`，默认按模型配置量化并导出。`output_dir` 是最终目录，不能覆盖已有目录。
+脚本直接调用 `build_model()`，默认按模型配置量化并导出。`output_dir` 是最终目录，不再套一层。
+不传 `--output-dir`（Python 中省略或传 `None`），就在当前目录按发布名和日期建目录，
+路径见返回的 `output_dir`。已有目录不覆盖，包括自动命名重名的情况。
 已有匹配的量化权重时，加 `--quant-checkpoint /path/to/quantized`，仍保留原始 `--model-dir`。
+来源会从权重元数据识别，不重跑量化。需要调整组件图精度时，加
+`--deployment-precision '{"visual":"w8a16h1_sefp"}'`；可改哪些组件先看 `describe_model`。
+
+Qwen 可加 `--low-memory` 走分层导出；`--no-low-memory` 明确关闭。不传时使用变体默认值，
+Ling 默认开启。Gemma 和 Qwen LoRA 暂不支持开启；这不改变推理方式。
+没有指定的组件沿用当前 YAML，已量化的权重不会因此重做。
 需要改上下文时，加 `--context-length 4096 --prefill-chunk-length 256`；可用范围先查 `catalog`。
 
 返回 `BuildResult`，脚本将它转成 JSON。主要看 `output_dir`、`manifest_file`、`components` 和 `loadable`。
@@ -108,3 +116,7 @@ qwen35_4b_api/
 
 各组件目录里是图和相关权重。ViT 五档平铺在根目录，`visual_gears.json` 记录每档图的位置。
 搬运时复制整个产物目录，不要只拿一个 ONNX 文件。旧 workflow 直接导出的目录没有统一 manifest，不能直接交给这个推理接口。
+
+构建交付时不包含临时子图、逐层导出工作文件、日志、评测报告和摘要缓存。
+推理可能在目录里新增缓存或临时文件，不影响再次加载；已交付的模型文件仍会校验完整性。
+MTP/DFLASH 等图只在选择对应变体时出现，按 `mtp_*` / `dflash_*` 平铺，不再增加一层目录。

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import yaml
 
+from xhmodel_merak._requirements import validate_worker_capabilities
 from xhmodel_merak.errors import ErrorCode, ModelError
 from xhmodel_merak.model_artifact import validation as artifact_validation
 from xhmodel_merak.model_catalog import get_recipe, resolve_workflow_config
@@ -152,18 +153,22 @@ def _complete_manifest(artifact: Path) -> dict:
         }
     )
     effective_workflow = artifact / "effective_workflow.yaml"
+    export_model = {
+        "model_name": recipe.export_name,
+        "context_max_length": recipe.default_context_length,
+        "prefill_chunk_length": recipe.default_prefill_chunk_length,
+        "max_pe_length": recipe.max_pe_length,
+    }
+    # Keep this minimal artifact fixture faithful to the installed graph schemes.
+    for binding in recipe.deployment_precision_bindings:
+        current = export_model
+        parts = binding.config_path.removeprefix("export.model.").split(".")
+        for part in parts[:-1]:
+            current = current.setdefault(part, {})
+        current[parts[-1]] = {"quant_type": recipe.deployment_precision[binding.components[0]]}
     effective_workflow.write_text(
         yaml.safe_dump(
-            {
-                "export": {
-                    "model": {
-                        "model_name": recipe.export_name,
-                        "context_max_length": recipe.default_context_length,
-                        "prefill_chunk_length": recipe.default_prefill_chunk_length,
-                        "max_pe_length": recipe.max_pe_length,
-                    }
-                }
-            },
+            {"export": {"model": export_model}},
             sort_keys=False,
         ),
         encoding="utf-8",
@@ -575,6 +580,41 @@ def test_inference_model_verifies_file_checksums_before_runtime(monkeypatch, art
     assert "checksum" in str(exc_info.value).lower()
 
 
+@pytest.mark.parametrize("during_runtime", [False, True])
+@pytest.mark.parametrize("damage", ["missing", "size", "checksum"])
+def test_extra_runtime_files_do_not_hide_inventoried_file_damage(monkeypatch, artifact, during_runtime, damage):
+    weight = artifact / "weights.bin"
+    weight.write_bytes(b"weights")
+    _rewrite_inventory(artifact)
+    (artifact / "runtime.tmp").write_text("allowed extra file")
+    runtime_called = False
+
+    def corrupt():
+        if damage == "missing":
+            weight.unlink()
+        elif damage == "size":
+            weight.write_bytes(b"truncated")
+        else:
+            weight.write_bytes(b"changed")
+
+    def quick_test(*_args, **_kwargs):
+        nonlocal runtime_called
+        runtime_called = True
+        corrupt()
+        return _runtime_result()
+
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation.quick_test_hmonnx", quick_test,
+    )
+    if not during_runtime:
+        corrupt()
+    with pytest.raises(ModelError) as exc_info:
+        inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
+    assert exc_info.value.code == ErrorCode.ARTIFACT_VALIDATION_FAILED
+    assert runtime_called is during_runtime
+    assert exc_info.value.details["path"] in ("weights.bin", str(weight))
+
+
 def test_inference_model_validates_artifact_before_worker_preflight(monkeypatch, artifact):
     manifest_path = artifact / "model_build_manifest.json"
     manifest = _complete_manifest(artifact)
@@ -599,13 +639,17 @@ def test_inference_model_validates_artifact_before_worker_preflight(monkeypatch,
     assert preflight_called is False
 
 
-def test_inference_model_runs_a_registry_bound_manifest(monkeypatch, artifact):
+@pytest.mark.parametrize("cache_setting", [None, "0", "1"])
+def test_inference_model_leaves_sdk_cache_policy_unchanged(monkeypatch, artifact, cache_setting):
     _complete_manifest(artifact)
+    monkeypatch.delenv("XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE", raising=False)
+    if cache_setting is not None:
+        monkeypatch.setenv("XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE", cache_setting)
 
     def quick_test(*_args, **_kwargs):
         import os
 
-        assert os.environ["XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE"] == "1"
+        assert os.environ.get("XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE") == cache_setting
         return _runtime_result()
 
     monkeypatch.setattr(
@@ -616,6 +660,153 @@ def test_inference_model_runs_a_registry_bound_manifest(monkeypatch, artifact):
     result = inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
 
     assert result.output_text == "ok"
+
+    import os
+
+    assert os.environ.get("XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE") == cache_setting
+
+
+@pytest.mark.parametrize("multi_graph", [False, True])
+def test_inference_model_real_sdk_deduplicates_with_runtime_cache(monkeypatch, artifact, multi_graph):
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    from xhquant.xhonnxruntime import llm_hmonnx_loader as loader
+
+    monkeypatch.delenv("XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE", raising=False)
+
+    # Real SDK graph/weight loading with eight-byte external weights. Only the
+    # expensive generation loop is replaced; cache naming, IO and sharing run.
+    names = ("prefill", "decode", "draft") if multi_graph else ("prefill", "decode")
+    paths = {}
+    for name in names:
+        path = artifact / name / "model.onnx"
+        path.parent.mkdir()
+        graph = helper.make_graph(
+            [helper.make_node("Add", ["input", "weight"], ["output"])],
+            name,
+            [helper.make_tensor_value_info("input", TensorProto.FLOAT, [2])],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [2])],
+            [numpy_helper.from_array(np.array([1.0, 2.0], dtype=np.float32), name="weight")],
+        )
+        onnx.save_model(
+            helper.make_model(graph),
+            path,
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location="weights.bin",
+            size_threshold=0,
+        )
+        paths[name] = path
+    _rewrite_inventory(artifact)
+    before = (artifact / "model_build_manifest.json").read_bytes()
+    monkeypatch.delattr(loader, "initializer_digest_cache_disable_available", raising=False)
+    monkeypatch.setattr(inference_api, "validate_worker_capabilities", validate_worker_capabilities)
+
+    def quick_test(*_args, **_kwargs):
+        graphs = {name: loader.load_onnx_graph_only(str(path)) for name, path in paths.items()}
+        if multi_graph:
+            pool = loader.load_multi_graph_initializer_pool(graphs)
+            weights = [pool.graphs[name]["weight"] for name in names]
+        else:
+            pool = loader.load_shared_initializer_pool(graphs["prefill"], graphs["decode"])
+            weights = [pool.prefill["weight"], pool.decode["weight"]]
+        assert all(weight is weights[0] for weight in weights)
+        return _runtime_result()
+
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation.quick_test_hmonnx",
+        quick_test,
+    )
+    assert inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact)).output_text == "ok"
+    caches = list(artifact.glob(".xhquant_*_hmonnx_sha256_*.json"))
+    assert caches
+    assert inference_model(inputs={"prompt": "again"}, artifact_dir=str(artifact)).output_text == "ok"
+    assert all(path.is_file() for path in caches)
+    assert (artifact / "model_build_manifest.json").read_bytes() == before
+
+
+def test_inference_leaves_digest_cache_setting_unchanged_after_runtime_failure(monkeypatch, artifact):
+    _complete_manifest(artifact)
+    monkeypatch.setenv("XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE", "0")
+
+    def fail(*_args, **_kwargs):
+        assert os.environ["XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE"] == "0"
+        raise RuntimeError("runtime failed")
+
+    monkeypatch.setattr("xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation.quick_test_hmonnx", fail)
+    with pytest.raises(ModelError, match="runtime failed"):
+        inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
+    assert os.environ["XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE"] == "0"
+
+
+@pytest.mark.parametrize("model", ["pi0.5-libero", "kokoro-82m-v1.1-zh"])
+def test_runtime_cache_is_allowed_for_all_artifact_formats(tmp_path, model):
+    artifact, _ = _write_minimal_fixed_artifact(tmp_path, model)
+    cache = artifact / f".xhquant_llm_hmonnx_sha256_{'a' * 64}.json"
+    cache.write_text("{}")
+    # The shared inventory contract does not depend on the task or SDK format.
+    manifest = json.loads((artifact / "model_build_manifest.json").read_text())
+    artifact_validation.validate_manifest_files(artifact, manifest["artifact"])
+    assert cache.read_text() == "{}"
+
+
+@pytest.mark.parametrize("node_kind", ["symlink", "fifo"])
+def test_inference_model_cache_names_do_not_exempt_non_regular_files(monkeypatch, artifact, tmp_path, node_kind):
+    cache = artifact / f".xhquant_llm_hmonnx_sha256_{'a' * 64}.json"
+    if node_kind == "symlink":
+        target = tmp_path / "outside.json"
+        target.write_text("{}")
+        cache.symlink_to(target)
+    else:
+        os.mkfifo(cache)
+    with pytest.raises(ModelError, match="file inventory") as exc_info:
+        inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
+    field = "symlinks" if node_kind == "symlink" else "non_regular_nodes"
+    assert exc_info.value.details[field] == [cache.name]
+
+
+def test_inference_model_still_checks_inventoried_cache_hashes(monkeypatch, artifact):
+    cache = artifact / f".xhquant_llm_hmonnx_sha256_{'a' * 64}.json"
+    cache.write_text("{}")
+    _rewrite_inventory(artifact)
+
+    def quick_test(*_args, **_kwargs):
+        cache.write_text("[]")  # Same size, different digest; must not be exempt.
+        return _runtime_result()
+
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation.quick_test_hmonnx",
+        quick_test,
+    )
+    with pytest.raises(ModelError, match="checksum"):
+        inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        f"hf_config/.xhquant_llm_hmonnx_sha256_{'a' * 64}.json",
+        f"decode/.xhquant_llm_hmonnx_sha256_{'a' * 64}.json",
+        f".xhquant_llm_hmonnx_sha256_{'A' * 64}.json",
+        f".xhquant_llm_hmonnx_sha256_{'a' * 63}.json",
+        f".xhquant_llm_hmonnx_sha256_{'a' * 65}.json",
+        f".xhquant_llm_hmonnx_sha256_{'a' * 64}.json.tmp",
+        f".xhquant_unknown_hmonnx_sha256_{'a' * 64}.json",
+        "runtime/session.log",
+        "runtime/loading.tmp",
+    ],
+)
+def test_inference_model_accepts_extra_regular_files(monkeypatch, artifact, relative):
+    cache = artifact / relative
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("{}")
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation.quick_test_hmonnx",
+        lambda *_args, **_kwargs: _runtime_result(),
+    )
+    assert inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact)).output_text == "ok"
+    assert cache.is_file()
 
 
 @pytest.mark.parametrize("model", ["pi0.5-libero", "kokoro-82m-v1.1-zh"])
@@ -747,14 +938,14 @@ def test_inference_model_validates_full_kokoro_runtime_contract_before_worker_pr
     assert worker_preflight_called is False
 
 
-def test_inference_model_rejects_uninventoried_cache_and_allows_known_runtime_golden(monkeypatch, artifact):
+def test_inference_model_allows_uninventoried_cache_and_runtime_golden(monkeypatch, artifact):
     _complete_manifest(artifact)
     cache = artifact / ".xhquant_loader_sha256_cache.json"
     cache.write_text("{}", encoding="utf-8")
     golden = artifact / "decode" / "step_0" / "output.npy"
 
     def quick_test(*_args, **_kwargs):
-        golden.parent.mkdir(parents=True)
+        golden.parent.mkdir(parents=True, exist_ok=True)
         golden.write_bytes(b"runtime-output")
         return _runtime_result()
 
@@ -763,16 +954,14 @@ def test_inference_model_rejects_uninventoried_cache_and_allows_known_runtime_go
         quick_test,
     )
 
-    with pytest.raises(ModelError, match="file inventory"):
-        inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
-
-    cache.unlink()
+    assert inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact)).output_text == "ok"
     result = inference_model(
         inputs={"prompt": "hello"},
         artifact_dir=str(artifact),
         golden=["decode"],
     )
     assert result.output_text == "ok"
+    assert cache.read_text() == "{}"
 
 
 @pytest.mark.parametrize(
@@ -793,13 +982,10 @@ def test_inference_model_never_removes_digest_cache_from_stale_golden_path(
     cache.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         "xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation.quick_test_hmonnx",
-        lambda *_args, **_kwargs: pytest.fail("runtime must not load an Artifact with an unlisted digest cache"),
+        lambda *_args, **_kwargs: _runtime_result(),
     )
 
-    with pytest.raises(ModelError, match="file inventory") as exc_info:
-        inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
-
-    assert exc_info.value.details["unlisted_files"] == [cache.relative_to(artifact).as_posix()]
+    assert inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact)).output_text == "ok"
     assert cache.is_file()
 
 
@@ -817,13 +1003,10 @@ def test_inference_model_stale_golden_component_matching_is_case_sensitive(
     output.write_bytes(b"stale")
     monkeypatch.setattr(
         "xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation.quick_test_hmonnx",
-        lambda *_args, **_kwargs: pytest.fail("runtime must not load an Artifact with a case-mismatched path"),
+        lambda *_args, **_kwargs: _runtime_result(),
     )
 
-    with pytest.raises(ModelError, match="file inventory") as exc_info:
-        inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
-
-    assert exc_info.value.details["unlisted_files"] == [output.relative_to(artifact).as_posix()]
+    assert inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact)).output_text == "ok"
     assert output.is_file()
 
 
@@ -976,7 +1159,7 @@ def test_inference_model_allows_selected_inventoried_golden_to_change(monkeypatc
     assert result.golden_artifacts == {"decode": ("decode/step_0",)}
 
 
-def test_inference_model_post_runtime_exempts_only_selected_golden(monkeypatch, artifact):
+def test_inference_model_reports_only_selected_golden_with_extra_runtime_files(monkeypatch, artifact):
     _complete_manifest(artifact)
 
     def quick_test(*_args, **_kwargs):
@@ -991,17 +1174,14 @@ def test_inference_model_post_runtime_exempts_only_selected_golden(monkeypatch, 
         quick_test,
     )
 
-    with pytest.raises(ModelError, match="file inventory") as exc_info:
-        inference_model(
-            inputs={"prompt": "hello"},
-            artifact_dir=str(artifact),
-            golden=["decode"],
-        )
-
-    assert exc_info.value.details["unlisted_files"] == ["prefill/step_0/output.npy"]
+    result = inference_model(
+        inputs={"prompt": "hello"}, artifact_dir=str(artifact), golden=["decode"],
+    )
+    assert result.golden_artifacts == {"decode": ("decode/step_0",)}
+    assert (artifact / "prefill/step_0/output.npy").read_bytes() == b"prefill"
 
 
-def test_inference_model_post_runtime_never_exempts_digest_cache_as_golden(monkeypatch, artifact):
+def test_inference_model_allows_runtime_digest_cache_alongside_golden(monkeypatch, artifact):
     _complete_manifest(artifact)
     output = artifact / "decode" / "step_0" / "output.npy"
     cache = output.parent / ".xhquant_multi_hmonnx_sha256_runtime.json"
@@ -1017,24 +1197,40 @@ def test_inference_model_post_runtime_never_exempts_digest_cache_as_golden(monke
         quick_test,
     )
 
-    with pytest.raises(ModelError, match="file inventory") as exc_info:
-        inference_model(
-            inputs={"prompt": "hello"},
-            artifact_dir=str(artifact),
-            golden=["decode"],
-        )
-
-    assert exc_info.value.details["unlisted_files"] == [cache.relative_to(artifact).as_posix()]
+    result = inference_model(
+        inputs={"prompt": "hello"}, artifact_dir=str(artifact), golden=["decode"],
+    )
+    assert result.golden_artifacts == {"decode": ("decode/step_0",)}
     assert cache.is_file()
 
 
-def test_inference_model_post_runtime_golden_component_matching_is_case_sensitive(monkeypatch, artifact):
+@pytest.mark.parametrize(
+    "component,extra_dir,extra_step",
+    [
+        ("decode", "Decode", "step_0"),
+        ("visual", "Vision", "step_0"),
+        ("visual", "Visual_m96", "step_0"),
+        ("visual", "visual_m096", "step_0"),
+        ("decode", "decode", "step_tmp"),
+        ("decode", "decode", "step_"),
+        ("decode", "decode", "step_1.tmp"),
+    ],
+)
+def test_inference_model_does_not_report_extra_directory_as_golden(
+    monkeypatch, artifact, component, extra_dir, extra_step,
+):
     _complete_manifest(artifact)
-    output = artifact / "Decode" / "step_0" / "output.npy"
+    output = artifact / extra_dir / extra_step / "output.npy"
+    selected_dir = "visual_m96" if component == "visual" else "decode"
+    image = artifact.parent / "image.png"
+    image.touch()
 
     def quick_test(*_args, **_kwargs):
         output.parent.mkdir(parents=True)
         output.write_bytes(b"runtime-output")
+        selected = artifact / selected_dir / "step_0" / "output.npy"
+        selected.parent.mkdir(parents=True, exist_ok=True)
+        selected.write_bytes(b"selected-output")
         return _runtime_result()
 
     monkeypatch.setattr(
@@ -1042,14 +1238,12 @@ def test_inference_model_post_runtime_golden_component_matching_is_case_sensitiv
         quick_test,
     )
 
-    with pytest.raises(ModelError, match="file inventory") as exc_info:
-        inference_model(
-            inputs={"prompt": "hello"},
-            artifact_dir=str(artifact),
-            golden=["decode"],
-        )
-
-    assert exc_info.value.details["unlisted_files"] == [output.relative_to(artifact).as_posix()]
+    result = inference_model(
+        inputs={"prompt": "hello", "image": str(image)}, artifact_dir=str(artifact), golden=[component],
+    )
+    assert result.output_text == "ok"
+    assert result.golden_artifacts == {component: (f"{selected_dir}/step_0",)}
+    assert output.read_bytes() == b"runtime-output"
 
 
 def test_inference_model_accepts_exact_lowercase_vision_alias_for_visual_golden(monkeypatch, artifact):
@@ -1077,16 +1271,18 @@ def test_inference_model_accepts_exact_lowercase_vision_alias_for_visual_golden(
     assert result.golden_artifacts == {"visual": ("vision/step_0",)}
 
 
-def test_inference_model_inventories_nested_manifest_basename(artifact):
+def test_inference_model_uses_root_manifest_with_extra_nested_manifest(monkeypatch, artifact):
     _complete_manifest(artifact)
     nested_manifest = artifact / "nested" / "model_build_manifest.json"
     nested_manifest.parent.mkdir()
     nested_manifest.write_text("{}", encoding="utf-8")
 
-    with pytest.raises(ModelError, match="file inventory") as exc_info:
-        inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
-
-    assert exc_info.value.details["unlisted_files"] == ["nested/model_build_manifest.json"]
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation.quick_test_hmonnx",
+        lambda *_args, **_kwargs: _runtime_result(),
+    )
+    assert inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact)).output_text == "ok"
+    assert nested_manifest.read_text() == "{}"
 
 
 @pytest.mark.parametrize("schema_version", [None, 1, 2, True, "3"])
@@ -1419,20 +1615,23 @@ def test_recipe_contract_accepts_registered_context_workflow(tmp_path):
     workflow_config = _select_context_workflow(recipe, variant, context_length)
     config_path = resolve_workflow_config(workflow_config)
     config_sha256 = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    from xhmodel_merak.model_catalog.precision import deployment_precision_from_workflow
+
+    effective_data = yaml.safe_load(config_path.read_text())
+    effective_data["export"]["model"].update(
+        {
+            "model_name": recipe.export_name,
+            "context_max_length": context_length,
+            "prefill_chunk_length": recipe.default_prefill_chunk_length,
+            "max_pe_length": recipe.max_pe_length,
+        }
+    )
+    deployment = deployment_precision_from_workflow(recipe, effective_data)
 
     effective_workflow = tmp_path / "effective_workflow.yaml"
     effective_workflow.write_text(
         yaml.safe_dump(
-            {
-                "export": {
-                    "model": {
-                        "model_name": recipe.export_name,
-                        "context_max_length": context_length,
-                        "prefill_chunk_length": recipe.default_prefill_chunk_length,
-                        "max_pe_length": recipe.max_pe_length,
-                    }
-                }
-            },
+            effective_data,
             sort_keys=False,
         ),
         encoding="utf-8",
@@ -1486,7 +1685,35 @@ def test_recipe_contract_accepts_registered_context_workflow(tmp_path):
         "format": {"name": recipe.artifact_format, "version": get_artifact_format_spec(recipe.artifact_format).version},
     }
 
+    manifest["parameters"]["precision"]["deployment"] = deployment
     validate_recipe_contract(tmp_path, manifest, recipe, variant)
+
+
+@pytest.mark.parametrize("tamper", [None, "manifest", "workflow", "unsupported"])
+def test_artifact_precision_is_bound_to_effective_workflow(artifact, tamper):
+    from xhmodel_merak.model_artifact.validation import validate_recipe_contract
+
+    manifest = _complete_manifest(artifact)
+    recipe = get_recipe(manifest["model_id"])
+    workflow_path = artifact / manifest["recipe"]["effective_workflow"]
+    workflow = yaml.safe_load(workflow_path.read_text())
+    workflow["export"]["model"]["visual_config"]["quant_scheme"]["quant_type"] = "w8a16h1_sefp"
+    manifest["parameters"]["precision"]["deployment"]["visual"] = "w8a16h1_sefp"
+    if tamper == "manifest":
+        manifest["parameters"]["precision"]["deployment"]["visual"] = "w8a8h1_sefp"
+    elif tamper == "workflow":
+        workflow["export"]["model"]["visual_config"]["quant_scheme"]["quant_type"] = "w8a8h1_sefp"
+    elif tamper == "unsupported":
+        workflow["export"]["model"]["visual_config"]["quant_scheme"]["quant_type"] = "fp32"
+        manifest["parameters"]["precision"]["deployment"]["visual"] = "fp32"
+    workflow_path.write_text(yaml.safe_dump(workflow))
+    manifest["recipe"]["effective_workflow_sha256"] = hashlib.sha256(workflow_path.read_bytes()).hexdigest()
+    if tamper is None:
+        validate_recipe_contract(artifact, manifest, recipe, recipe.default_variant)
+    else:
+        with pytest.raises(ModelError) as caught:
+            validate_recipe_contract(artifact, manifest, recipe, recipe.default_variant)
+        assert "parameters.precision.deployment" in caught.value.details["mismatches"]
 
 
 def test_inference_model_rejects_removed_model_name_override(monkeypatch, artifact):

@@ -16,6 +16,7 @@
         "configs_merak/workflows/xh2a/other_models/pi05/**",
         "configs_merak/workflows/xh2a/other_models/kokoro/**",
         "xhmodel_merak/model_integrations/*/planning.py",
+        "xhmodel_merak/model_integrations/autoregressive/build.py",
         "xhmodel_merak/xh_llm/workflows/config.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/quant_adapter.py",

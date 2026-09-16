@@ -35,6 +35,40 @@ def model_dir(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.mark.parametrize("quant_method", [UNSET, "autoround"])
+def test_paddleocr_existing_checkpoint_skips_quantizer_requirements(tmp_path, quant_method):
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "model_type": "paddleocr_vl",
+        "architectures": ["PaddleOCRVLForConditionalGeneration"],
+    }))
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "quantization_config.json").write_text(
+        json.dumps({"bits": 8, "provider": "auto-round"})
+    )
+    calibration = tmp_path / "calibration.jsonl"
+    calibration.write_text('{}\n')
+
+    plan = resolve_build_plan(
+        model_id="paddleocr-vl-1.6",
+        model_dir=str(model_dir),
+        output_dir=str(tmp_path / "artifact"),
+        quant_checkpoint=str(checkpoint),
+        quant_method=quant_method,
+        resources={"calibration": str(calibration)},
+    )
+
+    assert plan.quant_method == "autoround"
+    assert plan.worker_capabilities == ()
+    assert "gptqmodel>=5.8,<5.9" in plan.worker_requirements
+    assert not any(requirement.startswith("auto-round") for requirement in plan.worker_requirements)
+    assert plan.deployment_precision == {
+        "visual": "w8a16h1_sefp", "prefill": "w8a8_sefp", "decode": "w8a8_sefp",
+    }
+
+
 def test_default_plan_uses_full_autoround_and_dynamic_vit(model_dir, tmp_path):
     plan = resolve_build_plan(
         model_id="qwen3.5-9b",
@@ -67,12 +101,12 @@ def test_described_build_choices_are_accepted_by_the_real_resolver(model_dir, tm
     values["precision"] = next(choice for choice in parameters["precision"]["choices"] if choice["weight"] == weight)
     values["quant_method"] = quant_method
     values["context_length"] = parameters["context_length"]["maximum"]
+    values["output_dir"] = str(tmp_path / "artifact")
     assert quant_method in parameters["quant_method"]["choices"]
 
     plan = resolve_build_plan(
         model_id="qwen3.5-9b",
         model_dir=str(model_dir),
-        output_dir=str(tmp_path / "artifact"),
         **values,
     )
 
@@ -98,10 +132,7 @@ def test_qwen3_next_mtp_selects_registered_gptq_variant(model_dir, tmp_path):
     assert plan.quant_method == "gptq"
     assert "gptqmodel>=5.8,<5.9" in plan.worker_requirements
     assert not any(requirement.startswith("auto-round") for requirement in plan.worker_requirements)
-    assert plan.worker_capabilities == (
-        "python-predicate:xhquant.xhonnxruntime.llm_hmonnx_loader:initializer_digest_cache_disable_available",
-        "gptqmodel.recipes.qwen3_next:quantize_qwen3_next",
-    )
+    assert plan.worker_capabilities == ("gptqmodel.recipes.qwen3_next:quantize_qwen3_next",)
     assert plan.config_overrides["export.model.num_draft_tokens"] == 6
     assert plan.config_replacements["export.model.max_pe_length"] == 262144
     assert plan.vision_profile is None
@@ -182,6 +213,28 @@ def test_dflash_requires_an_explicit_assistant_source(model_dir, tmp_path):
     materialize_workflow_config(plan, effective)
     config = WorkflowConfig.from_file(str(effective)).with_overrides(plan.config_overrides)
     assert config.export["model"]["dflash_config"]["noise_token_id"] == 0
+
+    # Exercise the real plan/validator boundary, including token ID zero.
+    from xhmodel_merak.model_integrations.autoregressive.build import _validate_speculative_assets
+
+    for name in ("context.hmonnx", "draft.hmonnx"):
+        (tmp_path / name).write_bytes(b"graph-existence-fixture")
+    draft_tokens = config.export["model"]["num_draft_tokens"]
+    metadata = {
+        "spec_decode": {
+            "runtime_contract_version": 2,
+            "mode": "dflash",
+            "num_draft_tokens": draft_tokens,
+            "verify_length": draft_tokens + 1,
+            "draft_context_onnx": "context.hmonnx",
+            "draft_decode_onnx": "draft.hmonnx",
+            "draft": {"noise_token_id": 0, "context_hmonnx": "context.hmonnx", "decode_hmonnx": "draft.hmonnx"},
+        }
+    }
+    _validate_speculative_assets(tmp_path, metadata, plan)
+    metadata["spec_decode"]["draft"]["noise_token_id"] = 1
+    with pytest.raises(ModelError, match="incomplete draft graph set"):
+        _validate_speculative_assets(tmp_path, metadata, plan)
 
 
 def test_gemma_max_pe_is_materialized_before_strict_workflow_overrides(tmp_path):
@@ -333,7 +386,7 @@ def test_qwen38_selects_registered_dflash2_variant(model_dir, tmp_path):
     assert plan.variant == "dflash"
     assert plan.config_path.endswith("qwen3_8_27b_full_dflash2_8k.yaml")
     assert plan.config_replacements["export.model.dflash_config.hf_model"] == str(assistant.resolve())
-    assert plan.config_overrides["export.model.model_name"] == "qwen3_8_27b"
+    assert plan.config_replacements["export.model.model_name"] == "qwen3_8_27b"
 
     long_plan = resolve_build_plan(
         model_id="qwen3.8-27b",
@@ -663,6 +716,7 @@ def test_quant_output_dir_must_be_unused_disjoint_and_applicable(model_dir, tmp_
 
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
+    (checkpoint / "quantization_config.json").write_text(json.dumps({"bits": 4, "provider": "auto-round"}))
     with pytest.raises(ModelError) as checkpoint_error:
         resolve_build_plan(
             model_id="qwen3.5-9b",
@@ -780,7 +834,19 @@ def test_output_paths_are_new_and_disjoint_from_every_input(model_dir, tmp_path,
         resolve_build_plan(model_id="qwen3.5-9b", model_dir=str(model_dir), output_dir="  ")
 
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(TypeError, match="output_dir"):
+    from datetime import datetime
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 18, tzinfo=tz)
+
+    monkeypatch.setattr("datetime.datetime", FixedDateTime)
+    default = resolve_build_plan(model_id="qwen3.5-9b", model_dir=str(model_dir))
+    assert Path(default.output_dir) == tmp_path / f"{default.artifact_name}_20260918"
+    assert not Path(default.output_dir).exists()  # Resolving a plan does not create an output.
+    Path(default.output_dir).mkdir()
+    with pytest.raises(ModelError, match="must not already exist"):
         resolve_build_plan(model_id="qwen3.5-9b", model_dir=str(model_dir))
     with pytest.raises(ModelError, match="must not already exist"):
         resolve_build_plan(model_id="qwen3.5-9b", model_dir=str(model_dir), output_dir=".")

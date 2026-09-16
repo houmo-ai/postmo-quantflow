@@ -5,15 +5,28 @@ from __future__ import annotations
 import hashlib
 import importlib
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from xhmodel_merak.errors import ErrorCode, ModelError
+from xhmodel_merak.errors import ErrorCode, ModelError, invalid_parameter
 from xhmodel_merak.model_catalog.contracts import ModelRecipe, VariantRecipe
+from xhmodel_merak.model_catalog.precision import (
+    deployment_precision_from_workflow,
+    deployment_precision_replacements,
+    resolve_deployment_precision,
+)
 
 from .contracts import SourceRef
+
+
+@dataclass(frozen=True)
+class ResolvedRecipeConfig:
+    sha256: str
+    replacements: dict[str, Any]
+    deployment_precision: dict[str, str]
 
 
 def resolve_recipe_config(
@@ -23,7 +36,8 @@ def resolve_recipe_config(
     *,
     model_dir: Path,
     sources: Mapping[str, SourceRef],
-) -> tuple[str, dict[str, Any]]:
+    deployment_precision: Mapping[str, str] | None = None,
+) -> ResolvedRecipeConfig:
     """Hash the exact bytes validated by the family before building a plan.
 
     The optional hook belongs to the installed Recipe, never to a user path or
@@ -78,4 +92,26 @@ def resolve_recipe_config(
                 model=recipe.model_id,
                 target=recipe.config_resolver,
             )
-    return hashlib.sha256(config_bytes).hexdigest(), replacements
+    try:
+        defaults = deployment_precision_from_workflow(recipe, workflow)
+    except ValueError as exc:
+        raise ModelError(
+            ErrorCode.ARTIFACT_VALIDATION_FAILED,
+            f"Registered deployment precision configuration is invalid: {exc}",
+            model=recipe.model_id,
+            path=str(config_path),
+        ) from exc
+    try:
+        resolved = resolve_deployment_precision(recipe, deployment_precision, defaults=defaults)
+    except ValueError as exc:
+        raise invalid_parameter(recipe.model_id, "deployment_precision", deployment_precision, str(exc)) from exc
+    try:
+        replacements.update(deployment_precision_replacements(recipe, workflow, resolved))
+    except ValueError as exc:
+        raise ModelError(
+            ErrorCode.ARTIFACT_VALIDATION_FAILED,
+            f"Registered deployment precision configuration is invalid: {exc}",
+            model=recipe.model_id,
+            path=str(config_path),
+        ) from exc
+    return ResolvedRecipeConfig(hashlib.sha256(config_bytes).hexdigest(), replacements, resolved)

@@ -26,6 +26,57 @@ model_integrations/<family>/
 `list_models()`、`describe_model()` 在没有 Torch、SDK、模型权重时也应可用，
 不能靠注册模块下载资源或改环境变量。环境设置必须在执行阶段限定作用域并恢复。
 
+### 组件精度与已有权重
+
+`VariantRecipe.export_modes` 登记导出实现，第一项是默认值。只有实际实现分层导出的变体
+才能列出 `low_memory`；仅有环境变量开关不算支持。公共 `low_memory=True/False` 选择模式，
+不传时按变体默认值，不继承父进程开关。Qwen 的 LoRA 只登记 `standard`，Ling 默认
+`low_memory`，Gemma 目前只登记 `standard`。这不是推理低内存选项，也不是实测通过标记；
+新增模式需验证最终主图无 placeholder 残留、draft 图完整、推理状态 ABI 和峰值内存。
+投机解码的低内存导出必须沿用主图的多步验证配置，不能只调用普通 `set_decode()`。
+逐层子图也要保留每个验证步的卷积缓存和 recurrent state；切回 prefill 时恢复配置，
+避免把验证步数或中间输出标志带到 prefill。需要覆盖主图配置交接、子图拼装和真实 MTP/DFLASH 推理。
+
+`precision` 描述 checkpoint 权重，`deployment_precision` 选择导出图的基础 QuantScheme，
+两者不互相改写。例如 `deployment_precision={"visual": "w8a16h1_sefp"}` 只调整视觉图；
+未指定组件沿用所选 variant/context YAML 的配置，节点、算子级精度例外保持不变。
+
+family 用 `DeploymentPrecisionBinding` 声明组件、实际 `export.model.*.quant_scheme` 路径和
+可选值。prefill/decode 共用一个 schema 时写在同一个 binding，调用方改其中之一就同时生效，
+不能传两个冲突的值。audio/video 的继承配置要在改父配置前固定下来，不能顺带改变未请求的组件。
+没有 binding 的组件不接受覆盖。新增选择须经过实际导出和数值验证，不能只改描述文字。
+
+`quant_methods` 只列本模型能运行的量化流程；`quant_checkpoint_methods` 列导出器能读取的
+已有 checkpoint 来源。传 `quant_checkpoint` 时默认从元数据识别来源，不重跑量化。
+显式传了 `quant_method` 就检查是否匹配。来源识别不替代张量、位宽和模型身份校验。
+配置比较只接受可证明的等价序列化：例如两边 `rope_parameters.partial_rotary_factor`
+明确一致时，允许量化配置在外层重复写相同值；缺失证据或数值冲突仍拒绝，不猜隐式默认值。
+上游只改了子配置的类型名时，在 family recipe 的 `config_type_aliases` 声明
+`(完整字段路径, 原类型名, 新类型名)`，例如 Qwen 的 `vision_config.model_type`。
+必须用该模型的原生配置类证明两者构造出相同配置，并覆盖错误类型和尺寸变化的拒绝测试。
+不能忽略所有 `model_type`，也不能把模型名称分支放进公共校验器；源权重检查和产物打包共用这份声明。
+
+checkpoint 的命名差异通过 `checkpoint_embedding_suffixes` 声明；主层后还有 MTP 层时，
+用 `checkpoint_auxiliary_layers_field` 指向原始模型配置里的数量字段。主层仍必须完整，
+超出声明数量的层仍拒绝。base 导出允许保留这些辅助权重，不等于登记了 MTP 能力。
+公共尺寸检查只把直接属于 decoder 层的残差流 norm 与 hidden_size 对齐；
+Q/K norm、MLA 内部 norm 等形状由具体模型加载和导出检查，不能一概当成 hidden_size。
+
+### 依赖与运行时缓存
+
+`worker_requirements` / `worker_capabilities` 只声明构建、推理都实际需要的依赖；
+所选量化方法的依赖放在 `quant_requirements` / `quant_capabilities`，只在构建量化时检查。
+能力函数必须在支持的 SDK 中真实存在，并验证调用结果；不要为接口假设一个尚未实现的
+SDK 函数或环境开关，也不要让纯推理的可选优化阻断构建。
+视频文件还需实际解码验证，不能只检查解码包是否安装。TorchCodec 与 PyTorch 必须
+遵循[官方兼容表](https://github.com/meta-pytorch/torchcodec#compatibility-with-torch-versions)；
+例如 PyTorch 2.8 对应 TorchCodec 0.6/0.7，不是 0.10。视频解码依赖不应阻断文本或图片调用。
+
+构建只交付运行必需文件；推理允许在交付目录新增普通缓存或临时文件，不把它们补进 Manifest。
+首次和再次推理都校验已登记文件的存在、大小及摘要，但不要求目录文件清单与 Manifest 完全相等。
+新增文件不放宽包内路径、软链接和特殊文件的安全检查，也不能覆盖已登记的模型文件。
+统一入口不设置 SDK 摘要缓存开关，不依赖额外的 SDK 缓存能力；缓存读写和权重去重由 SDK 负责。
+
 ## 新模型怎样才算接入完成
 
 实现、recipe 和测试在同一个变更里交付。只有底层 `register_llm_model`、
@@ -125,6 +176,16 @@ python benchmark_test/ci_test_transformer5.16.0/select_tests.py --format report
 
 ## 构建与产物
 
+指定 `output_dir` 就直接交付到该目录，不在里面再套一层发布名。省略或传 `None` 时，
+在当前工作目录创建 `<发布名>_<YYYYMMDD>`，实际路径由 `BuildResult.output_dir` 返回。
+目标必须尚不存在，父目录必须存在；自动命名重名也报错，不覆盖、不偷偷追加随机后缀。
+
+`prefill/`、`decode/`、视觉档位和 `mtp_*/dflash_*` 按已选模型变体平铺在最终目录。
+Manifest、有效配置、运行 metadata、HF 配置/tokenizer/processor、embedding 和图引用的权重
+是交付文件。自回归打包按运行 metadata 和 ONNX external_data 引用收集文件；HF 资源按配置、
+词表、模板及其显式本地依赖选择，不按 `.json/.py` 后缀整批复制。临时子图、日志、评测报告、
+工作区权重和空目录不进入交付包。清理只发生在本次持有的 staging，不修改用户源模型。
+
 公共 executor 管事务、来源指纹、依赖、Manifest 和发布；family adapter 只处理模型差异：
 
 | hook | 负责什么 |
@@ -152,6 +213,14 @@ adapter 只校验参数、解析资源、调用模型包，再包装任务结果
 Host/NPU 调度、cache 和数值实现由模型包维护。不要为了统一接口悄悄更改输入语义。
 用完 runtime 需要释放资源，异常路径也一样。
 
+Qwen 的统一推理使用 packed W4 与 HMONNX Inference V2，MTP/DFlash 也不例外。
+投机解码沿用原状态机，但 target prefill/verify 和 draft 图必须经过共享 initializer
+加载器，再创建 V2 session；只设置环境变量、实际仍创建旧 session 不算接通。
+同值权重共享与 W4 打包在加载时完成，不能靠提高显存预算掩盖重复驻留。
+CUDA Graph 是独立的执行优化，不是 V2 或 packed W4 的前提；默认不因此开启。
+V2 session 创建时固定执行设备，不支持旧 session 的动态换卡、手填显存预算和
+resource_tight_mode 卸载重建；这些组合须在加载前明确拒绝，不能静默忽略。
+
 例如 Kokoro 当前是四对 T/F 档位、三张 W16A16 NPU 图和一张 CPU FP32 相位图。
 相位图从 `f0` 开始，不是从 `phase_increments` 开始；HMONNX 只接受展开 LSTM。
 统一入口和模型示例共用 `prepare_text`，都拒绝英文、未知音素和超长输入，不自动切句。
@@ -162,6 +231,11 @@ Host/NPU 调度、cache 和数值实现由模型包维护。不要为了统一�
 当前 Kokoro 全档串联 Golden 仍由模型 workflow 单独执行。
 
 ## 模型升级时一起检查
+
+从 source 推导出的字段（例如 DFlash 的 noise token）属于 planner 的
+`config_replacements`，用户请求才进入 `config_overrides`。产物校验要核对正确的
+计划字段；测试至少让真实 resolver 生成一次计划再传给 validator，不能仅手填 mock
+计划，否则两侧把字段放错位置也可能一起通过。
 
 修改模型实现或合入远端更新时，逐项核对：配置默认值、组件及顺序、I/O 名称和
 shape/dtype、Host/NPU 精度边界、路由与溢出策略、资源路径、依赖版本、Golden 语义。

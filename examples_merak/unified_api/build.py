@@ -10,9 +10,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model-id", required=True, help="从 catalog 示例中选择的 model_id")
     parser.add_argument("--model-dir", required=True, help="本地原始模型目录")
-    parser.add_argument("--output-dir", required=True, help="最终产物目录，必须尚不存在")
+    parser.add_argument("--output-dir", help="最终产物目录；不传则在当前目录按发布名和日期创建，已有目录不覆盖")
     parser.add_argument("--device", help="执行构建的设备，例如 cuda:0；不是目标芯片")
+    parser.add_argument(
+        "--low-memory", action=argparse.BooleanOptionalAction, default=None, help="分层导出；不传时按变体默认值"
+    )
     parser.add_argument("--quant-checkpoint", help="复用匹配的量化 checkpoint，跳过权重量化")
+    parser.add_argument(
+        "--deployment-precision", type=json.loads, help='组件图精度 JSON，例如 {"visual":"w8a16h1_sefp"}'
+    )
     parser.add_argument("--context-length", type=int, help="覆盖模型的默认上下文长度")
     parser.add_argument("--prefill-chunk-length", type=int, help="覆盖模型的默认 prefill 分块长度")
     args = parser.parse_args(argv)
@@ -22,7 +28,9 @@ def main(argv=None):
         model_dir=args.model_dir,
         output_dir=args.output_dir,
         device=args.device,
+        low_memory=args.low_memory,
         quant_checkpoint=args.quant_checkpoint,
+        deployment_precision=args.deployment_precision,
         context_length=args.context_length,
         prefill_chunk_length=args.prefill_chunk_length,
     )

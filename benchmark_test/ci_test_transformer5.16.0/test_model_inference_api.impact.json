@@ -19,6 +19,7 @@
         "xhmodel_merak/model_integrations/autoregressive/vision.py",
         "xhmodel_merak/model_integrations/*/inference.py",
         "xhmodel_merak/_requirements.py",
+        "xhquant/xhonnxruntime/llm_hmonnx_loader.py",
         "xhmodel_merak/_environment.py",
         "pyproject.toml",
         "benchmark_test/ci_test_transformer5.16.0/test_model_inference_api.py",

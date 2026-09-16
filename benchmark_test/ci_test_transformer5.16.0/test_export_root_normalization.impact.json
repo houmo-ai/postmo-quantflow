@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "export-root-normalization",
+      "patterns": [
+        "xhmodel_merak/model_build/artifacts.py",
+        "xhmodel_merak/model_integrations/autoregressive/build.py"
+      ]
+    }
+  ]
+}

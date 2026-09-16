@@ -14,7 +14,9 @@ from typing import Any
 from xhmodel_merak.errors import ErrorCode, ModelError
 from xhmodel_merak.model_build.artifacts import flatten_single_export_root
 from xhmodel_merak.model_build.contracts import BuildPlan
+from xhmodel_merak.model_build.packaging import validate_onnx_external_locations
 from xhmodel_merak.model_build.runtime_assets import behavior_config_mismatches, quant_runtime_asset_paths
+from xhmodel_merak.model_catalog import get_recipe
 
 from .vision import validate_dynamic_vision
 
@@ -35,7 +37,9 @@ def package_runtime(stage_path: Path, plan: BuildPlan) -> None:
     checkpoint_config_path = checkpoint / "config.json"
     checkpoint_config = _load_json_object(checkpoint_config_path)
     if exported_config is not None:
-        mismatches = behavior_config_mismatches(checkpoint_config, exported_config)
+        mismatches = behavior_config_mismatches(
+            checkpoint_config, exported_config, type_aliases=get_recipe(plan.model_id).config_type_aliases
+        )
         if mismatches:
             raise ModelError(
                 ErrorCode.ARTIFACT_VALIDATION_FAILED,
@@ -127,13 +131,16 @@ def sanitize_artifact(stage_path: Path, plan: BuildPlan) -> None:
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     hf_config = stage_path / local_hf_config
     if hf_config.is_dir():
-        for path in hf_config.rglob("*.json"):
+        for path in quant_runtime_asset_paths(hf_config):
+            if path.suffix != ".json":
+                continue
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 continue
             if (
                 path.name == "tokenizer_config.json"
+                and isinstance(payload, Mapping)
                 and payload.get("tokenizer_class") == "TokenizersBackend"
                 and (hf_config / "tokenizer.json").is_file()
             ):
@@ -142,6 +149,40 @@ def sanitize_artifact(stage_path: Path, plan: BuildPlan) -> None:
                 json.dumps(_scrub_known_path_fields(payload), ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+    _retain_runtime_files(stage_path, meta)
+
+
+def _retain_runtime_files(stage_path: Path, metadata: Mapping[str, Any]) -> None:
+    """Publish the runtime file closure, not the exporter's working directory.
+
+    Only called on the owned build stage, before the manifest is created.
+    Referenced graph weights are validated before any file is removed.
+    """
+    root = stage_path.resolve()
+    keep = {root / name for name in ("golden_meta_info.json", "merak_config.json", "effective_workflow.yaml")}
+
+    def visit(value: Any, field: str = "") -> None:
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                visit(item, str(key))
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, field)
+        elif isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts:
+            candidate = root / value
+            if candidate.is_file():
+                keep.add(candidate.resolve())
+            elif candidate.is_dir() and (field == "hf_config" or field.endswith("_hf_config")):
+                keep.update(asset.resolve() for asset in quant_runtime_asset_paths(candidate))
+
+    visit(metadata)
+    graphs = sorted(path for path in keep if path.suffix.lower() in {".onnx", ".hmonnx"})
+    keep.update(validate_onnx_external_locations(root, graphs=graphs))
+    for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if path.is_file() and path.resolve() not in keep:
+            path.unlink()
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
 
 
 def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
@@ -366,11 +407,14 @@ def _validate_speculative_assets(stage_path: Path, meta: Mapping[str, Any], plan
         noise_token_id = draft.get("noise_token_id") if isinstance(draft, Mapping) else None
         if isinstance(noise_token_id, bool) or not isinstance(noise_token_id, int) or noise_token_id < 0:
             invalid.append({"field": "draft.noise_token_id", "value": noise_token_id})
-        noise_override_key = "export.model.dflash_config.noise_token_id"
-        expected_noise_token_id = overrides.get(noise_override_key) if isinstance(overrides, Mapping) else None
+        # The family planner binds checkpoint-derived values before strict user
+        # overrides; the noise token is a source binding, not a user option.
+        replacements = getattr(plan, "config_replacements", None)
+        noise_binding_key = "export.model.dflash_config.noise_token_id"
+        expected_noise_token_id = replacements.get(noise_binding_key) if isinstance(replacements, Mapping) else None
         if (
-            not isinstance(overrides, Mapping)
-            or noise_override_key not in overrides
+            not isinstance(replacements, Mapping)
+            or noise_binding_key not in replacements
             or noise_token_id != expected_noise_token_id
         ):
             invalid.append(

@@ -490,11 +490,13 @@ def test_llm_adapter_normalizes_transformers_5_tokenizer_backend_for_457(tmp_pat
     assert tokenizer_data["added_tokens"][0]["content"] == "/"
 
 
-def test_llm_adapter_binds_reused_checkpoint_tokenizer_processor_and_quant_config(tmp_path):
+@pytest.mark.parametrize("exported_vision_type", ["qwen3_5", "qwen3_5_vision"])
+def test_llm_adapter_binds_reused_checkpoint_tokenizer_processor_and_quant_config(tmp_path, exported_vision_type):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
     checkpoint_config = {
         "model_type": "qwen3_5",
+        "vision_config": {"model_type": "qwen3_5", "hidden_size": 8},
         "text_config": {"hidden_size": 8, "num_hidden_layers": 2, "rope_theta": 1_000_000.0},
         "quantization_config": {"bits": 4, "quant_method": "gptq"},
     }
@@ -505,7 +507,7 @@ def test_llm_adapter_binds_reused_checkpoint_tokenizer_processor_and_quant_confi
         encoding="utf-8",
     )
     (checkpoint / "processor_config.json").write_text(
-        json.dumps({"processor_class": "CheckpointProcessor"}),
+        json.dumps({"processor_class": "CheckpointProcessor", "mel_filters_file": "audio_processor/mel_filters.npz"}),
         encoding="utf-8",
     )
     (checkpoint / "quantize_config.json").write_text(json.dumps({"bits": 4}), encoding="utf-8")
@@ -520,6 +522,7 @@ def test_llm_adapter_binds_reused_checkpoint_tokenizer_processor_and_quant_confi
     hf_config = stage / "hf_config"
     hf_config.mkdir(parents=True)
     exported_config = copy.deepcopy(checkpoint_config)
+    exported_config["vision_config"]["model_type"] = exported_vision_type
     exported_config["quantization_config"]["desc_act"] = False
     (hf_config / "config.json").write_text(json.dumps(exported_config), encoding="utf-8")
     (hf_config / "tokenizer_config.json").write_text(
@@ -529,7 +532,7 @@ def test_llm_adapter_binds_reused_checkpoint_tokenizer_processor_and_quant_confi
 
     llm.package_runtime(
         stage,
-        SimpleNamespace(model_id="qwen", quant_checkpoint=str(checkpoint)),
+        SimpleNamespace(model_id="qwen3.5-4b", quant_checkpoint=str(checkpoint)),
     )
 
     packaged_config = json.loads((hf_config / "config.json").read_text(encoding="utf-8"))
@@ -573,12 +576,14 @@ def test_llm_adapter_requires_consistent_runtime_and_contract_v2_draft_graphs(
     graph_aliases: tuple[tuple[str, str], ...],
 ) -> None:
     config_overrides = {"export.model.num_draft_tokens": 4}
+    config_replacements = {}
     if mode == "dflash":
-        config_overrides["export.model.dflash_config.noise_token_id"] = 248070
+        config_replacements["export.model.dflash_config.noise_token_id"] = 248070
     plan = SimpleNamespace(
         model_id="qwen",
         components=("prefill", "decode", mode),
         config_overrides=config_overrides,
+        config_replacements=config_replacements,
     )
 
     with pytest.raises(ModelError, match="draft runtime contract"):
@@ -616,11 +621,18 @@ def test_llm_adapter_requires_consistent_runtime_and_contract_v2_draft_graphs(
         model_id="qwen",
         components=("prefill", "decode", mode),
         config_overrides={**config_overrides, "export.model.num_draft_tokens": 3},
+        config_replacements=config_replacements,
     )
     with pytest.raises(ModelError, match="incomplete draft graph set"):
         llm._validate_speculative_assets(tmp_path, metadata, mismatched_plan)
 
     if mode == "dflash":
+        missing_binding = copy.copy(plan)
+        missing_binding.config_replacements = {}
+        missing_binding.config_overrides = {**config_overrides, **config_replacements}
+        with pytest.raises(ModelError, match="incomplete draft graph set"):
+            llm._validate_speculative_assets(tmp_path, metadata, missing_binding)
+
         missing_noise_token = copy.deepcopy(metadata)
         del missing_noise_token["spec_decode"]["draft"]["noise_token_id"]
         with pytest.raises(ModelError, match="incomplete draft graph set"):

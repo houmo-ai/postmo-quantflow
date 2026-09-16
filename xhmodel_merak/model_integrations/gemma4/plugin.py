@@ -9,7 +9,7 @@ from xhmodel_merak.model_integrations._shared import (
     AUTOROUND_REQUIREMENTS,
     GEMMA4_INFERENCE,
     GPTQ_REQUIREMENTS,
-    XHQUANT_INITIALIZER_CACHE_CAPABILITY,
+    autoregressive_precision_bindings,
     llm_deployment_precision,
     text_media_input_schema,
     text_output_schema,
@@ -65,7 +65,9 @@ def _recipe(
         default_precision=ResolvedPrecision(weight="w4", activation="a8"),
         supported_precisions=(("w4", "a8"), ("w16", "a8")),
         quant_methods=(method,),
+        quant_checkpoint_methods=("gptq", "autoround"),
         deployment_precision=llm_deployment_precision(components),
+        deployment_precision_bindings=autoregressive_precision_bindings(components),
         components=components,
         golden_components=(),
         build_adapter=AUTOREGRESSIVE_BUILD,
@@ -86,7 +88,6 @@ def _recipe(
             "xhquant",
             "transformers>=5.13.0,<5.17.0" if unified else "transformers>=5.5.0,<5.17.0",
         ),
-        worker_capabilities=(XHQUANT_INITIALIZER_CACHE_CAPABILITY,),
         quant_requirements=(
             (
                 method,

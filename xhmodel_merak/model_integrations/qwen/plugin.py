@@ -11,7 +11,7 @@ from xhmodel_merak.model_integrations._shared import (
     GPTQ_REQUIREMENTS,
     PILE10K_RESOURCE,
     QWEN_INFERENCE,
-    XHQUANT_INITIALIZER_CACHE_CAPABILITY,
+    autoregressive_precision_bindings,
     llm_deployment_precision,
     moe_precision,
     text_media_input_schema,
@@ -46,15 +46,18 @@ def _dense_recipe(
         model_id=model_id,
         display_name=display_name,
         family="qwen3.5",
+        config_type_aliases=(("vision_config.model_type", "qwen3_5", "qwen3_5_vision"),),
         config_resolver="xhmodel_merak.model_integrations.qwen.planning:resolve_config",
         export_name=export_name,
         task="vision-language-generation",
         modalities=("text", "image"),
-        variants=variants,
+        variants=_export_modes(variants),
         default_precision=ResolvedPrecision(weight=weight, activation=activation),
         supported_precisions=((weight, activation), ("w16", activation)),
         quant_methods=("autoround",),
+        quant_checkpoint_methods=("gptq", "autoround"),
         deployment_precision={component: deployment_quant_type for component in components},
+        deployment_precision_bindings=autoregressive_precision_bindings(components),
         components=components,
         golden_components=components,
         build_adapter=AUTOREGRESSIVE_BUILD,
@@ -82,7 +85,6 @@ def _dense_recipe(
             ("text_config.num_hidden_layers", num_hidden_layers),
         ),
         worker_requirements=("xhquant", "transformers>=5.5.0,<5.17.0"),
-        worker_capabilities=(XHQUANT_INITIALIZER_CACHE_CAPABILITY,),
         quant_requirements=(("autoround", AUTOROUND_REQUIREMENTS),),
         quant_capabilities=(("autoround", (_QWEN35_AUTOROUND_CAPABILITY,)),),
         quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
@@ -123,15 +125,18 @@ def _moe_recipe(
         model_id=model_id,
         display_name=display_name,
         family="qwen3-next" if not vision else "qwen3.5-moe",
+        config_type_aliases=((("vision_config.model_type", "qwen3_5_moe", "qwen3_5_moe_vision"),) if vision else ()),
         config_resolver="xhmodel_merak.model_integrations.qwen.planning:resolve_config",
         export_name=export_name,
         task="vision-language-generation" if vision else "text-generation",
         modalities=("text", "image") if vision else ("text",),
-        variants=variants,
+        variants=_export_modes(variants),
         default_precision=moe_precision(),
         supported_precisions=(("w4", "a8"), ("w16", "a8")),
         quant_methods=(quant_method,),
+        quant_checkpoint_methods=("gptq", "autoround"),
         deployment_precision=llm_deployment_precision(components),
+        deployment_precision_bindings=autoregressive_precision_bindings(components),
         components=components,
         golden_components=components,
         build_adapter=AUTOREGRESSIVE_BUILD,
@@ -155,7 +160,6 @@ def _moe_recipe(
             "xhquant",
             "transformers>=5.5.0,<5.17.0" if vision else "transformers>=4.57.0,<5.17.0",
         ),
-        worker_capabilities=(XHQUANT_INITIALIZER_CACHE_CAPABILITY,),
         quant_requirements=(
             (
                 quant_method,
@@ -192,7 +196,13 @@ def _macaron_recipe() -> ModelRecipe:
         recipe,
         default_precision=ResolvedPrecision(weight="w4", activation="a8"),
         supported_precisions=(("w4", "a8"),),
-        deployment_precision={component: "w4a8h0_ssfp" for component in recipe.components},
+        deployment_precision={"visual": "w8a8h1_sefp", "prefill": "w4a8h0_ssfp", "decode": "w4a8h0_ssfp"},
+        deployment_precision_bindings=tuple(
+            replace(binding, choices=("w4a8h0_ssfp",))
+            if binding.config_path == "export.model.quant_scheme"
+            else binding
+            for binding in recipe.deployment_precision_bindings
+        ),
         config_replacements=(
             ("export.model.fuse_gdr_ops", False),
             ("export.model.fuse_gdr_block_recurrent_ops", False),
@@ -201,6 +211,14 @@ def _macaron_recipe() -> ModelRecipe:
             ("architectures.0", "Qwen3_5MoeForConditionalGeneration"),
             *recipe.source_constraints,
         ),
+    )
+
+
+def _export_modes(variants: tuple[VariantRecipe, ...]) -> tuple[VariantRecipe, ...]:
+    # The Qwen placeholder exporter shares base/MTP/DFLASH export, but rejects LoRA.
+    return tuple(
+        replace(item, export_modes=("standard",) if item.requires_lora else ("standard", "low_memory"))
+        for item in variants
     )
 
 

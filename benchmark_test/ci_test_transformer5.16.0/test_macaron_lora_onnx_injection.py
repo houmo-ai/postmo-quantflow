@@ -19,6 +19,7 @@ from xhmodel_merak.xh_llm.models.macaron_v1_tall.lora_constant_bundle import (
     load_initializer_references,
     read_manifest,
 )
+from xhquant.export.onnx.onnx_opset._impl.schemas.opset1.linear_schema import linear_schema
 
 
 class _StaticAdapters:
@@ -69,21 +70,42 @@ def _load_weights_module():
 
 
 def _single_linear_graph(qweight: str, graph_name: str):
+    # Use a schema-valid base op even when this test runs without an earlier
+    # exporter importing the SDK's ONNX schemas into the process.
+    scale = f"{qweight}.scale"
     return helper.make_graph(
         [
             helper.make_node(
-                "Linear",
-                ["hidden", qweight],
+                linear_schema.name,
+                ["hidden", qweight, scale],
                 ["output"],
-                domain="ai.houmo.xh2a",
+                domain=linear_schema.domain,
                 in_features=4,
                 out_features=4,
+                have_bias=0,
+                mode="ssfp",
+                hmfp_act_exp_bit=5,
+                hmfp_act_man_bit=8,
+                hmfp_act_nshare=64,
+                hmfp_act_rounding="RNE",
+                hmfp_act_hidden_bit=1,
+                hmfp_weight_exp_bit=5,
+                hmfp_weight_man_bit=8,
+                hmfp_weight_nshare=64,
+                hmfp_weight_rounding="RNE",
+                hmfp_weight_hidden_bit=0,
+                hmfp_psum_dtype="fp24",
+                hmfp_psum_round_mode="trunc",
+                output_dtype="float16",
             )
         ],
         graph_name,
         [helper.make_tensor_value_info("hidden", TensorProto.FLOAT16, [1, 4])],
         [helper.make_tensor_value_info("output", TensorProto.FLOAT16, [1, 4])],
-        initializer=[numpy_helper.from_array(np.ones((4, 4), dtype=np.float16), qweight)],
+        initializer=[
+            numpy_helper.from_array(np.ones((4, 4), dtype=np.int8), qweight),
+            numpy_helper.from_array(np.zeros((1, 4), dtype=np.int8), scale),
+        ],
     )
 
 
@@ -286,22 +308,7 @@ def test_attention_lora_uses_canonical_initializer_and_adapter_constant_packs(
 ) -> None:
     module = _load_module()
     qweight = "model.language_model.layers.0.self_attn.q_proj.qweight"
-    graph = helper.make_graph(
-        [
-            helper.make_node(
-                "Linear",
-                ["hidden", qweight],
-                ["output"],
-                domain="ai.houmo.xh2a",
-                in_features=4,
-                out_features=4,
-            )
-        ],
-        "lora",
-        [helper.make_tensor_value_info("hidden", TensorProto.FLOAT16, [1, 4])],
-        [helper.make_tensor_value_info("output", TensorProto.FLOAT16, [1, 4])],
-        initializer=[numpy_helper.from_array(np.ones((4, 4), dtype=np.float16), qweight)],
-    )
+    graph = _single_linear_graph(qweight, "lora")
     adapter_weights = {
         name: (
             np.full((2, 4), index + 1, dtype=np.float16),
@@ -440,22 +447,7 @@ def test_shared_expert_lora_uses_canonical_initializer_and_adapter_constant_pack
 ) -> None:
     module = _load_module()
     qweight = "model.language_model.layers.0.mlp.shared_expert.gate_proj.qweight"
-    graph = helper.make_graph(
-        [
-            helper.make_node(
-                "Linear",
-                ["hidden", qweight],
-                ["output"],
-                domain="ai.houmo.xh2a",
-                in_features=4,
-                out_features=4,
-            )
-        ],
-        "shared_expert_runtime_lora",
-        [helper.make_tensor_value_info("hidden", TensorProto.FLOAT16, [1, 4])],
-        [helper.make_tensor_value_info("output", TensorProto.FLOAT16, [1, 4])],
-        initializer=[numpy_helper.from_array(np.ones((4, 4), dtype=np.float16), qweight)],
-    )
+    graph = _single_linear_graph(qweight, "shared_expert_runtime_lora")
     adapter_weights = {
         name: (
             np.full((2, 4), index + 1, dtype=np.float16),

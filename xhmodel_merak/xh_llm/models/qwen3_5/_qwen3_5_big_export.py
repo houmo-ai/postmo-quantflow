@@ -7,6 +7,7 @@ from torch import Tensor
 from xhquant.utils.registry import DynamicModule, _DMRegistryCls
 
 from ...big_hf_model_helper import BigHFModelExportHelper
+from ._hybrid_placeholder import HybridGatedDeltaNetPlaceholderMixin
 from .modeling_qwen3_5 import (
     Qwen3_5Attention,
     Qwen3_5GatedDeltaNet,
@@ -41,7 +42,7 @@ else:
     _Qwen3_5GatedDeltaNetBase = DynamicModule
 
 
-class _Qwen3_5GatedDeltaNet_PlaceHolder(_Qwen3_5GatedDeltaNetBase):  # noqa: N801
+class _Qwen3_5GatedDeltaNet_PlaceHolder(HybridGatedDeltaNetPlaceholderMixin, _Qwen3_5GatedDeltaNetBase):  # noqa: N801
     """Qwen3.5 GatedDeltaNet linear attention wrapper.
 
     Key difference from Qwen3Next: Qwen3.5 uses **separate** projections
@@ -49,20 +50,9 @@ class _Qwen3_5GatedDeltaNet_PlaceHolder(_Qwen3_5GatedDeltaNetBase):  # noqa: N80
     merged projections (in_proj_qkvz, in_proj_ba).
     """
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        conv_cache: Optional[list[Tensor]] = None,
-        recurrent_state: Optional[Tensor] = None,
-        linear_attn_mask: Optional[Tensor] = None,
-        current_input_length: Optional[Tensor] = None,
-    ):
-        if conv_cache is None:
-            conv_cache = []
-        return hidden_states, *conv_cache, recurrent_state
-
-    def _setup(self, *args, **kwargs):
+    def _setup(self, cfg):
         self._placeholder_registered_member_counts = _remove_registered_members(self)
+        self._update_cfg(cfg)
 
 
 # ============================================================================

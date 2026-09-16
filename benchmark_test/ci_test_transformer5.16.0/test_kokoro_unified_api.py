@@ -27,6 +27,28 @@ from xhmodel_merak.xh_other_model.models.kokoro import bucketed_runtime, text
 MODEL_ID = "kokoro-82m-v1.1-zh"
 
 
+def test_public_plan_is_consumed_by_real_kokoro_workflow(tmp_path):
+    from xhmodel_merak.model_build.resolver import resolve_build_plan
+    from xhmodel_merak.model_build.workflow import materialize_workflow_config
+    from xhmodel_merak.workflows import AutoWorkflow
+    from xhmodel_merak.xh_other_model.models.kokoro.workflow import KokoroWorkflow, _validate_export_config
+
+    source = tmp_path / "source"
+    source.mkdir()
+    plan = resolve_build_plan(
+        model_id=MODEL_ID, model_dir=str(source), output_dir=str(tmp_path / "artifact"), device="cpu"
+    )
+    effective = tmp_path / "workflow.yaml"
+    materialize_workflow_config(plan, effective)
+    workflow = AutoWorkflow.from_config(model_dir=str(source), config_path=str(effective))
+    assert isinstance(workflow, KokoroWorkflow)
+    result = workflow.quant(str(tmp_path / "quant"), "cpu", config_overrides=plan.config_overrides)
+    assert result.skipped is True and result.quanted_model_dir is None
+    config = workflow.workflow_config.with_overrides(plan.config_overrides)
+    _validate_export_config(config.build_export_dict())
+    assert config.export["model"]["model_name"] == plan.export_name
+
+
 @pytest.fixture
 def release(tmp_path):
     root = tmp_path / "artifact"

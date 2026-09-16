@@ -42,7 +42,7 @@ class HMONNXQuickTestResult:
 
 
 def _patches_runtime_scope():
-    return scoped_environment({"ENABLE_HMINFERENCE_V2": "1"})
+    return scoped_environment({"ENABLE_HMINFERENCE_V2": "1", "XHQUANT_PACKED_W4": "1"})
 
 
 def find_hmonnx_meta_file(export_result_or_path: Any) -> str:
@@ -391,6 +391,8 @@ def spec_decode_generate(
     )
     if hasattr(runtime, "get_cuda_graph_status"):
         result.stats["cuda_graph_status"] = runtime.get_cuda_graph_status()
+    if hasattr(runtime, "runtime_summary"):
+        result.stats["runtime"] = runtime.runtime_summary
     return result
 
 
@@ -693,7 +695,7 @@ def _load_merak_spec_runtime(
     import torch
     from transformers import AutoTokenizer
 
-    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_spec_decode_onnx_model import Qwen3_5SpecDecodeONNXModel
+    from xhmodel_merak.xh_llm.models.qwen3_5.spec_decode_v2 import Qwen3_5SpecDecodeV2Model
 
     resolved_meta = Path(meta_file).resolve()
     model_dir = resolved_meta.parent
@@ -731,7 +733,8 @@ def _load_merak_spec_runtime(
     if pad_token_id is None:
         pad_token_id = 0
 
-    runtime = Qwen3_5SpecDecodeONNXModel(
+    runtime = Qwen3_5SpecDecodeV2Model(
+        session_device=exec_device,
         prefill={"onnx": str(prefill_onnx)},
         decode={"onnx": str(decode_onnx)},
         draft=draft,

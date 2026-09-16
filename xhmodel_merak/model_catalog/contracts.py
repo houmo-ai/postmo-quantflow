@@ -29,16 +29,50 @@ class VariantRecipe:
     required_sources: tuple[str, ...] = ()
     extra_components: tuple[str, ...] = ()
     context_workflows: tuple[tuple[int, str], ...] = ()
+    # First entry is the default; only list modes implemented by this variant.
+    export_modes: tuple[str, ...] = ("standard",)
+
+    def __post_init__(self) -> None:
+        if (
+            not self.export_modes
+            or len(set(self.export_modes)) != len(self.export_modes)
+            or not set(self.export_modes).issubset({"standard", "low_memory"})
+        ):
+            raise ValueError("export_modes must contain unique standard/low_memory modes")
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["required_sources"] = list(self.required_sources)
         data["extra_components"] = list(self.extra_components)
+        data["export_modes"] = list(self.export_modes)
         data["context_workflows"] = [
             {"max_context_length": max_context_length, "workflow_config": workflow_config}
             for max_context_length, workflow_config in self.context_workflows
         ]
         return data
+
+
+@dataclass(frozen=True)
+class DeploymentPrecisionBinding:
+    """Components sharing one exporter QuantScheme, owned by their integration."""
+
+    components: tuple[str, ...]
+    config_path: str
+    choices: tuple[str, ...]
+    inherit_from: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.components or len(set(self.components)) != len(self.components):
+            raise ValueError("precision binding components must be non-empty and unique")
+        if not self.choices or any(not isinstance(value, str) or not value for value in self.choices):
+            raise ValueError("precision binding choices must be non-empty quant_type strings")
+        for path in (self.config_path, self.inherit_from):
+            if path is not None and (
+                not path.startswith("export.model.")
+                or not path.endswith(".quant_scheme")
+                or any(not part.isidentifier() for part in path.split("."))
+            ):
+                raise ValueError("precision binding must address an export.model QuantScheme")
 
 
 @dataclass(frozen=True)
@@ -84,14 +118,58 @@ class ModelRecipe:
     recipe_version: str = "2"
     required_runtime_files: tuple[str, ...] = ()
     config_resolver: str | None = None
+    deployment_precision_bindings: tuple[DeploymentPrecisionBinding, ...] = ()
+    # Reading an existing checkpoint is independent of registered quantizers.
+    quant_checkpoint_methods: tuple[str, ...] = ()
+    checkpoint_embedding_suffixes: tuple[str, ...] = ("embed_tokens.weight",)
+    checkpoint_auxiliary_layers_field: str | None = None
+    # Exact upstream sub-config type renames, owned by the model family.
+    config_type_aliases: tuple[tuple[str, str, str], ...] = ()
 
     def __post_init__(self) -> None:
+        alias_keys: set[tuple[str, str]] = set()
+        for path, old, new in self.config_type_aliases:
+            if (
+                not path.endswith(".model_type")
+                or any(not part.isidentifier() for part in path.split("."))
+                or not old
+                or not new
+                or old == new
+                or (path, old) in alias_keys
+            ):
+                raise ValueError("config type aliases must uniquely name a nested model_type rename")
+            alias_keys.add((path, old))
         if re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)*", self.export_name) is None:
             raise ValueError("export_name must contain lowercase tokens separated by underscores")
+        if not self.checkpoint_embedding_suffixes or any(
+            not isinstance(name, str) or not name.endswith(".weight") for name in self.checkpoint_embedding_suffixes
+        ):
+            raise ValueError("checkpoint embedding suffixes must identify weight tensors")
+        if (
+            self.checkpoint_auxiliary_layers_field is not None
+            and not self.checkpoint_auxiliary_layers_field.isidentifier()
+        ):
+            raise ValueError("checkpoint auxiliary layer field must be a config key")
+        if len(set(self.quant_checkpoint_methods)) != len(self.quant_checkpoint_methods) or any(
+            method not in {"gptq", "autoround", "qat"} for method in self.quant_checkpoint_methods
+        ):
+            raise ValueError("quant_checkpoint_methods must contain unique supported producer names")
         if self.config_resolver is not None:
             _validate_internal_target(self.config_resolver, "recipe config resolver")
             if ":" not in self.config_resolver:
                 raise ValueError("recipe config resolver must name a callable with module:attribute")
+        bound_components: set[str] = set()
+        bound_paths: set[str] = set()
+        for binding in self.deployment_precision_bindings:
+            if bound_components.intersection(binding.components) or binding.config_path in bound_paths:
+                raise ValueError("deployment precision bindings must not overlap")
+            defaults = {self.deployment_precision.get(component) for component in binding.components}
+            if len(defaults) != 1 or not defaults.issubset(binding.choices):
+                raise ValueError("bound components must share a supported default deployment precision")
+            if not set(binding.components).issubset(self.components):
+                raise ValueError("deployment precision bindings must refer to registered components")
+            bound_components.update(binding.components)
+            bound_paths.add(binding.config_path)
 
     @property
     def default_variant(self) -> VariantRecipe:
@@ -134,6 +212,11 @@ class ModelRecipe:
             "supported_precisions": [
                 {"weight": weight, "activation": activation} for weight, activation in self.supported_precisions
             ],
+            "deployment_precision_options": {
+                component: {"choices": list(binding.choices), "shared_with": list(binding.components)}
+                for binding in self.deployment_precision_bindings
+                for component in binding.components
+            },
             "components": list(self.components),
             "golden_components": list(self.golden_components),
             "profiles": list(self.profiles),
@@ -153,6 +236,7 @@ class ModelRecipe:
             "quant_requirements": {method: list(values) for method, values in self.quant_requirements},
             "quant_capabilities": {method: list(values) for method, values in self.quant_capabilities},
             "quant_checkpoint_requirements": list(self.quant_checkpoint_requirements),
+            "quant_checkpoint_methods": list(self.quant_checkpoint_methods),
             "required_resources": list(self.required_resources),
             "bundled_resources": {name: path for name, path in self.bundled_resources},
         }
@@ -208,6 +292,7 @@ __all__ = [
     "AdapterKind",
     "AdapterSpec",
     "ArtifactFormatSpec",
+    "DeploymentPrecisionBinding",
     "JSONValue",
     "ModelRecipe",
     "ResolvedPrecision",

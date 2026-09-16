@@ -117,7 +117,10 @@ def pad_patch_images(
 
 
 def _linear_indices_weights(out_size: int, in_size: int, *, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
-    coords = (torch.arange(out_size, dtype=torch.float32, device=device) + 0.5) * in_size / out_size - 0.5
+    # Native PaddleOCR-VL resizes learned positions with align_corners=True.
+    # A single output position maps to the first input position.
+    scale = (in_size - 1) / (out_size - 1) if out_size > 1 else 0.0
+    coords = torch.arange(out_size, dtype=torch.float32, device=device) * scale
     lower = torch.floor(coords)
     upper_weight = coords - lower
     lower_weight = 1.0 - upper_weight
