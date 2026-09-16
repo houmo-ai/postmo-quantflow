@@ -51,6 +51,8 @@ def test_workflow_cli_accepts_real_golden_media_arguments(monkeypatch) -> None:
             "/tmp/video.mp4",
             "--golden-question",
             "describe",
+            "--export-mode",
+            "session",
         ],
     )
 
@@ -58,6 +60,7 @@ def test_workflow_cli_accepts_real_golden_media_arguments(monkeypatch) -> None:
 
     assert args.golden_video == Path("/tmp/video.mp4")
     assert args.golden_question == "describe"
+    assert args.export_mode == "session"
 
 
 def test_minicpm_o_4_5_yaml_declares_all_component_contracts() -> None:
@@ -66,6 +69,7 @@ def test_minicpm_o_4_5_yaml_declares_all_component_contracts() -> None:
     assert config["export"]["model"]["model_type"] == "MiniCPMO45Model"
     assert config["export"]["model"]["chip_arch"] == "XH2a"
     assert config["export"]["model"]["model_name"] == "minicpm_o_4_5"
+    assert config["export"]["mode"] == "offline"
     assert config["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8_sefp"
     assert config["export"]["components"]["llm"]["wrap_cfg"]["max_sequence_length"] == 32768
     assert config["export"]["components"]["llm"]["wrap_cfg"]["input_sequence_length"] == 512
@@ -113,7 +117,7 @@ def test_w4_and_w8_configs_have_single_sources_for_export_contracts() -> None:
         assert export["model"]["model_name"] == "minicpm_o_4_5"
         assert export["components"]["llm"]["wrap_cfg"]["max_sequence_length"] == 32768
         assert export["components"]["llm"]["wrap_cfg"]["input_sequence_length"] == prefill_length
-        assert export["components"]["token2wav_flow_decoder"]["noise_seed"] == 20260821
+        assert "noise_seed" not in export["components"]["token2wav_flow_decoder"]
         assert all("enabled" not in component for component in export["components"].values())
 
 
@@ -236,7 +240,7 @@ def test_token2wav_streaming_derived_values_are_consistent() -> None:
     estimator = decoder["estimator_step_cache_shapes"]
     assert estimator["input_att"][3] == cache_capacity
     assert estimator["output_att"][3] == cache_capacity + append_capacity
-    assert estimator["frame_capacity"] == frontend["roles"]["stream_flow_frontend_final"]["output_mel_capacity"]
+    assert estimator["frame_capacity"] == frontend["output_mel_capacities"]["final"]
 
 
 def test_auto_workflow_binds_minicpm_o_4_5() -> None:
@@ -349,6 +353,7 @@ def test_export_dispatches_all_components_and_writes_relative_metadata(tmp_path,
     calls: list[str] = []
     seen_llm_cfg: dict[str, object] = {}
     seen_llm_kwargs: dict[str, object] = {}
+    seen_frontend_cfg: dict[str, object] = {}
 
     import xhmodel_merak.xh_llm.models.minicpm_o_4_5.workflow as workflow_module
 
@@ -358,6 +363,8 @@ def test_export_dispatches_all_components_and_writes_relative_metadata(tmp_path,
             if name == "llm":
                 seen_llm_cfg.update(kwargs["component_cfg"])
                 seen_llm_kwargs.update(kwargs)
+            if name == "token2wav_flow_frontend":
+                seen_frontend_cfg.update(kwargs["component_cfg"])
             component_dir = kwargs["work_dir"] / name
             component_dir.mkdir(parents=True, exist_ok=True)
             result = {
@@ -365,8 +372,8 @@ def test_export_dispatches_all_components_and_writes_relative_metadata(tmp_path,
                 "quant_type": "w8a8_sefp",
             }
             if name == "token2wav_hift":
-                result["phase_noise_file"] = component_dir / "phase_noise.pt"
-                result["source_noise_file"] = component_dir / "source_noise.pt"
+                result["harmonic_count"] = 9
+                result["source_length"] = 491040
             return result
 
         return export_component
@@ -425,9 +432,10 @@ def test_export_dispatches_all_components_and_writes_relative_metadata(tmp_path,
     assert meta["export_basename"].startswith("hmquant_xh2_minicpm_o_4_5_w8a8_512_32k_")
     assert seen_llm_cfg["calibration_jsonl"] == f"xh2modelzoo://{CALIBRATION_PATH.as_posix()}"
     assert seen_llm_cfg["calibration_samples"] == 5
+    assert seen_frontend_cfg["n_timesteps"] == 10
     assert all(not Path(path).is_absolute() for item in meta["components"].values() for path in item["graphs"].values())
-    assert meta["components"]["token2wav_hift"]["phase_noise_file"] == "token2wav_hift/phase_noise.pt"
-    assert meta["components"]["token2wav_hift"]["source_noise_file"] == "token2wav_hift/source_noise.pt"
+    assert meta["components"]["token2wav_hift"]["harmonic_count"] == 9
+    assert meta["components"]["token2wav_hift"]["source_length"] == 491040
     assert Path(result.config_file).exists()
 
     calls.clear()
@@ -507,6 +515,7 @@ def test_export_writes_incremental_metadata_before_component_export(tmp_path, mo
             "export_basename": observed[0]["export_basename"],
             "hf_model": "/models/MiniCPM-o-4_5",
             "config": "minicpm_o_4_5_xh2a_w8a8_gptq.yaml",
+            "export_mode": "offline",
             "components": {},
         }
     ]
@@ -586,20 +595,19 @@ def test_dump_synthetic_golden_writes_each_component_input_and_output(tmp_path, 
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import synthetic_golden as golden_module
 
     meta = {
+        "export_mode": "offline",
         "components": {
             "vision": {"graphs": {"main": "vision/model.onnx"}},
             "token2wav_hift": {
                 "graphs": {"main": "token2wav_hift/model.onnx"},
                 "frame_capacity": 4,
-                "phase_noise_file": "token2wav_hift/phase_noise.pt",
-                "source_noise_file": "token2wav_hift/source_noise.pt",
+                "harmonic_count": 9,
+                "source_length": 1920,
             },
         }
     }
     (tmp_path / "vision").mkdir()
     (tmp_path / "token2wav_hift").mkdir()
-    torch.save(torch.zeros((1, 9)), tmp_path / "token2wav_hift/phase_noise.pt")
-    torch.save(torch.zeros((1, 1920, 9)), tmp_path / "token2wav_hift/source_noise.pt")
 
     class Session:
         def __init__(self, path: str) -> None:
@@ -625,21 +633,18 @@ def test_dump_synthetic_golden_writes_each_component_input_and_output(tmp_path, 
         assert (tmp_path / component["golden_dir"]).is_dir()
 
 
-def test_dump_synthetic_golden_covers_tts_projection_graphs(tmp_path, monkeypatch) -> None:
+def test_dump_synthetic_golden_covers_fused_tts_prefill_graph(tmp_path, monkeypatch) -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import synthetic_golden as golden_module
 
     meta = {
+        "export_mode": "offline",
         "components": {
             "tts": {
                 "graphs": {"prefill": "tts/prefill.onnx"},
-                "projection_graphs": {
-                    "projector_semantic": "tts/projector.onnx",
-                    "head_code": "tts/head.onnx",
-                },
                 "prefill_input_sequence_length": 12,
-                "projection_seq_capacity": 12,
                 "num_hidden_layers": 1,
                 "kv_cache_shape": [1, 2, 16, 4],
+                "semantic_hidden_size": 8,
             }
         }
     }
@@ -668,8 +673,8 @@ def test_dump_synthetic_golden_covers_tts_projection_graphs(tmp_path, monkeypatc
 
     golden = golden_module.dump_synthetic_golden(tmp_path, meta, "cpu")
 
-    assert set(golden["components"]) == {"tts_prefill", "tts_projector_semantic", "tts_head_code"}
-    assert len(set(golden_dirs)) == 3
+    assert set(golden["components"]) == {"tts_prefill"}
+    assert len(set(golden_dirs)) == 1
     assert all(Path(path).parent.name == "golden" for path in golden_dirs)
 
 
@@ -746,7 +751,8 @@ def test_dump_real_golden_captures_only_executed_runtime_components(tmp_path, mo
             self.token2wav = SimpleNamespace(
                 frontend_session=Session("flow_frontend"),
                 decoder_session=Session("flow_decoder"),
-                hift_session=Session("hift"),
+                hift_part1_session=Session("hift_part1"),
+                hift_part2_session=Session("hift_part2"),
             )
 
         def set_exec_device(self, device: str) -> None:

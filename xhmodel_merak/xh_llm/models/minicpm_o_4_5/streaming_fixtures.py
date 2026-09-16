@@ -55,50 +55,50 @@ class StreamingCaseResult:
     real_waveform_chunks: tuple[np.ndarray, ...] = ()
 
 
-_AUDIO_ROLES = ("audio.stream_prefill", "audio.stream_decode")
+_SESSION_AUDIO_ROLES = ("audio.session_prefill", "audio.session_decode")
+_DUPLEX_AUDIO_ROLES = ("audio.stream_prefill", "audio.stream_decode")
 _LLM_ROLES = ("llm.prefill", "llm.decode")
 _TTS_ROLES = ("tts.prefill", "tts.decode")
 _TOKEN2WAV_ROLES = (
     "token2wav.stream_flow_frontend",
-    "token2wav.stream_flow_frontend_final",
     "token2wav.stream_flow_estimator_step",
-    "token2wav.stream_hift",
-    "token2wav.stream_hift_final",
+    "token2wav.stream_hift_part1",
+    "token2wav.stream_hift_part2",
 )
 _MAX_NEW_TOKENS = 16
 
 CERTIFIED_STREAMING_CASES = (
-    StreamingCase("session_audio_text", "case-01", "session", False, False, _AUDIO_ROLES + _LLM_ROLES),
+    StreamingCase("session_audio_text", "case-01", "session", False, False, _SESSION_AUDIO_ROLES + _LLM_ROLES),
     StreamingCase(
         "session_audio_reply",
         "case-02",
         "session",
         True,
         False,
-        _AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES,
+        _SESSION_AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES,
     ),
-    StreamingCase("duplex_audio_text", "case-03", "duplex", False, False, _AUDIO_ROLES + _LLM_ROLES),
+    StreamingCase("duplex_audio_text", "case-03", "duplex", False, False, _DUPLEX_AUDIO_ROLES + _LLM_ROLES),
     StreamingCase(
         "duplex_audio_reply",
         "case-04",
         "duplex",
         True,
         False,
-        _AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES,
+        _DUPLEX_AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES,
     ),
     StreamingCase(
-        "duplex_omni_reply", "case-05", "duplex", True, True, _AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES
+        "duplex_omni_reply", "case-05", "duplex", True, True, _DUPLEX_AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES
     ),
 )
 
 _CASES_BY_NAME = {case.name: case for case in CERTIFIED_STREAMING_CASES}
 _GRAPH_ROLE_NAMES = {
-    "audio": {"stream_prefill", "stream_decode"},
+    "audio": {"stream_prefill", "stream_decode", "session_prefill", "session_decode"},
     "llm": {"prefill", "decode"},
     "tts": {"prefill", "decode"},
-    "token2wav_flow_frontend": {"stream_flow_frontend", "stream_flow_frontend_final"},
+    "token2wav_flow_frontend": {"stream_flow_frontend"},
     "token2wav_flow_decoder": {"stream_flow_estimator_step"},
-    "token2wav_hift": {"stream_hift", "stream_hift_final"},
+    "token2wav_hift": {"stream_hift_part1", "stream_hift_part2"},
 }
 
 

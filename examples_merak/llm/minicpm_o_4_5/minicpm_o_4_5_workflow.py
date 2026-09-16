@@ -23,6 +23,12 @@ def parse_args() -> argparse.Namespace:
         help="Export output directory. Default: work_dirs/<config_stem>_export",
     )
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--export-mode",
+        choices=("offline", "session", "stream"),
+        default=None,
+        help="Artifact runtime family. Default: export.mode from YAML (offline in release configs).",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dump-golden", action="store_true")
     parser.add_argument("--golden-mode", choices=("synthetic", "real"), default="synthetic")
@@ -67,7 +73,13 @@ def main() -> None:
         shutil.rmtree(args.export_output_dir, ignore_errors=True)
     workflow = AutoWorkflow.from_config(model_dir=args.model_dir, config_path=args.config_path)
     quant_result = workflow.quant(output_dir=args.quant_output_dir, device=args.device)
-    export_result = workflow.export(quant_result=quant_result, output_dir=args.export_output_dir, device=args.device)
+    export_overrides = None if args.export_mode is None else {"export.mode": args.export_mode}
+    export_result = workflow.export(
+        quant_result=quant_result,
+        output_dir=args.export_output_dir,
+        device=args.device,
+        config_overrides=export_overrides,
+    )
     print(f"export_result: {export_result}")
     if args.dump_golden:
         print(workflow.dump_golden(export_result, device=args.device, input_messages=build_golden_request(args)))

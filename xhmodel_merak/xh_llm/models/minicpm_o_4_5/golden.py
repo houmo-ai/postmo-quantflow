@@ -56,17 +56,15 @@ def _runtime_sessions(runtime: MiniCPMO45HMONNXRuntime) -> dict[str, Any]:
         "session_decode_session",
     ):
         session_paths[f"audio_{name.removesuffix('_session')}"] = ("audio", name)
-    for name in ("projector_semantic_session", "head_code_session"):
-        session_paths[f"tts_{name.removesuffix('_session')}"] = ("tts", name)
     for name in (
         "frontend_session",
         "decoder_session",
-        "hift_session",
+        "hift_part1_session",
+        "hift_part2_session",
         "flow_frontend_session",
-        "flow_frontend_final_session",
         "estimator_step_session",
-        "hift_stream_session",
-        "hift_stream_final_session",
+        "hift_stream_part1_session",
+        "hift_stream_part2_session",
         "campplus_session",
         "speech_tokenizer_session",
     ):

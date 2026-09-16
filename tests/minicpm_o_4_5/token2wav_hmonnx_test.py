@@ -238,15 +238,22 @@ def test_hift_runtime_supplies_persisted_source_inputs() -> None:
     runtime.hift_frame_capacity = 10
     runtime.hift_phase_noise = torch.arange(9, dtype=torch.float16).reshape(1, 9)
     runtime.hift_source_noise = torch.arange(10 * 480 * 9, dtype=torch.float16).reshape(1, 10 * 480, 9)
-    observed: list[tuple[torch.Tensor, ...]] = []
-    runtime.hift_session = lambda *values: observed.append(values) or torch.ones((1, 4800))
+    runtime._hift_stft_n_fft = 4
+    runtime._hift_stft_hop_length = 2
+    observed_part1: list[tuple[torch.Tensor, ...]] = []
+    observed_part2: list[tuple[torch.Tensor, ...]] = []
+    runtime.hift_part1_session = lambda *values: observed_part1.append(values) or torch.ones((1, 1, 4800))
+    runtime.hift_part2_session = lambda *values: observed_part2.append(values) or torch.ones((1, 4800))
 
     waveform = runtime.hift_inference(torch.ones((1, 80, 6)))
 
-    assert len(observed[0]) == 3
-    assert observed[0][0].shape == (1, 80, 10)
-    assert torch.equal(observed[0][1], runtime.hift_phase_noise)
-    assert torch.equal(observed[0][2], runtime.hift_source_noise)
+    assert len(observed_part1[0]) == 3
+    assert observed_part1[0][0].shape == (1, 80, 10)
+    assert torch.equal(observed_part1[0][1], runtime.hift_phase_noise)
+    assert torch.equal(observed_part1[0][2], runtime.hift_source_noise)
+    assert len(observed_part2[0]) == 2
+    assert observed_part2[0][0].shape == (1, 80, 10)
+    assert observed_part2[0][1].shape == (1, 6, 2401)
     assert waveform.shape == (1, 2880)
 
 
@@ -302,8 +309,7 @@ def test_token2wav_adapter_replaces_native_flow_and_hift_without_fallback() -> N
         torch.ones((1, 192)),
         10,
     )
-    # Non-streaming entry (no cache source) routes to the offline HiFT main graph,
-    # never to native hift; returns (waveform, None) matching official unpacking.
+    # Non-streaming routes through split HMONNX HiFT and preserves the official (waveform, None) result.
     waveform, source = tokenizer.hift(speech_feat=mel)
     assert waveform.shape == (1, 1440)
     assert source is None

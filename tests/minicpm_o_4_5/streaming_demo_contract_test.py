@@ -253,7 +253,7 @@ def test_fake_pipeline_writes_result_schema(tmp_path: Path) -> None:
     assert result["status"] == "ok"
     assert result["mode"] == "fake"
     assert result["case"] == "session_audio_text"
-    assert result["role_counts"]["audio.stream_prefill"] == 1
+    assert result["role_counts"]["audio.session_prefill"] == 1
 
 
 def test_fake_pipeline_writes_text_and_tiny_wav_artifacts(tmp_path: Path) -> None:
@@ -305,8 +305,6 @@ def test_readme_documents_formal_streaming_entry_without_test_details() -> None:
         "minicpm_o_4_5_streaming_demo.py",
         "work_dirs",
         "CUDA",
-        "native fallback",
-        "Session 与 Duplex API",
     )
     missing = [fragment for fragment in required_fragments if fragment not in readme]
     assert not missing, f"README is missing documentation contracts: {missing}"

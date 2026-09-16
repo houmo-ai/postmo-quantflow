@@ -11,7 +11,6 @@ def _flow_meta() -> dict[str, object]:
         "graphs": {
             "main": "flow.onnx",
             "stream_flow_frontend": "flow_frontend.onnx",
-            "stream_flow_frontend_final": "flow_frontend_final.onnx",
             "stream_flow_estimator_step": "flow_estimator_step.onnx",
         },
         "stream_contract": {
@@ -73,16 +72,23 @@ def _flow_meta() -> dict[str, object]:
                 "present_estimator_cnn_cache",
                 "present_estimator_att_cache",
             ],
+            "host_timestep_cache_banks": 10,
         },
         "up_rate": 2,
         "n_timesteps": 1,
         "cfg_rate": 0.7,
+        "noise_shape": [1, 80, 16],
     }
 
 
 def _hift_meta() -> dict[str, object]:
     return {
-        "graphs": {"stream_hift": "hift.onnx", "stream_hift_final": "hift_final.onnx"},
+        "graphs": {
+            "stream_hift": "hift.onnx",
+            "stream_hift_part1": "hift_part1.onnx",
+            "stream_hift_part2": "hift_part2.onnx",
+        },
+        "stft": {"owner": "host_cpu", "n_fft": 4, "hop_length": 2},
         "stream_contract": {
             "frame_capacity": 58,
             "mel_cache_length": 8,
@@ -90,9 +96,8 @@ def _hift_meta() -> dict[str, object]:
             "speech_cache_length": 4,
             "cache_axes": {"mel": 2, "source": 2},
             "first_valid_lengths": {"mel": 0, "source": 0, "speech": 0},
-            "phase_noise_file": "phase.pt",
-            "source_noise_file": "source.pt",
-            "initial_source_cache_file": "initial.pt",
+            "harmonic_count": 1,
+            "source_length": 10,
             "cache_inputs": {"mel": "past_mel", "source": "past_source"},
             "cache_outputs": {"mel": "present_mel", "source": "present_source"},
             "valid_length_outputs": {
@@ -100,6 +105,9 @@ def _hift_meta() -> dict[str, object]:
                 "source": "present_source_valid_length",
             },
         },
+        "frame_capacity": 8,
+        "harmonic_count": 1,
+        "source_length": 14,
         "hop_length": 2,
     }
 
@@ -115,14 +123,15 @@ def _components() -> dict[str, dict[str, object]]:
 def test_streaming_role_loader_requires_decomposed_flow_graphs(tmp_path, monkeypatch) -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
 
-    torch.save(torch.zeros(1, 1), tmp_path / "phase.pt")
-    torch.save(torch.zeros(1, 1, 1), tmp_path / "source.pt")
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
     runtime._load_streaming_roles(tmp_path, _components(), lambda path: str(path))
 
     assert runtime.flow_frontend_session == str(tmp_path / "flow_frontend.onnx")
-    assert runtime.flow_frontend_final_session == str(tmp_path / "flow_frontend_final.onnx")
     assert runtime.estimator_step_session == str(tmp_path / "flow_estimator_step.onnx")
+    assert runtime.hift_stream_part1_session == str(tmp_path / "hift_part1.onnx")
+    assert runtime.hift_stream_part2_session == str(tmp_path / "hift_part2.onnx")
+    assert runtime._stream_hift_harmonic_count == 1
+    assert runtime._stream_hift_source_length == 10
 
 
 def test_stream_cache_reset_restores_base_flow_and_empty_hift_state() -> None:
@@ -146,7 +155,7 @@ def test_stream_cache_reset_restores_base_flow_and_empty_hift_state() -> None:
     runtime._base_flow_cache = {name: value.clone() for name, value in base.items()}
     runtime._stream_state = runtime_token2wav.StreamState.from_base_cache(base, prompt_mel_length=5)
     runtime._stream_state.flow_cache["conformer_cnn_cache"].add_(10)
-    runtime.reset_state()
+    runtime.reset_stream_cache()
 
     assert torch.equal(runtime._stream_state.flow_cache["conformer_cnn_cache"], base["conformer_cnn_cache"])
     assert all(value.shape[-1] == 0 for value in runtime._stream_state.hift_cache.values())
@@ -531,6 +540,7 @@ def test_stream_routes_final_roles_and_applies_official_overlap_policy() -> None
 
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
     runtime.up_rate = 2
+    runtime.streaming_enabled = True
     runtime._stream_state = runtime_token2wav.StreamState.from_base_cache(
         {
             name: torch.zeros(shape)
@@ -603,7 +613,9 @@ def test_adapter_setup_cache_uses_native_result_instead_of_exported_template() -
 
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
     runtime.up_rate = 2
+    runtime.streaming_enabled = True
     runtime._base_flow_cache = exported_template
+    runtime._regenerate_noise = lambda: None
     runtime.stream_flow_meta = {
         "cache_shapes": {name: list(shape) for name, shape in shapes.items()},
         "cache_axes": {"conformer_att_cache": 3, "estimator_att_cache": 4},
@@ -679,10 +691,7 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
             "conformer_cnn_cache": list(tokenizer.stream_cache["conformer_cnn_cache"].shape),
             "conformer_att_cache": [2, 1, 1, 4, 1],
         },
-        "roles": {
-            "stream_flow_frontend": {"output_mel_capacity": 4},
-            "stream_flow_frontend_final": {"output_mel_capacity": 6},
-        },
+        "output_mel_capacities": {"normal": 4, "final": 6},
     }
     runtime.stream_hift_meta = {
         "source_cache_length": 4,
@@ -695,6 +704,8 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
     runtime.stream_hift_phase_noise = torch.zeros(1, 1)
     runtime.stream_hift_source_noise = torch.zeros(1, 10, 1)
     runtime.hift_hop_length = 1
+    runtime._hift_stft_n_fft = 4
+    runtime._hift_stft_hop_length = 2
     runtime.speech_cache_length = 4
     runtime.speech_window = torch.ones(8)
     runtime.report = runtime_token2wav.Token2WavExecutionReport()
@@ -719,7 +730,7 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
         "source": torch.zeros(1, 1, 4),
         "speech": torch.zeros(1, 4),
     }
-    hift_input_counts: list[int] = []
+    hift_input_counts: list[tuple[str, int]] = []
 
     def flow_frontend(*args):
         token_valid = int(args[1].item())
@@ -727,13 +738,12 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
         return (
             torch.zeros(1, 80, current_mel),
             torch.zeros(1, 80),
-            args[3],
+            args[4],
             torch.zeros(2, 1, 1, 4 + current_mel, 1),
-            torch.tensor([int(args[5].item()) + current_mel]),
+            torch.tensor([int(args[6].item()) + current_mel]),
         )
 
     runtime.flow_frontend_session = flow_frontend
-    runtime.flow_frontend_final_session = runtime.flow_frontend_session
     runtime.stream_estimator_meta = {"estimator_step_cache_shapes": {"input_att": [1, 1, 1, 4, 1], "frame_capacity": 6}}
 
     def estimator_step(x, mu, t, spks, cond, cnn, att, past_valid, current_valid):
@@ -743,15 +753,19 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
 
     runtime.estimator_step_session = estimator_step
 
-    def run_hift(*args):
-        hift_input_counts.append(len(args))
+    def run_hift_part1(*args):
+        hift_input_counts.append(("part1", len(args)))
         return (
-            torch.ones(1, 10, dtype=torch.float16),
+            torch.zeros(1, 80, 10, dtype=torch.float16),
             torch.zeros(1, 1, 10, dtype=torch.float16),
         )
 
-    runtime.hift_stream_session = run_hift
-    runtime.hift_stream_final_session = runtime.hift_stream_session
+    def run_hift_part2(*args):
+        hift_input_counts.append(("part2", len(args)))
+        return torch.ones(1, 10, dtype=torch.float16)
+
+    runtime.hift_stream_part1_session = run_hift_part1
+    runtime.hift_stream_part2_session = run_hift_part2
 
     runtime_token2wav.install_hmonnx_token2wav(tokenizer, runtime)
     normal = tokenizer.stream([1, 2], last_chunk=False)
@@ -761,9 +775,8 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
     assert final.shape == (1, 6)
     assert runtime.report.full_execution_counts["token2wav_flow_stream"] == 1
     assert runtime.report.full_execution_counts["token2wav_flow_stream_final"] == 1
-    assert runtime.report.full_execution_counts["token2wav_hift_stream"] == 1
-    assert runtime.report.full_execution_counts["token2wav_hift_stream_final"] == 1
-    assert hift_input_counts == [8, 8]
+    assert runtime.report.full_execution_counts["token2wav_hift_stream"] == 2
+    assert hift_input_counts == [("part1", 8), ("part2", 2), ("part1", 8), ("part2", 2)]
 
 
 def test_top_level_init_bridges_official_prompt_cache_before_stream() -> None:
@@ -855,10 +868,9 @@ def test_reset_requires_an_immutable_prompt_base() -> None:
     ("component", "role"),
     (
         ("token2wav_flow_frontend", "stream_flow_frontend"),
-        ("token2wav_flow_frontend", "stream_flow_frontend_final"),
         ("token2wav_flow_decoder", "stream_flow_estimator_step"),
-        ("token2wav_hift", "stream_hift"),
-        ("token2wav_hift", "stream_hift_final"),
+        ("token2wav_hift", "stream_hift_part1"),
+        ("token2wav_hift", "stream_hift_part2"),
     ),
 )
 def test_each_hmonnx_streaming_execution_role_is_required(monkeypatch, component: str, role: str) -> None:
@@ -869,7 +881,7 @@ def test_each_hmonnx_streaming_execution_role_is_required(monkeypatch, component
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
     components = _components()
     del components[component]["graphs"][role]
-    with pytest.raises(RuntimeError, match=role):
+    with pytest.raises(KeyError, match=role):
         runtime._load_streaming_roles(Path("/tmp"), components, lambda path: str(path))
 
 
@@ -923,7 +935,6 @@ def test_host_initialization_is_reported_separately_from_hmonnx_execution() -> N
         "token2wav_flow_stream",
         "token2wav_flow_stream_final",
         "token2wav_hift_stream",
-        "token2wav_hift_stream_final",
     )
 
 
@@ -934,9 +945,8 @@ def test_host_initialization_cannot_satisfy_hmonnx_streaming_roles() -> None:
     report.record_host_initialization()
     report.record_stream_flow(False)
     report.record_stream_flow(True)
-    report.record_stream_hift(False)
 
-    with pytest.raises(RuntimeError, match="token2wav_hift_stream_final"):
+    with pytest.raises(RuntimeError, match="token2wav_hift_stream"):
         report.require_streaming_components(tuple(report.streaming_execution_counts))
 
 
@@ -1009,6 +1019,7 @@ def test_init_stream_cache_rejects_missing_or_malformed_flow_cache() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
 
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
+    runtime.streaming_enabled = True
     runtime.stream_flow_meta = {
         "cache_shapes": {
             "conformer_cnn_cache": [1, 2, 1],
@@ -1036,8 +1047,10 @@ def test_official_none_bridge_uses_prompt_mel_frame_axis() -> None:
         }.items()
     }
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
+    runtime.streaming_enabled = True
     runtime.stream_flow_meta = {"cache_shapes": {name: list(value.shape) for name, value in flow.items()}}
     runtime.report = runtime_token2wav.Token2WavExecutionReport()
+    runtime._regenerate_noise = lambda: None
     result = {
         "flow_cache_base": flow,
         # Official hift cache mel is zero-length by design; the prompt length is
@@ -1063,8 +1076,10 @@ def test_official_none_bridge_infers_prompt_mel_from_flow_when_hift_layout_odd()
         }.items()
     }
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
+    runtime.streaming_enabled = True
     runtime.stream_flow_meta = {"cache_shapes": {name: list(value.shape) for name, value in flow.items()}}
     runtime.report = runtime_token2wav.Token2WavExecutionReport()
+    runtime._regenerate_noise = lambda: None
 
     # The flow conformer cache length (3) wins over the odd hift mel layout.
     runtime.bridge_official_init({"flow_cache_base": flow, "hift_cache_base": {"mel": torch.zeros(1, 12, 80)}})
@@ -1208,10 +1223,7 @@ def _flow_role_runtime() -> object:
             "conformer_att_cache": [2, 1, 1, 4, 1],
         },
         "base_cache_valid_length": 2,
-        "roles": {
-            "stream_flow_frontend": {"output_mel_capacity": 6},
-            "stream_flow_frontend_final": {"output_mel_capacity": 6},
-        },
+        "output_mel_capacities": {"normal": 6, "final": 6},
     }
     runtime.stream_estimator_meta = {"estimator_step_cache_shapes": {"input_att": [1, 1, 1, 4, 1], "frame_capacity": 6}}
     runtime.up_rate = 2
@@ -1225,6 +1237,8 @@ def _flow_role_runtime() -> object:
     runtime.rand_noise = torch.zeros(1, 80, 16, dtype=torch.float16)
     runtime.chunk_token_capacity = 28
     runtime.report = runtime_token2wav.Token2WavExecutionReport()
+    runtime._hift_stft_n_fft = 4
+    runtime._hift_stft_hop_length = 2
     return runtime
 
 
@@ -1242,7 +1256,7 @@ def test_stream_hift_crops_waveform_and_source_to_logical_combined_mel_length() 
     runtime._pending_hift_final = False
     observed: list[tuple[int, int, int]] = []
 
-    def hift_session(*args):
+    def hift_part1_session(*args):
         observed.append(
             (
                 int(args[1].reshape(()).item()),
@@ -1251,12 +1265,12 @@ def test_stream_hift_crops_waveform_and_source_to_logical_combined_mel_length() 
             )
         )
         return (
-            torch.arange(16, dtype=torch.float16).reshape(1, 16),
+            torch.zeros(1, 80, 8, dtype=torch.float16),
             torch.arange(16, dtype=torch.float16).reshape(1, 1, 16),
         )
 
-    runtime.hift_stream_session = hift_session
-    runtime.hift_stream_final_session = hift_session
+    runtime.hift_stream_part1_session = hift_part1_session
+    runtime.hift_stream_part2_session = lambda _mel, _stft: torch.arange(16, dtype=torch.float16).reshape(1, 16)
 
     first_wave, first_source = runtime.stream_hift(torch.zeros(1, 80, 3), torch.zeros(1, 1, 0))
     later_wave, later_source = runtime.stream_hift(torch.zeros(1, 80, 5), torch.zeros(1, 1, 4))
@@ -1274,6 +1288,7 @@ def test_init_stream_cache_rejects_prompt_caches_exceeding_exported_stream_capac
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
 
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
+    runtime.streaming_enabled = True
     runtime.stream_flow_meta = {
         "frontend_cache_shapes": {
             "conformer_cnn_cache": [1, 512, 6],
@@ -1308,13 +1323,12 @@ def test_streaming_flow_role_pads_short_final_chunk_to_token_capacity() -> None:
         return (
             torch.zeros(1, 80, 6, dtype=torch.float16),
             torch.zeros(1, 80, dtype=torch.float16),
-            args[3],
+            args[4],
             torch.zeros(2, 1, 1, 10, 1, dtype=torch.float16),
             torch.tensor([8], dtype=torch.int32),
         )
 
     runtime.flow_frontend_session = flow_session
-    runtime.flow_frontend_final_session = flow_session
 
     def estimator_session(x, _mu, _t, _spks, _cond, cnn, att, _past_valid, _current_valid):
         current_cache = att.new_zeros((*att.shape[:3], x.shape[2], att.shape[4]))
@@ -1381,9 +1395,10 @@ def test_streaming_flow_role_feeds_fp16_activations_to_w8a16_graphs() -> None:
     observed: dict[str, torch.dtype] = {}
 
     def flow_session(*args):
-        tokens, token_valid_length, embedding, cnn, att, _valid = args
+        tokens, token_valid_length, last_chunk, embedding, cnn, att, _valid = args
         observed["tokens"] = tokens.dtype
         observed["token_valid_length"] = token_valid_length.dtype
+        observed["last_chunk"] = last_chunk.dtype
         observed["embedding"] = embedding.dtype
         observed["cnn_cache"] = cnn.dtype
         observed["att_cache"] = att.dtype
@@ -1404,7 +1419,6 @@ def test_streaming_flow_role_feeds_fp16_activations_to_w8a16_graphs() -> None:
         return torch.zeros_like(x), cnn, torch.cat((current_cache, att), dim=3)
 
     runtime.flow_frontend_session = flow_session
-    runtime.flow_frontend_final_session = flow_session
     runtime.estimator_step_session = estimator_session
 
     runtime._run_flow_role(
@@ -1415,6 +1429,7 @@ def test_streaming_flow_role_feeds_fp16_activations_to_w8a16_graphs() -> None:
 
     assert observed["tokens"] == torch.int32
     assert observed["token_valid_length"] == torch.int32
+    assert observed["last_chunk"] == torch.int32
     assert observed["embedding"] == torch.float16
     assert observed["cnn_cache"] == torch.float16
     assert observed["att_cache"] == torch.float16
@@ -1445,7 +1460,7 @@ def test_streaming_hift_role_pads_mel_to_capacity_and_feeds_fp16_caches() -> Non
     }
     observed: dict[str, object] = {}
 
-    def hift_session(*args):
+    def hift_part1_session(*args):
         speech_feat, speech_feat_length, past_mel, _mel_len, past_source, _source_len, _phase, _source_noise = args
         observed["speech_feat_shape"] = tuple(speech_feat.shape)
         observed["speech_feat_dtype"] = speech_feat.dtype
@@ -1453,12 +1468,12 @@ def test_streaming_hift_role_pads_mel_to_capacity_and_feeds_fp16_caches() -> Non
         observed["past_mel_dtype"] = past_mel.dtype
         observed["past_source_dtype"] = past_source.dtype
         return (
-            torch.ones(1, 8, dtype=torch.float16),
+            torch.zeros(1, 80, 14, dtype=torch.float16),
             torch.zeros(1, 1, 8, dtype=torch.float16),
         )
 
-    runtime.hift_stream_session = hift_session
-    runtime.hift_stream_final_session = hift_session
+    runtime.hift_stream_part1_session = hift_part1_session
+    runtime.hift_stream_part2_session = lambda _mel, _stft: torch.ones(1, 8, dtype=torch.float16)
 
     runtime._run_hift_role(torch.zeros(1, 80, 2, dtype=torch.float32), final=False)
 
@@ -1489,7 +1504,7 @@ def test_streaming_hift_role_rejects_final_mel_exceeding_capacity() -> None:
     }
     observed: dict[str, object] = {}
 
-    def hift_session(*args):
+    def hift_part1_session(*args):
         observed["speech_feat_shape"] = tuple(args[0].shape)
         observed["speech_feat_valid_length"] = int(args[1].reshape(-1)[0])
         return (
@@ -1500,8 +1515,8 @@ def test_streaming_hift_role_rejects_final_mel_exceeding_capacity() -> None:
             torch.tensor([4], dtype=torch.int32),
         )
 
-    runtime.hift_stream_session = hift_session
-    runtime.hift_stream_final_session = hift_session
+    runtime.hift_stream_part1_session = hift_part1_session
+    runtime.hift_stream_part2_session = lambda _mel, _stft: torch.ones(1, 8, dtype=torch.float16)
 
     with pytest.raises(RuntimeError, match="exceeds HiFT capacity"):
         runtime._run_hift_role(torch.zeros(1, 80, 9, dtype=torch.float16), final=True)
@@ -1535,16 +1550,16 @@ def test_streaming_hift_role_uses_stream_noise_instead_of_full_noise() -> None:
     }
     observed: dict[str, torch.Tensor] = {}
 
-    def hift_session(*args):
+    def hift_part1_session(*args):
         observed["phase_noise"] = args[6]
         observed["source_noise"] = args[7]
         return (
-            torch.ones(1, 8, dtype=torch.float16),
+            torch.zeros(1, 80, 14, dtype=torch.float16),
             torch.zeros(1, 1, 8, dtype=torch.float16),
         )
 
-    runtime.hift_stream_session = hift_session
-    runtime.hift_stream_final_session = hift_session
+    runtime.hift_stream_part1_session = hift_part1_session
+    runtime.hift_stream_part2_session = lambda _mel, _stft: torch.ones(1, 8, dtype=torch.float16)
 
     runtime._run_hift_role(torch.zeros(1, 80, 2, dtype=torch.float16), final=False)
 

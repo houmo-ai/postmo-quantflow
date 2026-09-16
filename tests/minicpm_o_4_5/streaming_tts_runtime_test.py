@@ -38,24 +38,17 @@ def _official_utils():
 
 
 class _Session:
-    def __init__(self, hidden_size: int = 8, vocab_size: int = 7) -> None:
-        self.calls: list[tuple[int, int, int, torch.Tensor]] = []
-        self.hidden_size = hidden_size
+    def __init__(self, vocab_size: int = 4) -> None:
+        self.calls: list[tuple[int, int, int, torch.Tensor, tuple[torch.Tensor, ...]]] = []
         self.vocab_size = vocab_size
 
-    def __call__(self, *inputs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, *inputs: torch.Tensor) -> torch.Tensor:
         past = int(inputs[1].item())
         current = int(inputs[2].item())
-        self.calls.append((past, current, inputs[0].shape[1], inputs[-1].clone()))
-        return torch.zeros((1, inputs[0].shape[1], self.hidden_size), dtype=inputs[0].dtype), inputs[0].clone()
-
-
-class _ProjectionSession:
-    def __init__(self, output_size: int) -> None:
-        self.output_size = output_size
-
-    def __call__(self, inputs: torch.Tensor) -> torch.Tensor:
-        return torch.zeros((*inputs.shape[:-1], self.output_size), dtype=inputs.dtype, device=inputs.device)
+        self.calls.append((past, current, inputs[0].shape[1], inputs[5].clone(), inputs))
+        logits = torch.zeros((1, 1, self.vocab_size), dtype=inputs[0].dtype)
+        logits[..., 1] = 1
+        return logits
 
 
 def _runtime(prefill: _Session, decode: _Session):
@@ -76,9 +69,10 @@ def _runtime(prefill: _Session, decode: _Session):
     )
     runtime._kvcache_mixin.prepare_fixed_cache("cpu")
     runtime.config = SimpleNamespace(rope_theta=10000.0, hidden_size=8, num_attention_heads=2)
-    runtime.projector_semantic_session = _ProjectionSession(8)
-    runtime.head_code_session = _ProjectionSession(4)
-    runtime.projection_seq_capacity = 16
+    runtime.semantic_hidden_size = 8
+    runtime.tts_hidden_size = 8
+    runtime.num_audio_tokens = 4
+    runtime._pending_semantic_hidden_states = None
     return runtime
 
 
@@ -99,12 +93,9 @@ def _wrapped_tts(runtime):
     wrapped.num_vq = 1
     wrapped.config = SimpleNamespace(num_audio_tokens=4, backbone_model="llama")
     wrapped.emb_code = torch.nn.ModuleList([torch.nn.Embedding(4, 8).to(torch.float16)])
-    wrapped.head_code = torch.nn.ModuleList([torch.nn.Linear(8, 4, bias=False).to(torch.float16)])
+    wrapped.head_code = torch.nn.ModuleList([torch.nn.Identity()])
     wrapped.model = runtime
     wrapped._tts_llama_model = runtime
-    with torch.no_grad():
-        wrapped.head_code[0].weight.zero_()
-        wrapped.head_code[0].weight[1].fill_(1)
     return wrapped
 
 
@@ -121,11 +112,12 @@ def test_tts_forward_hf_returns_official_output_and_commits_cache() -> None:
     )
 
     assert isinstance(output, BaseModelOutputWithPast)
-    assert output.last_hidden_state.shape == (1, 3, 8)
+    assert output.last_hidden_state.shape == (1, 1, 4)
     assert output.past_key_values is runtime.hf_cache
     assert runtime.hf_cache.get_seq_length() == 3
     assert prefill.calls[0][:3] == (0, 3, 4)
     assert prefill.calls[0][3].shape == (1, 1, 4, 16)
+    assert len(prefill.calls[0][4]) == 8
 
 
 def test_tts_forward_hf_routes_decode_and_rejects_foreign_cache() -> None:
@@ -162,12 +154,9 @@ def test_official_tts_streaming_generator_uses_hmonnx_model_and_yields_buffer() 
         config = SimpleNamespace(text_eos_token_id=3)
         emb_text = torch.nn.Embedding(8, 8)
         emb_code = torch.nn.ModuleList([torch.nn.Embedding(4, 8)])
-        head_code = torch.nn.ModuleList([torch.nn.Linear(8, 4, bias=False)])
+        head_code = torch.nn.ModuleList([torch.nn.Identity()])
         model = runtime
 
-    with torch.no_grad():
-        FakeTTS.head_code[0].weight.zero_()
-        FakeTTS.head_code[0].weight[1].fill_(1)
     generator = official.TTSStreamingGenerator(FakeTTS(), 1.0, eos_token=3, chunk_size=2)
     chunks = list(generator.generate_with_buffer(torch.ones((1, 1, 8)), text_finished=True, max_new_token=2))
 
@@ -306,7 +295,7 @@ def test_official_tts_attention_modes_have_explicit_runtime_support(attention_ty
         config = SimpleNamespace(text_eos_token_id=3)
         emb_text = torch.nn.Embedding(8, 8)
         emb_code = torch.nn.ModuleList([torch.nn.Embedding(4, 8)])
-        head_code = torch.nn.ModuleList([torch.nn.Linear(8, 4, bias=False)])
+        head_code = torch.nn.ModuleList([torch.nn.Identity()])
         model = runtime
 
     FakeTTS.attention_type = attention_type

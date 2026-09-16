@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import numpy as np
@@ -17,7 +18,6 @@ class StreamingAudioConfigError(ValueError):
 def _streaming_io_names(num_hidden_layers: int) -> tuple[list[str], list[str]]:
     input_names = [
         "input_features",
-        "valid_mel_length",
         "past_seq_length",
         "current_input_length",
         "attention_mask",
@@ -181,10 +181,7 @@ def _export_audio_main_onnx_direct(
 
     patch_audio_attention_return_compat(host)
 
-    onnx_dir = output_dir / "onnx"
-    hmonnx_dir = output_dir / "hmonnx"
-    onnx_dir.mkdir(parents=True, exist_ok=True)
-    hmonnx_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     capacity = int(component_cfg["max_audio_frames"])
     quant_type = str(component_cfg["quant_type"])
     prefix = f"{model_name}_audio_offline_{target_device}_{quant_type}"
@@ -199,47 +196,48 @@ def _export_audio_main_onnx_direct(
     features = torch.zeros((batch, 80, capacity), dtype=torch.float16, device=device)
     mask = _chunked_attention_mask(host, capacity).expand(batch, -1, -1, -1).contiguous().to(device)
 
-    raw_onnx = onnx_dir / f"{prefix}_raw.onnx"
-    with RewriterContext(None, backend="onnxruntime"):
-        with torch.no_grad():
-            torch.onnx.export(
-                encoder,
-                (features, mask),
-                str(raw_onnx),
-                input_names=["input_features", "audio_attention_mask"],
-                output_names=["audio_embeddings"],
-                opset_version=17,
-            )
-    onnx_model = onnx.load(str(raw_onnx))
-    skipped_optimizers = [
-        "fuse_pad_into_conv",
-        "fuse_consecutive_slices",
-        "eliminate_common_subexpression",
-        "fuse_qkv",
-    ]
-    onnx_model_sim, checked = onnxsim.simplify(onnx_model, skipped_optimizers=skipped_optimizers)
-    if checked:
-        onnx_model = onnx_model_sim
-    onnx_file = onnx_dir / f"{prefix}.onnx"
-    onnx.save(
-        onnx_model,
-        str(onnx_file),
-        save_as_external_data=True,
-        all_tensors_to_one_file=True,
-        location=f"{onnx_file.stem}_external_data",
-    )
-    raw_onnx.unlink(missing_ok=True)
-    onnx_path = hmonnx_dir / f"{prefix}.onnx"
-    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
-    convert_onnx_to_hmonnx(
-        str(onnx_file),
-        [features.cpu(), mask.cpu()],
-        DeviceType.XH2a,
-        str(onnx_path),
-        quant_config=create_quant_config(quant_scheme),
-        input_names=["input_features", "audio_attention_mask"],
-        output_names=["audio_embeddings"],
-    )
+    with TemporaryDirectory(prefix="minicpmo45_audio_onnx_") as temporary_dir:
+        source_dir = Path(temporary_dir)
+        raw_onnx = source_dir / f"{prefix}_raw.onnx"
+        with RewriterContext(None, backend="onnxruntime"):
+            with torch.no_grad():
+                torch.onnx.export(
+                    encoder,
+                    (features, mask),
+                    str(raw_onnx),
+                    input_names=["input_features", "audio_attention_mask"],
+                    output_names=["audio_embeddings"],
+                    opset_version=17,
+                )
+        onnx_model = onnx.load(str(raw_onnx))
+        skipped_optimizers = [
+            "fuse_pad_into_conv",
+            "fuse_consecutive_slices",
+            "eliminate_common_subexpression",
+            "fuse_qkv",
+        ]
+        onnx_model_sim, checked = onnxsim.simplify(onnx_model, skipped_optimizers=skipped_optimizers)
+        if checked:
+            onnx_model = onnx_model_sim
+        onnx_file = source_dir / f"{prefix}.onnx"
+        onnx.save(
+            onnx_model,
+            str(onnx_file),
+            save_as_external_data=True,
+            all_tensors_to_one_file=True,
+            location=f"{onnx_file.stem}_external_data",
+        )
+        onnx_path = output_dir / f"{prefix}.onnx"
+        quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)
+        convert_onnx_to_hmonnx(
+            str(onnx_file),
+            [features.cpu(), mask.cpu()],
+            DeviceType.XH2a,
+            str(onnx_path),
+            quant_config=create_quant_config(quant_scheme),
+            input_names=["input_features", "audio_attention_mask"],
+            output_names=["audio_embeddings"],
+        )
     return str(onnx_path)
 
 
@@ -254,26 +252,36 @@ def export_minicpm_o_4_5_audio(
     export_basename: str | None = None,
 ) -> dict[str, Any]:
     model_name = model_name or "minicpm_o_4_5"
-    model = build_component_model(model_dir, component_cfg)
-    host = model.get_hf_model(device_map="cpu")
-    graph = Path(
-        _export_audio_main_onnx_direct(
-            host=host,
-            component_cfg=component_cfg,
-            target_device=target_device,
-            output_dir=work_dir / "Audio" / "Offline",
-            device=device,
-            model_name=model_name,
+    export_mode = str(component_cfg["export_mode"])
+    if export_mode == "offline":
+        model = build_component_model(model_dir, component_cfg)
+        host = model.get_hf_model(device_map="cpu")
+        graph = Path(
+            _export_audio_main_onnx_direct(
+                host=host,
+                component_cfg=component_cfg,
+                target_device=target_device,
+                output_dir=work_dir / "audio",
+                device=device,
+                model_name=model_name,
+            )
         )
-    )
-    result = {"quant_type": component_cfg["quant_type"], "graphs": {"main": str(graph.relative_to(work_dir))}}
-    streaming_cfg = component_cfg.get("streaming") or {}
-    if not streaming_cfg.get("enabled", False):
-        return result
-
+        return {
+            "export_mode": export_mode,
+            "quant_type": component_cfg["quant_type"],
+            "graphs": {"main": str(graph.relative_to(work_dir))},
+        }
+    streaming_cfg = component_cfg["streaming"]
     probe_model = build_component_model(model_dir, component_cfg)
     probe_host = probe_model.get_hf_model(device_map="cpu")
-    prefill_data, decode_data = capture_streaming_audio_inputs(probe_host.processor, streaming_cfg)
+    if export_mode == "stream":
+        prefill_data, decode_data = capture_streaming_audio_inputs(probe_host.processor, streaming_cfg)
+        prefix_prefill = int(streaming_cfg["prefix_overlap_first"])
+        prefix_decode = int(streaming_cfg["prefix_overlap_later"])
+        suffix_overlap = int(streaming_cfg["suffix_overlap"])
+    else:
+        prefill_data, decode_data = capture_session_audio_inputs(probe_host.processor, streaming_cfg)
+        prefix_prefill = prefix_decode = suffix_overlap = 0
     num_hidden_layers = int(probe_host.apm.config.encoder_layers)
     audio_encoder_layer = int(probe_host.audio_encoder_layer)
     if audio_encoder_layer != -1:
@@ -290,16 +298,16 @@ def export_minicpm_o_4_5_audio(
     prefill_model.init_wrap_model(
         prefill_host,
         streaming=True,
-        prefix_extra_frames=int(streaming_cfg["prefix_overlap_first"]),
-        suffix_extra_frames=int(streaming_cfg["suffix_overlap"]),
+        prefix_extra_frames=prefix_prefill,
+        suffix_extra_frames=suffix_overlap,
         input_frame_capacity=int(prefill_data["input_features"].shape[-1]),
     )
     prefill_graph = Path(
         quantize_and_export(
             prefill_model,
             prefill_data,
-            work_dir / "Audio" / "Stream",
-            f"{model_name}_audio_stream_prefill_{target_device}_{component_cfg['quant_type']}",
+            work_dir / "audio_prefill",
+            f"{model_name}_audio_{export_mode}_prefill_{target_device}_{component_cfg['quant_type']}",
             device,
         )
     )
@@ -309,126 +317,51 @@ def export_minicpm_o_4_5_audio(
     decode_model.init_wrap_model(
         decode_host,
         streaming=True,
-        prefix_extra_frames=int(streaming_cfg["prefix_overlap_later"]),
-        suffix_extra_frames=int(streaming_cfg["suffix_overlap"]),
+        prefix_extra_frames=prefix_decode,
+        suffix_extra_frames=suffix_overlap,
         input_frame_capacity=int(decode_data["input_features"].shape[-1]),
     )
     decode_graph = Path(
         quantize_and_export(
             decode_model,
             decode_data,
-            work_dir / "Audio" / "Stream",
-            f"{model_name}_audio_stream_decode_{target_device}_{component_cfg['quant_type']}",
-            device,
-        )
-    )
-    session_prefill_data, session_decode_data = capture_session_audio_inputs(probe_host.processor, streaming_cfg)
-    session_prefill_model = build_component_model(model_dir, streaming_component_cfg)
-    session_prefill_host = session_prefill_model.get_hf_model(device_map="cpu")
-    session_prefill_model.init_wrap_model(
-        session_prefill_host,
-        streaming=True,
-        prefix_extra_frames=0,
-        suffix_extra_frames=0,
-        input_frame_capacity=int(session_prefill_data["input_features"].shape[-1]),
-    )
-    session_prefill_graph = Path(
-        quantize_and_export(
-            session_prefill_model,
-            session_prefill_data,
-            work_dir / "Audio" / "Session",
-            f"{model_name}_audio_session_prefill_{target_device}_{component_cfg['quant_type']}",
-            device,
-        )
-    )
-    session_decode_data["past_seq_length"] = int(session_prefill_data["current_input_length"])
-    session_decode_model = build_component_model(model_dir, streaming_component_cfg)
-    session_decode_host = session_decode_model.get_hf_model(device_map="cpu")
-    session_decode_model.init_wrap_model(
-        session_decode_host,
-        streaming=True,
-        prefix_extra_frames=0,
-        suffix_extra_frames=0,
-        input_frame_capacity=int(session_decode_data["input_features"].shape[-1]),
-    )
-    session_decode_graph = Path(
-        quantize_and_export(
-            session_decode_model,
-            session_decode_data,
-            work_dir / "Audio" / "Session",
-            f"{model_name}_audio_session_decode_{target_device}_{component_cfg['quant_type']}",
+            work_dir / "audio_decode",
+            f"{model_name}_audio_{export_mode}_decode_{target_device}_{component_cfg['quant_type']}",
             device,
         )
     )
     cache_shape = list(prefill_model.past_key_caches[0].shape)
-    current_length_rule = "ceil(valid_mel_length / 2) - ceil(prefix_overlap / 2) - ceil(suffix_overlap / 2)"
-
     def graph_contract(prefix_overlap: int, suffix_overlap: int) -> dict[str, Any]:
-        contract = {
+        return {
             "input_names": input_names,
-            "output_names": output_names,
             "prefix_overlap": prefix_overlap,
             "suffix_overlap": suffix_overlap,
-            "current_length_rule": (
-                "ceil(valid_mel_length / 2)" if prefix_overlap == 0 and suffix_overlap == 0 else current_length_rule
-            ),
-            "cache_capacity": int(streaming_cfg["cache_capacity"]),
-            "kv_cache_shape": cache_shape,
-            "selected_hidden_state_index": audio_encoder_layer,
-            # The streaming graphs export audio_projection_layer in-graph (1024 ->
-            # 4096), mirroring the non-streaming main graph; the Host still applies
-            # AvgPool1d frame pooling and the runtime owns the pooled-length slicing.
-            "projection_in_graph": True,
-            # The streaming graphs export projection AND AvgPool1d(pool_step=5)
-            # pooling in-graph, so the valid output region is the pooled frame
-            # count ((current_input_length - pool_step) // pool_step + 1).
-            "pooling_in_graph": True,
         }
-        if prefix_overlap == 0 and suffix_overlap == 0:
-            contract["output_valid_region"] = (
-                "audio_hidden_states[:, :(current_input_length - pool_step) // pool_step + 1, :]"
-            )
-        return contract
 
-    result.update(
-        {
-            "graphs": {
-                "main": str(graph.relative_to(work_dir)),
-                "stream_prefill": str(prefill_graph.relative_to(work_dir)),
-                "stream_decode": str(decode_graph.relative_to(work_dir)),
-                "session_prefill": str(session_prefill_graph.relative_to(work_dir)),
-                "session_decode": str(session_decode_graph.relative_to(work_dir)),
-            },
-            "stream_prefill_frames": int(prefill_data["valid_mel_length"]),
-            "stream_decode_frames": int(decode_data["valid_mel_length"]),
-            "session_prefill_frames": int(session_prefill_data["valid_mel_length"]),
-            "session_decode_frames": int(session_decode_data["valid_mel_length"]),
-            "num_hidden_layers": len(prefill_model.past_key_caches),
-            "kv_cache_shape": cache_shape,
-            "cache_capacity": int(streaming_cfg["cache_capacity"]),
-            "audio_encoder_layer": audio_encoder_layer,
-            "selected_hidden_state_index": audio_encoder_layer,
-            "prefix_overlap_first": int(streaming_cfg["prefix_overlap_first"]),
-            "prefix_overlap_later": int(streaming_cfg["prefix_overlap_later"]),
-            "suffix_overlap": int(streaming_cfg["suffix_overlap"]),
-            # Older official remote-code revisions do not expose this field;
-            # the streaming wrapper and graph contract use the same default.
-            "pool_step": int(getattr(getattr(probe_host, "config", None), "audio_pool_step", 5)),
-            "projection_in_graph": True,
-            "graph_contracts": {
-                "stream_prefill": graph_contract(
-                    int(streaming_cfg["prefix_overlap_first"]),
-                    int(streaming_cfg["suffix_overlap"]),
-                ),
-                "stream_decode": graph_contract(
-                    int(streaming_cfg["prefix_overlap_later"]),
-                    int(streaming_cfg["suffix_overlap"]),
-                ),
-                "session_prefill": graph_contract(0, 0),
-                "session_decode": graph_contract(0, 0),
-            },
-        }
-    )
+    prefill_role = f"{export_mode}_prefill"
+    decode_role = f"{export_mode}_decode"
+    result = {
+        "export_mode": export_mode,
+        "quant_type": component_cfg["quant_type"],
+        "graphs": {
+            prefill_role: str(prefill_graph.relative_to(work_dir)),
+            decode_role: str(decode_graph.relative_to(work_dir)),
+        },
+        f"{prefill_role}_frames": int(prefill_data["valid_mel_length"]),
+        f"{decode_role}_frames": int(decode_data["valid_mel_length"]),
+        "num_hidden_layers": len(prefill_model.past_key_caches),
+        "kv_cache_shape": cache_shape,
+        "cache_capacity": int(streaming_cfg["cache_capacity"]),
+        "audio_encoder_layer": audio_encoder_layer,
+        "prefix_overlap_first": prefix_prefill,
+        "prefix_overlap_later": prefix_decode,
+        "suffix_overlap": suffix_overlap,
+        "pool_step": int(probe_host.config.audio_pool_step),
+        "graph_contracts": {
+            prefill_role: graph_contract(prefix_prefill, suffix_overlap),
+            decode_role: graph_contract(prefix_decode, suffix_overlap),
+        },
+    }
     return result
 
 

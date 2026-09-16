@@ -38,14 +38,12 @@ class StreamingWhisperEncoderMixin:
     def forward_streaming(
         self,
         input_features: Tensor,
-        valid_mel_length: Tensor,
         past_seq_length: Tensor,
         current_input_length: Tensor,
         attention_mask: Tensor,
         past_key_caches: Sequence[Tensor],
         past_value_caches: Sequence[Tensor],
     ) -> tuple[Tensor, ...]:
-        del valid_mel_length
         inputs_embeds = nn.functional.gelu(self.conv1(input_features))
         inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
         prefix_remove = (self.streaming_prefix_extra_frames + 1) // 2
@@ -108,7 +106,6 @@ def _build_streaming_export_forward(num_hidden_layers: int):
     args = [
         "self",
         "input_features",
-        "valid_mel_length",
         "past_seq_length",
         "current_input_length",
         "attention_mask",
@@ -119,7 +116,7 @@ def _build_streaming_export_forward(num_hidden_layers: int):
     source = (
         f"def forward({', '.join(args)}):\n"
         "    return self.encoder.forward_streaming(\n"
-        "        input_features, valid_mel_length, past_seq_length, current_input_length, attention_mask,\n"
+        "        input_features, past_seq_length, current_input_length, attention_mask,\n"
         f"        [{', '.join(keys)}],\n"
         f"        [{', '.join(values)}],\n"
         "    )\n"

@@ -38,10 +38,11 @@ def _official_module():
     return module
 
 
-def _runtime_with_host(host: object):
+def _runtime_with_host(host: object, *, export_mode: str = "session"):
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime import MiniCPMO45HMONNXRuntime
 
     runtime = object.__new__(MiniCPMO45HMONNXRuntime)
+    runtime.export_mode = export_mode
     runtime.host_model = host
     runtime.audio = SimpleNamespace(reset_state=lambda: None)
     runtime.llm = SimpleNamespace(reset_state=lambda: None)
@@ -79,27 +80,6 @@ def test_official_session_and_duplex_method_identity_and_signatures() -> None:
     assert isinstance(runtime, MiniCPMO45HMONNXRuntime)
 
 
-def test_session_and_duplex_modes_reject_interleaving_until_full_reset() -> None:
-    calls: list[str] = []
-    host = SimpleNamespace(
-        reset_session=lambda reset_token2wav_cache=True: calls.append(f"reset:{reset_token2wav_cache}"),
-        streaming_prefill=lambda session_id, msgs, **kwargs: calls.append(f"prefill:{session_id}") or "prompt",
-        streaming_generate=lambda session_id, **kwargs: iter(()),
-        as_duplex=lambda device=None, **kwargs: calls.append("duplex") or {"device": device},
-    )
-    runtime = _runtime_with_host(host)
-
-    assert runtime.streaming_prefill("session-a", [{"role": "user", "content": ["hi"]}]) == "prompt"
-    with pytest.raises(RuntimeError, match="Session API is active"):
-        runtime.as_duplex()
-
-    runtime.reset_session(False)
-    assert runtime.as_duplex(device="cpu") == {"device": "cpu"}
-    with pytest.raises(RuntimeError, match="Duplex API is active"):
-        runtime.streaming_prefill("session-b", [])
-    assert calls == ["prefill:session-a", "reset:False", "duplex"]
-
-
 def test_reset_session_clears_mode_but_preserves_token2wav_base_when_requested() -> None:
     token2wav_resets: list[str] = []
     host = SimpleNamespace(
@@ -114,7 +94,6 @@ def test_reset_session_clears_mode_but_preserves_token2wav_base_when_requested()
     runtime.streaming_prefill("session-a", [])
     runtime.reset_session(False)
     assert token2wav_resets == []
-    runtime.as_duplex()
     runtime.reset_session(True)
     assert token2wav_resets == ["reset"]
 
@@ -215,12 +194,12 @@ def test_all_certified_cases_reach_an_official_delegate_surface() -> None:
         streaming_generate=lambda session_id, **kwargs: calls.append("session-generate") or iter(()),
         as_duplex=lambda device=None, **kwargs: calls.append("duplex") or SimpleNamespace(model=host),
     )
-    runtime = _runtime_with_host(host)
+    runtime = _runtime_with_host(host, export_mode="session")
 
     runtime.streaming_prefill("session", [])
     list(runtime.streaming_generate("session"))
     runtime.reset_session(False)
-    runtime.as_duplex()
+    _runtime_with_host(host, export_mode="stream").as_duplex()
     assert len(STREAMING_CASES) == 5
     assert calls == ["session-prefill", "session-generate", "reset", "duplex"]
 
@@ -261,7 +240,10 @@ def test_certified_case_executes_its_delegate_surface(case_name: str, expected_c
         ),
         as_duplex=lambda device=None, **kwargs: calls.append("duplex") or Duplex(host),
     )
-    runtime = _runtime_with_host(host)
+    runtime = _runtime_with_host(
+        host,
+        export_mode="session" if case_name.startswith("session") else "stream",
+    )
 
     assert case_name in STREAMING_CASES
     if case_name.startswith("session"):
@@ -306,7 +288,11 @@ def test_as_duplex_reuses_initialized_tts_on_a_real_object_shape() -> None:
 def test_runtime_as_duplex_uses_initialized_tts_on_actual_delegate_surface() -> None:
     class Host:
         def __init__(self) -> None:
-            self.tts = SimpleNamespace(audio_tokenizer=SimpleNamespace(name="tokenizer"))
+            self.tts = SimpleNamespace(
+                audio_tokenizer=SimpleNamespace(name="tokenizer"),
+                projector_semantic=object(),
+                emb_text=object(),
+            )
 
         def reset_session(self, reset_token2wav_cache=True):
             return reset_token2wav_cache
@@ -324,7 +310,7 @@ def test_runtime_as_duplex_uses_initialized_tts_on_actual_delegate_surface() -> 
             return SimpleNamespace(model=self, observed_tts=self.init_tts(), device=device)
 
     host = Host()
-    runtime = _runtime_with_host(host)
+    runtime = _runtime_with_host(host, export_mode="stream")
     duplex = runtime.as_duplex(device="cpu")
 
     assert duplex.observed_tts.name == "tokenizer"

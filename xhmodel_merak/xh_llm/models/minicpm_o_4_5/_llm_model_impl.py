@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen3.modeling_qwen3 import (
@@ -513,9 +512,6 @@ class _BaseForCausalLM(DynamicModule):
             g_hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
         logits = self.lm_head(g_hidden_states)
 
-        if self.export_projector:
-            hidden_states = self.chat_tts_projector(hidden_states)
-            hidden_states = F.normalize(hidden_states, p=2, dim=-1)
         return logits, hidden_states
 
     def _setup(self, cfg: ConfigDict):
@@ -531,7 +527,6 @@ class _BaseForCausalLM(DynamicModule):
             self.update_offset_indices(batch_size, input_seq_len)
 
         self.llm_gather._update_cfg = types.MethodType(_llm_gather_update_cfg, self.llm_gather)
-        self.export_projector = False
         return self
 
 

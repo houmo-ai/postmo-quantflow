@@ -1,7 +1,9 @@
+from copy import deepcopy
 from typing import Any, Dict, List, Union
 
 import torch
 from torch import Tensor
+from torch.nn.utils import parametrize
 
 from xhmodel_merak.xh_other_model.base_llm_model import LLMBaseModel
 
@@ -42,6 +44,15 @@ class XHMiniCPMOTTSModel(LLMBaseModel, XHMiniCPMOBaseModel):
         tts_model = hf_model.tts
         self._init_wrap_model_with_llm_registry(tts_model.model if hasattr(tts_model, "model") else tts_model)
 
+        self._wrap_model.semantic_projector = deepcopy(tts_model.projector_semantic)
+        self._wrap_model.normalize_projected_hidden = bool(tts_model.config.normalize_projected_hidden)
+        audio_code_head = deepcopy(tts_model.head_code[0])
+        if parametrize.is_parametrized(audio_code_head, "weight"):
+            parametrize.remove_parametrizations(audio_code_head, "weight", leave_parametrized=True)
+        self._wrap_model.audio_code_head = audio_code_head
+        self.semantic_hidden_size = int(tts_model.config.llm_dim)
+        self.tts_hidden_size = int(tts_model.config.hidden_size)
+
         self.token_embedding = tts_model.model.get_input_embeddings()
         self.generation_config = getattr(tts_model.model, "generation_config", None)
         self.config = tts_model.model.config
@@ -57,16 +68,14 @@ class XHMiniCPMOTTSModel(LLMBaseModel, XHMiniCPMOBaseModel):
                 num_decoder_layers,
                 [batch_size, tts_model.model.config.num_key_value_heads, self.cache_length, head_dim],
             )
-        # Ensure attention_mask comes AFTER KV cache names in export_cfg.input_names
-        # to match the wrap_model's forward signature:
-        # (inputs_embeds, past_seq_length, current_input_length,
-        #  past_key_cache_0..N, past_value_cache_0..N, attention_mask)
         if hasattr(self, "export_cfg") and self.export_cfg is not None:
             input_names = list(self.export_cfg.get("input_names", []))
-            if "attention_mask" in input_names:
-                input_names.remove("attention_mask")
-                input_names.append("attention_mask")
-                self.export_cfg["input_names"] = input_names
+            trailing_names = [
+                name for name in ("attention_mask", "semantic_hidden_states", "semantic_mask") if name in input_names
+            ]
+            input_names = [name for name in input_names if name not in trailing_names]
+            input_names.extend(trailing_names)
+            self.export_cfg["input_names"] = input_names
         del hf_model
 
     def _set_device(self, device: torch.device) -> None:
@@ -83,9 +92,6 @@ class XHMiniCPMOTTSModel(LLMBaseModel, XHMiniCPMOBaseModel):
         past_key_caches = self.past_key_caches
         past_value_caches = self.past_value_caches
         attention_mask = data["attention_mask"]
-        # Order must match the wrap_model's forward signature created by wrap_llm_model:
-        # (inputs_embeds, past_seq_length, current_input_length, past_key_cache, past_value_cache, attention_mask)
-        # KV caches come BEFORE attention_mask, and export_cfg.input_names must follow the same order.
         return (
             inputs_embeds,
             past_seq_length,
@@ -93,6 +99,8 @@ class XHMiniCPMOTTSModel(LLMBaseModel, XHMiniCPMOBaseModel):
             past_key_caches,
             past_value_caches,
             attention_mask,
+            data["semantic_hidden_states"],
+            data["semantic_mask"],
         )
 
     def _forward(
@@ -103,9 +111,10 @@ class XHMiniCPMOTTSModel(LLMBaseModel, XHMiniCPMOBaseModel):
         past_key_caches,
         past_value_caches,
         attention_mask,
+        semantic_hidden_states=None,
+        semantic_mask=None,
     ) -> List[Tensor]:
         # Pass to the wrapped model / exported graph in the same positional order.
-        # attention_mask is LAST — matching wrap_model's forward signature.
         out = self(
             inputs_embeds,
             past_seq_length,
@@ -113,5 +122,7 @@ class XHMiniCPMOTTSModel(LLMBaseModel, XHMiniCPMOBaseModel):
             past_key_caches,
             past_value_caches,
             attention_mask,
+            semantic_hidden_states,
+            semantic_mask,
         )
         return out

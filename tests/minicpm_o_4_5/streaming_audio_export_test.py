@@ -97,7 +97,7 @@ def test_streaming_input_capture_rejects_non_16khz_sample_rate() -> None:
         capture_streaming_audio_inputs(SimpleNamespace(), {"sample_rate": 8000})
 
 
-def test_audio_export_records_offline_and_streaming_graph_contracts(tmp_path, monkeypatch) -> None:
+def test_audio_export_records_only_selected_stream_graph_contracts(tmp_path, monkeypatch) -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import export_audio
 
     class Processor:
@@ -126,6 +126,7 @@ def test_audio_export_records_offline_and_streaming_graph_contracts(tmp_path, mo
         def __init__(self) -> None:
             self.host = SimpleNamespace(
                 processor=Processor(),
+                config=SimpleNamespace(audio_pool_step=5),
                 apm=SimpleNamespace(
                     config=SimpleNamespace(
                         encoder_layers=24,
@@ -157,7 +158,7 @@ def test_audio_export_records_offline_and_streaming_graph_contracts(tmp_path, mo
             if streaming:
                 self.streaming_frames.extend([prefix_extra_frames, suffix_extra_frames, input_frame_capacity])
 
-    models = [Model(), Model(), Model(), Model(), Model(), Model()]
+    models = [Model(), Model(), Model()]
     built_models: list[Model] = []
 
     def build_model(*_args):
@@ -170,23 +171,15 @@ def test_audio_export_records_offline_and_streaming_graph_contracts(tmp_path, mo
 
     def fake_quantize(model, data, output_dir: Path, prefix: str, device: str) -> str:
         del data, device
-        expected_model_indexes = (2, 3, 4, 5)
-        # exported already contains the ONNX-direct main graph entry.
-        assert model is built_models[expected_model_indexes[len(exported) - 1]]
+        expected_model_indexes = (1, 2)
+        assert model is built_models[expected_model_indexes[len(exported)]]
         exported.append(prefix)
         return str(output_dir / f"{prefix}.onnx")
 
     monkeypatch.setattr(export_audio, "quantize_and_export", fake_quantize)
 
-    def fake_main_onnx_direct(
-        *, host, component_cfg, target_device, output_dir, device, model_name="minicpm_o_4_5"
-    ) -> str:
-        del host, component_cfg, target_device, device, model_name
-        exported.append("minicpm_o_4_5_audio_offline_XH2a_w8a8_sefp")
-        return str(output_dir / "minicpm_o_4_5_audio_offline_XH2a_w8a8_sefp.onnx")
-
-    monkeypatch.setattr(export_audio, "_export_audio_main_onnx_direct", fake_main_onnx_direct)
     component = {
+        "export_mode": "stream",
         "model_type": "MiniCPMO45AudioModel",
         "quant_type": "w8a8_sefp",
         "static_batch_size": 4,
@@ -216,39 +209,24 @@ def test_audio_export_records_offline_and_streaming_graph_contracts(tmp_path, mo
     )
 
     assert exported == [
-        "minicpm_o_4_5_audio_offline_XH2a_w8a8_sefp",
         "minicpm_o_4_5_audio_stream_prefill_XH2a_w8a8_sefp",
         "minicpm_o_4_5_audio_stream_decode_XH2a_w8a8_sefp",
-        "minicpm_o_4_5_audio_session_prefill_XH2a_w8a8_sefp",
-        "minicpm_o_4_5_audio_session_decode_XH2a_w8a8_sefp",
     ]
-    assert built_models[2].streaming_frames == [0, 2, 107]
-    assert built_models[3].streaming_frames == [2, 2, 103]
-    assert built_models[4].streaming_frames == [0, 0, 100]
-    assert built_models[5].streaming_frames == [0, 0, 100]
-    assert set(result["graphs"]) == {
-        "main",
-        "stream_prefill",
-        "stream_decode",
-        "session_prefill",
-        "session_decode",
-    }
+    assert built_models[1].streaming_frames == [0, 2, 107]
+    assert built_models[2].streaming_frames == [2, 2, 103]
+    assert set(result["graphs"]) == {"stream_prefill", "stream_decode"}
     assert result["stream_prefill_frames"] == 107
     assert result["stream_decode_frames"] == 103
-    assert result["session_prefill_frames"] == 100
-    assert result["session_decode_frames"] == 100
     assert result["num_hidden_layers"] == 24
     assert result["kv_cache_shape"] == [1, 16, 1500, 64]
     assert result["cache_capacity"] == 1500
     assert result["audio_encoder_layer"] == -1
-    assert result["selected_hidden_state_index"] == -1
     assert result["prefix_overlap_first"] == 0
     assert result["prefix_overlap_later"] == 2
     assert result["suffix_overlap"] == 2
     assert result["pool_step"] == 5
     expected_inputs = [
         "input_features",
-        "valid_mel_length",
         "past_seq_length",
         "current_input_length",
         "attention_mask",
@@ -256,41 +234,12 @@ def test_audio_export_records_offline_and_streaming_graph_contracts(tmp_path, mo
         *(f"past_k_cache_{index}" for index in range(24)),
         *(f"past_v_cache_{index}" for index in range(24)),
     ]
-    expected_outputs = ["audio_hidden_states"] + [
-        *(f"present_k_cache_{index}" for index in range(24)),
-        *(f"present_v_cache_{index}" for index in range(24)),
-    ]
     assert result["graph_contracts"]["stream_prefill"] == {
         "input_names": expected_inputs,
-        "output_names": expected_outputs,
         "prefix_overlap": 0,
         "suffix_overlap": 2,
-        "current_length_rule": "ceil(valid_mel_length / 2) - ceil(prefix_overlap / 2) - ceil(suffix_overlap / 2)",
-        "cache_capacity": 1500,
-        "kv_cache_shape": [1, 16, 1500, 64],
-        "selected_hidden_state_index": -1,
-        "projection_in_graph": True,
-        "pooling_in_graph": True,
     }
     assert result["graph_contracts"]["stream_decode"]["prefix_overlap"] == 2
-    assert result["graph_contracts"]["session_prefill"]["prefix_overlap"] == 0
-    assert result["graph_contracts"]["session_prefill"]["suffix_overlap"] == 0
-    assert result["graph_contracts"]["session_decode"]["prefix_overlap"] == 0
-    assert result["graph_contracts"]["session_decode"]["suffix_overlap"] == 0
-    for role in ("session_prefill", "session_decode"):
-        assert result["graph_contracts"][role] == {
-            "input_names": expected_inputs,
-            "output_names": expected_outputs,
-            "prefix_overlap": 0,
-            "suffix_overlap": 0,
-            "current_length_rule": "ceil(valid_mel_length / 2)",
-            "cache_capacity": 1500,
-            "kv_cache_shape": [1, 16, 1500, 64],
-            "selected_hidden_state_index": -1,
-            "projection_in_graph": True,
-            "pooling_in_graph": True,
-            "output_valid_region": "audio_hidden_states[:, :(current_input_length - pool_step) // pool_step + 1, :]",
-        }
 
 
 def test_production_streaming_attention_onnx_cache_outputs_depend_on_past_and_projection(tmp_path) -> None:
@@ -396,14 +345,13 @@ def test_streaming_export_adapter_exposes_flat_cache_inputs() -> None:
         def forward_streaming(
             self,
             input_features,
-            valid_mel_length,
             past_seq_length,
             current_input_length,
             attention_mask,
             past_key_caches,
             past_value_caches,
         ):
-            del valid_mel_length, past_seq_length, current_input_length, attention_mask
+            del past_seq_length, current_input_length, attention_mask
             return (
                 input_features,
                 *past_key_caches,
@@ -416,7 +364,6 @@ def test_streaming_export_adapter_exposes_flat_cache_inputs() -> None:
 
     outputs = adapter(
         torch.ones((1, 80, 7)),
-        torch.tensor([7], dtype=torch.int32),
         torch.tensor([0], dtype=torch.int32),
         torch.tensor([3], dtype=torch.int32),
         torch.zeros((1, 1, 3, 8)),
@@ -441,7 +388,6 @@ def test_streaming_export_adapter_has_named_cache_placeholders() -> None:
 
     assert parameters == [
         "input_features",
-        "valid_mel_length",
         "past_seq_length",
         "current_input_length",
         "attention_mask",

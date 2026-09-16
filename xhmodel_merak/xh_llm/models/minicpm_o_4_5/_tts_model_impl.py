@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import transformers
 from torch import Tensor
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -316,8 +317,18 @@ class _LlamaModel(DynamicModule):
         past_key_cache: Optional[List[Tensor]] = None,
         past_value_cache: Optional[List[Tensor]] = None,
         attention_mask: Optional[Tensor] = None,
+        semantic_hidden_states: Optional[Tensor] = None,
+        semantic_mask: Optional[Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         hidden_states = inputs_embeds
+
+        if semantic_hidden_states is not None:
+            projected = self.semantic_projector(semantic_hidden_states)
+            if self.normalize_projected_hidden:
+                projected = F.normalize(projected, p=2, dim=-1)
+            if semantic_mask is not None:
+                projected = projected * semantic_mask
+            hidden_states = hidden_states + projected
 
         cos = self.cos_slice(self.rotary_emb.cos_cached, past_seq_length)
         sin = self.sin_slice(self.rotary_emb.sin_cached, past_seq_length)
@@ -351,6 +362,7 @@ class _LlamaModel(DynamicModule):
         else:
             hidden_states = self.llm_gather(hidden_states, current_input_length - 1)
         hidden_states = self.norm(hidden_states)
+        hidden_states = self.audio_code_head(hidden_states)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,

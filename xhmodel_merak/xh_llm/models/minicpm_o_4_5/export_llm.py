@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
-import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import torch
 
-from .export_common import build_component_model, quantize_and_export
+from .export_common import build_component_model, quantize_and_export, write_standard_decoder_metadata
 from .resource_path import resolve_repo_resource
 
 
@@ -61,84 +59,6 @@ def _load_llm_calibration_prompts(component_cfg: Mapping[str, Any]) -> tuple[lis
         "sample_count": len(prompts),
         "text_sha256": text_sha256,
     }
-
-
-def _file_md5(path: Path) -> str:
-    """Compute the md5 of a file, mirroring xh_llm's calculate_file_md5."""
-    digest = hashlib.md5()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _write_golden_meta_info(
-    export_dir: Path,
-    model_dir: str,
-    prefill_graph: Path,
-    decode_graph: Path,
-    *,
-    prefill_chunk_length: int,
-    num_hidden_layers: int,
-    kv_cache_shape: list[int],
-    pad_token_id: int,
-    target_device: str,
-) -> dict[str, Any]:
-    """Write a standard :class:`LLMModelMeta` child artifact.
-
-    This is deliberately the same metadata boundary consumed by
-    ``BaseLLMHMONNXModel`` in QwenVL and MiniCPM-V4.6.  The former MiniCPM-o
-    export wrote only paths and checksums here, then duplicated the cache
-    contract in the root metadata.  Keeping the contract in the child artifact
-    lets a shared LLM runtime own sessions and ``KVCacheMixin`` directly.
-    """
-    hf_config_dir = export_dir / "hf_config"
-    hf_config_dir.mkdir(parents=True, exist_ok=True)
-    model_root = Path(model_dir)
-    for cfg_file in sorted(model_root.glob("*.json")) + sorted(model_root.glob("*.jinja")):
-        if cfg_file.name.endswith(".safetensors.index.json"):
-            continue
-        shutil.copyfile(cfg_file, hf_config_dir / cfg_file.name)
-    quant_embedding = export_dir / "quant_embedding.pt"
-
-    def rel(path: Path) -> str:
-        return str(path.relative_to(export_dir))
-
-    meta = {
-        "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
-        "model_name": export_dir.name,  # hmquant_<model_name>_<date>
-        "model_config": {
-            "model_name": export_dir.name,
-            "chip_arch": target_device,
-            "model_type": "MiniCPMO45LLMModel",
-            "hf_model": str(model_dir),
-            "batch_size": int(kv_cache_shape[0]),
-            "context_max_length": int(kv_cache_shape[2]),
-            "prefill_chunk_length": int(prefill_chunk_length),
-            "num_logits_to_keep": 1,
-            "use_cache": True,
-        },
-        "hf_config": str(hf_config_dir.relative_to(export_dir)),
-        "quant_embedding": rel(quant_embedding),
-        "quant_embedding_md5": _file_md5(quant_embedding),
-        "kv_cache": {
-            "num_layers": int(num_hidden_layers),
-            "kv_cache_shape": list(kv_cache_shape),
-            "cache_axis": 2,
-            "batch_size": int(kv_cache_shape[0]),
-            "cache_dtype": "float16",
-            "use_cache": True,
-        },
-        "prefill_hmonnx": rel(prefill_graph),
-        "prefill_hmonnx_md5": _file_md5(prefill_graph),
-        "decode_hmonnx": rel(decode_graph),
-        "decode_hmonnx_md5": _file_md5(decode_graph),
-        "pad_token_id": int(pad_token_id),
-        "meta": {"class_name": "LLMModelMeta"},
-    }
-    meta_file = export_dir / "golden_meta_info.json"
-    meta_file.write_text(json.dumps(meta, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
-    return meta
 
 
 def _load_gptq_llm_weights(host: Any, gptq_model_dir: Path) -> None:
@@ -214,22 +134,18 @@ def export_minicpm_o_4_5_llm(
     export_file_stem: str | None = None,
     gptq_llm_model_dir: str | None = None,
 ) -> dict[str, Any]:
-    # xh_llm layout: <component_dir>/hmquant_<model_name>_<date>/prefill|decode/
-    # The workflow passes both the dated directory name and the stable file
-    # stem, mirroring the xh_llm naming convention without inferring one from
-    # the other.
     export_dir_name = export_basename or f"hmquant_{Path(model_dir).name.lower()}"
     file_stem = export_file_stem or export_dir_name
-    export_dir = work_dir / "LLM" / export_dir_name
-    prefill_dir = export_dir / "prefill"
-    decode_dir = export_dir / "decode"
+    export_dir = work_dir / "metadata"
+    prefill_dir = work_dir / "prefill"
+    decode_dir = work_dir / "decode"
     prefill_dir.mkdir(parents=True, exist_ok=True)
     decode_dir.mkdir(parents=True, exist_ok=True)
     model = build_component_model(model_dir, component_cfg)
     host = model.get_hf_model(device_map="cpu")
     if gptq_llm_model_dir is not None:
         _load_gptq_llm_weights(host, Path(gptq_llm_model_dir))
-    token_embedding_file = export_dir / "quant_embedding.pt"
+    token_embedding_file = work_dir / "quant_embedding.pt"
     token_embedding_file.parent.mkdir(parents=True, exist_ok=True)
     torch.save(host.llm.get_input_embeddings().state_dict(), token_embedding_file)
     model.init_wrap_model(host)
@@ -280,22 +196,24 @@ def export_minicpm_o_4_5_llm(
         )[0]
     )
     cache_shape = list(model.past_key_caches[0].shape)
-    golden_meta = _write_golden_meta_info(
-        export_dir,
-        model_dir,
-        prefill_graph,
-        decode_graph,
+    write_standard_decoder_metadata(
+        export_dir / "llm_meta_info.json",
+        model_dir=model_dir,
+        artifact_name=export_dir_name,
+        model_type="MiniCPMO45LLMModel",
+        target_device=target_device,
+        prefill_graph=prefill_graph,
+        decode_graph=decode_graph,
         prefill_chunk_length=prefill_length,
         num_hidden_layers=len(model.past_key_caches),
         kv_cache_shape=cache_shape,
         pad_token_id=int(model.pad_token_id),
-        target_device=target_device,
+        token_embedding_file=token_embedding_file,
     )
     return {
         "quant_type": component_cfg["quant_type"],
-        "artifact_dir": str(export_dir.relative_to(work_dir)),
-        "metadata": str((export_dir / "golden_meta_info.json").relative_to(work_dir)),
-        "golden_meta_info": {key: value for key, value in golden_meta.items() if key != "model_name"},
+        "artifact_dir": ".",
+        "metadata": str((export_dir / "llm_meta_info.json").relative_to(work_dir)),
         "graphs": {
             "prefill": str(prefill_graph.relative_to(work_dir)),
             "decode": str(decode_graph.relative_to(work_dir)),

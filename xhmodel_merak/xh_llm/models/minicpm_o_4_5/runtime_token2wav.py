@@ -24,6 +24,7 @@ from .runtime_token2wav_ops import (
     prepare_flow_frontend_inputs,
     prepare_hift_input,
     run_cfm,
+    run_hift_stft_on_cpu,
 )
 from .runtime_token2wav_streaming import (
     FLOW_CACHE_AXES,
@@ -62,6 +63,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         enable_auto_offload: bool = False,
         enable_golden: bool = False,
         device_map: str | torch.device | list[str | torch.device] | None = None,
+        noise_seed: int | None = None,
     ) -> None:
         super().__init__(device_map=device_map)
 
@@ -77,45 +79,77 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         frontend_meta = components["token2wav_flow_frontend"]
         decoder_meta = components["token2wav_flow_decoder"]
         hift_meta = components["token2wav_hift"]
-        self.frontend_session = graph(root / str(frontend_meta["graphs"]["main"]))
-        self.decoder_session = graph(root / str(decoder_meta["graphs"]["main"]))
-        self.hift_session = graph(root / str(hift_meta["graphs"]["main"]))
+        export_mode = str(frontend_meta["export_mode"])
+        self.frontend_session = None
+        self.decoder_session = None
+        self.hift_part1_session = None
+        self.hift_part2_session = None
+        offline_roles = export_mode == "offline"
+        if offline_roles:
+            self.frontend_session = graph(root / str(frontend_meta["graphs"]["main"]))
+            self.decoder_session = graph(root / str(decoder_meta["graphs"]["main"]))
+            self.hift_part1_session = graph(root / str(hift_meta["graphs"]["part1"]))
+            self.hift_part2_session = graph(root / str(hift_meta["graphs"]["part2"]))
         self.token_capacity = int(frontend_meta["token_capacity"])
         self.mel_capacity = int(frontend_meta["mel_capacity"])
         self.up_rate = int(frontend_meta["up_rate"])
         self.hift_frame_capacity = int(hift_meta["frame_capacity"])
-        self.hift_phase_noise = torch.load(
-            root / str(hift_meta["phase_noise_file"]),
-            map_location="cpu",
-            weights_only=True,
-        ).to(torch.float16)
-        self.hift_source_noise = torch.load(
-            root / str(hift_meta["source_noise_file"]),
-            map_location="cpu",
-            weights_only=True,
-        ).to(torch.float16)
-        self.n_timesteps = int(decoder_meta.get("n_timesteps", 10))
-        self.cfg_rate = float(decoder_meta.get("cfg_rate", 0.7))
-        self.rand_noise = torch.load(
-            root / str(decoder_meta["rand_noise_file"]),
-            map_location="cpu",
-            weights_only=True,
-        ).to(torch.float16)
+        stft_meta = hift_meta["stft"]
+        self._hift_stft_n_fft = int(stft_meta["n_fft"])
+        self._hift_stft_hop_length = int(stft_meta["hop_length"])
+        self._flow_noise_shape = tuple(int(item) for item in decoder_meta["noise_shape"])
+        self._noise_generator = torch.Generator(device="cpu")
+        if noise_seed is None:
+            self._noise_generator.seed()
+        else:
+            self._noise_generator.manual_seed(noise_seed)
+        self._noise_device = torch.device("cpu")
+        self._offline_hift_enabled = offline_roles
+        self._hift_harmonic_count = int(hift_meta["harmonic_count"])
+        self._hift_source_length = int(hift_meta["source_length"])
+        self.rand_noise = None
+        self.hift_phase_noise = None
+        self.hift_source_noise = None
+        self.n_timesteps = int(decoder_meta["n_timesteps"])
+        self.cfg_rate = float(decoder_meta["cfg_rate"])
         self.report = Token2WavExecutionReport()
         self._base_flow_cache: dict[str, Tensor] | None = None
         self._stream_state: StreamState | None = None
-        speaker = components.get("speaker")
-        if isinstance(speaker, Mapping):
-            graphs = speaker.get("graphs") or {}
-            campplus_path = graphs.get("campplus")
-            if campplus_path:
-                self.campplus_session = graph(root / str(campplus_path))
-                self.campplus_sequence_length = int(speaker.get("sequence_length", 1000))
-            tokenizer_path = graphs.get("speech_tokenizer")
-            if tokenizer_path:
-                self.speech_tokenizer_session = graph(root / str(tokenizer_path))
-                self.speech_tokenizer_feats_length = int(speaker.get("feats_length", 3000))
-        self._load_streaming_roles(root, components, graph)
+        self.speech_window = None
+        speaker = components["speaker"]
+        self.campplus_session = graph(root / str(speaker["graphs"]["campplus"]))
+        self.campplus_sequence_length = int(speaker["sequence_length"])
+        self.speech_tokenizer_session = graph(root / str(speaker["graphs"]["speech_tokenizer"]))
+        self.speech_tokenizer_feats_length = int(speaker["feats_length"])
+        self.streaming_enabled = export_mode in {"session", "stream"}
+        if self.streaming_enabled:
+            self._load_streaming_roles(root, components, graph)
+        self._regenerate_noise()
+
+    def _create_hift_noise(self, harmonic_count: int, source_length: int) -> tuple[Tensor, Tensor]:
+        phase_noise = torch.rand((1, harmonic_count), generator=self._noise_generator)
+        phase_noise[:, 0] = 0
+        source_noise = torch.randn((1, source_length, harmonic_count), generator=self._noise_generator)
+        return (
+            phase_noise.to(device=self._noise_device, dtype=torch.float16),
+            source_noise.to(device=self._noise_device, dtype=torch.float16),
+        )
+
+    def _regenerate_noise(self) -> None:
+        self.rand_noise = torch.randn(self._flow_noise_shape, generator=self._noise_generator).to(
+            device=self._noise_device,
+            dtype=torch.float16,
+        )
+        if self._offline_hift_enabled:
+            self.hift_phase_noise, self.hift_source_noise = self._create_hift_noise(
+                self._hift_harmonic_count,
+                self._hift_source_length,
+            )
+        if self.streaming_enabled:
+            self.stream_hift_phase_noise, self.stream_hift_source_noise = self._create_hift_noise(
+                self._stream_hift_harmonic_count,
+                self._stream_hift_source_length,
+            )
 
     def _load_streaming_roles(
         self,
@@ -123,71 +157,47 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         components: Mapping[str, Mapping[str, object]],
         graph: Callable[[Path], HMONNXModel],
     ) -> None:
-        frontend = components["token2wav_flow_frontend"].get("stream_contract")
-        decoder = components["token2wav_flow_decoder"].get("stream_contract")
-        hift = components["token2wav_hift"].get("stream_contract")
-        if not isinstance(frontend, Mapping) or not isinstance(decoder, Mapping):
-            raise RuntimeError("missing Token2Wav stream Flow metadata")
-        if not isinstance(hift, Mapping):
-            raise RuntimeError("missing Token2Wav stream HiFT metadata")
-        role_paths = {
-            "stream_flow_frontend": components["token2wav_flow_frontend"].get("graphs", {}).get("stream_flow_frontend"),
-            "stream_flow_frontend_final": components["token2wav_flow_frontend"]
-            .get("graphs", {})
-            .get("stream_flow_frontend_final"),
-            "stream_flow_estimator_step": components["token2wav_flow_decoder"]
-            .get("graphs", {})
-            .get("stream_flow_estimator_step"),
-            "stream_hift": components["token2wav_hift"].get("graphs", {}).get("stream_hift"),
-            "stream_hift_final": components["token2wav_hift"].get("graphs", {}).get("stream_hift_final"),
-        }
-        missing_roles = [name for name, path in role_paths.items() if not isinstance(path, str)]
-        if missing_roles:
-            raise RuntimeError(f"missing Token2Wav graph roles: {', '.join(missing_roles)}")
+        frontend = components["token2wav_flow_frontend"]["stream_contract"]
+        decoder = components["token2wav_flow_decoder"]["stream_contract"]
+        hift = components["token2wav_hift"]["stream_contract"]
         self.flow_frontend_session = graph(
             root / str(components["token2wav_flow_frontend"]["graphs"]["stream_flow_frontend"])
-        )
-        self.flow_frontend_final_session = graph(
-            root / str(components["token2wav_flow_frontend"]["graphs"]["stream_flow_frontend_final"])
         )
         self.estimator_step_session = graph(
             root / str(components["token2wav_flow_decoder"]["graphs"]["stream_flow_estimator_step"])
         )
-        self.hift_stream_session = graph(root / str(components["token2wav_hift"]["graphs"]["stream_hift"]))
-        self.hift_stream_final_session = graph(root / str(components["token2wav_hift"]["graphs"]["stream_hift_final"]))
+        self.hift_stream_part1_session = graph(root / str(components["token2wav_hift"]["graphs"]["stream_hift_part1"]))
+        self.hift_stream_part2_session = graph(root / str(components["token2wav_hift"]["graphs"]["stream_hift_part2"]))
         self.stream_flow_meta = frontend
         self.stream_estimator_meta = decoder
         self.stream_hift_meta = hift
-        self.stream_hift_phase_noise = torch.load(
-            root / str(hift["phase_noise_file"]), map_location="cpu", weights_only=True
-        ).to(torch.float16)
-        self.stream_hift_source_noise = torch.load(
-            root / str(hift["source_noise_file"]), map_location="cpu", weights_only=True
-        ).to(torch.float16)
+        self._stream_hift_harmonic_count = int(hift["harmonic_count"])
+        self._stream_hift_source_length = int(hift["source_length"])
+        self.stream_hift_phase_noise = None
+        self.stream_hift_source_noise = None
         self.pre_lookahead_len = int(frontend["pre_lookahead_len"])
         self.chunk_token_capacity = int(frontend["chunk_token_capacity"])
-        self.append_capacity = int(decoder.get("append_capacity", 56))
+        self.append_capacity = int(decoder["append_capacity"])
         self.base_conformer_layers = int(frontend["base_conformer_layers"])
-        if frontend.get("cache_alignment") != "right":
-            raise RuntimeError("Token2Wav fixed attention caches must use right alignment")
         self.stream_tail_frames = int(decoder["prompt_cache_policy"]["recent_mel_frames"])
-        self.host_timestep_cache_banks = int(decoder.get("host_timestep_cache_banks", 10))
+        self.host_timestep_cache_banks = int(decoder["host_timestep_cache_banks"])
         self.source_cache_length = int(hift["source_cache_length"])
         self.speech_cache_length = int(hift["speech_cache_length"])
-        self.hift_hop_length = int(components["token2wav_hift"].get("hop_length", 480))
+        self.hift_hop_length = int(components["token2wav_hift"]["hop_length"])
         self.speech_window = torch.from_numpy(np.hamming(self.speech_cache_length * 2)).float()
         self._base_flow_cache = None
 
     def _set_device(self, device: torch.device):
         super()._set_device(device)
-        self.hift_phase_noise = self.hift_phase_noise.to(device)
-        self.hift_source_noise = self.hift_source_noise.to(device)
-        if getattr(self, "stream_hift_phase_noise", None) is not None:
-            self.stream_hift_phase_noise = self.stream_hift_phase_noise.to(device)
-        if getattr(self, "stream_hift_source_noise", None) is not None:
-            self.stream_hift_source_noise = self.stream_hift_source_noise.to(device)
+        self._noise_device = device
         self.rand_noise = self.rand_noise.to(device)
-        self.speech_window = self.speech_window.to(device)
+        if self._offline_hift_enabled:
+            self.hift_phase_noise = self.hift_phase_noise.to(device)
+            self.hift_source_noise = self.hift_source_noise.to(device)
+        if self.streaming_enabled:
+            self.stream_hift_phase_noise = self.stream_hift_phase_noise.to(device)
+            self.stream_hift_source_noise = self.stream_hift_source_noise.to(device)
+            self.speech_window = self.speech_window.to(device)
         if self._base_flow_cache is not None:
             self._base_flow_cache = {name: value.to(device) for name, value in self._base_flow_cache.items()}
         if self._stream_state is not None:
@@ -204,7 +214,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
     def _run_flow_role(self, tokens: Tensor, embedding: Tensor, final: bool) -> Tensor:
         if self._stream_state is None:
             raise RuntimeError("Token2Wav streaming cache is not initialized")
-        session = self.flow_frontend_final_session if final else self.flow_frontend_session
+        session = self.flow_frontend_session
         if session is None or self.estimator_step_session is None:
             raise RuntimeError("Token2Wav streaming Flow roles are unavailable")
         meta = self.stream_flow_meta
@@ -233,6 +243,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         inputs = (
             tokens.to(torch.int32),
             torch.tensor([token_valid_length], dtype=torch.int32, device=tokens.device),
+            torch.tensor([int(final)], dtype=torch.int32, device=tokens.device),
             embedding.to(torch.float16),
             cnn_cache.to(torch.float16),
             pack_conformer_attention_cache(
@@ -284,10 +295,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         )
         self._stream_state.flow_cache["conformer_att_cache"] = compact_present_att
         self._stream_state.flow_valid_lengths["conformer_att_cache"] = int(compact_present_att.shape[3])
-        role_meta = meta["roles"]["stream_flow_frontend_final" if final else "stream_flow_frontend"]
-        if not isinstance(role_meta, Mapping):
-            raise RuntimeError("streaming frontend role metadata is malformed")
-        output_mel_capacity = int(role_meta["output_mel_capacity"])
+        output_mel_capacity = int(meta["output_mel_capacities"]["final" if final else "normal"])
         if current_mel_length > output_mel_capacity:
             raise RuntimeError(f"Token2Wav mel length {current_mel_length} exceeds role capacity {output_mel_capacity}")
         mu = mu[:, :, :current_mel_length]
@@ -341,11 +349,8 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         return mel
 
     def _run_hift_graph(self, mel: Tensor, cache_source: Tensor, final: bool) -> tuple[Tensor, Tensor]:
-        session = self.hift_stream_final_session if final else self.hift_stream_session
-        if session is None:
-            raise RuntimeError("Token2Wav streaming HiFT roles are unavailable")
-        if self.stream_hift_phase_noise.device != mel.device or self.stream_hift_source_noise.device != mel.device:
-            raise RuntimeError("Token2Wav HiFT noise is on a different device than graph inputs")
+        part1_session = self.hift_stream_part1_session
+        part2_session = self.hift_stream_part2_session
         frame_capacity = int(self.stream_hift_meta["frame_capacity"])
         mel_cache_length = int(self.stream_hift_meta["mel_cache_length"])
         source_cache_length = int(self.stream_hift_meta["source_cache_length"])
@@ -376,16 +381,17 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
             self.stream_hift_phase_noise.to(mel.device),
             self.stream_hift_source_noise.to(mel.device),
         )
-        values = _values(session(*inputs))
-        if len(values) != 2:
-            raise RuntimeError(f"Token2Wav stream HiFT returned {len(values)} tensors, expected 2")
-        raw_waveform, full_source = values
-        if raw_waveform.dtype != graph_dtype or full_source.dtype != graph_dtype:
-            raise RuntimeError("Token2Wav stream HiFT output dtype mismatch")
-        if raw_waveform.device != mel.device or full_source.device != mel.device:
-            raise RuntimeError("Token2Wav stream HiFT output device mismatch")
+        prepared_speech_feat, full_source = _values(part1_session(*inputs))
+        source_stft = run_hift_stft_on_cpu(
+            full_source,
+            n_fft=self._hift_stft_n_fft,
+            hop_length=self._hift_stft_hop_length,
+            target_device=mel.device,
+            target_dtype=graph_dtype,
+        )
+        (raw_waveform,) = _values(part2_session(prepared_speech_feat, source_stft))
         logical_mel_length = past_mel_length + current_mel_length
-        logical_sample_length = logical_mel_length * int(getattr(self, "hift_hop_length", 480))
+        logical_sample_length = logical_mel_length * self.hift_hop_length
         if logical_sample_length > raw_waveform.shape[1] or logical_sample_length > full_source.shape[2]:
             raise RuntimeError("Token2Wav logical HiFT output exceeds fixed graph capacity")
         self.report.record_stream_hift(final)
@@ -450,6 +456,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
 
     def reset_state(self) -> None:
         self.reset_stream_cache()
+        self._regenerate_noise()
 
     def bridge_official_init(self, result: object) -> None:
         if not isinstance(result, Mapping):
@@ -546,6 +553,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         self._require_prompt_within_stream_capacity(base_cache)
         if prompt_mel_length < 0:
             raise RuntimeError("prompt mel length must be non-negative")
+        self._regenerate_noise()
         self._base_flow_cache = {name: value.detach().clone() for name, value in base_cache.items()}
         att_capacity = self._stream_att_capacity()
         self._stream_state = StreamState.from_base_cache(
@@ -641,11 +649,24 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
 
     def hift_inference(self, speech_feat: Tensor) -> Tensor:
         mel_frames = int(speech_feat.shape[2])
-        output = self.hift_session(
-            prepare_hift_input(speech_feat, frame_capacity=self.hift_frame_capacity).to(torch.float16),
+        prepared_speech_feat = prepare_hift_input(
+            speech_feat,
+            frame_capacity=self.hift_frame_capacity,
+        ).to(torch.float16)
+        source = self.hift_part1_session(
+            prepared_speech_feat,
             self.hift_phase_noise.to(speech_feat.device),
             self.hift_source_noise.to(speech_feat.device),
         )
+        source = source if isinstance(source, Tensor) else source[0]
+        source_stft = run_hift_stft_on_cpu(
+            source,
+            n_fft=self._hift_stft_n_fft,
+            hop_length=self._hift_stft_hop_length,
+            target_device=speech_feat.device,
+            target_dtype=torch.float16,
+        )
+        output = self.hift_part2_session(prepared_speech_feat, source_stft)
         self.report.record_hift()
         waveform = output if isinstance(output, Tensor) else output[0]
         return crop_hift_waveform(waveform, mel_frames=mel_frames)

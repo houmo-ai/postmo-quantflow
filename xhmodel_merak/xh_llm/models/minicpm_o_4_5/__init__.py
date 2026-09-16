@@ -25,6 +25,7 @@ from .runtime import (
     STREAMING_CASE_SESSION_AUDIO_TEXT,
     STREAMING_CASES,
     MiniCPMO45HMONNXRuntime,
+    require_export_mode,
 )
 from .runtime_audio import MiniCPMO45AudioHMONNXRuntime
 from .runtime_llm import MiniCPMO45LLMHMONNXRuntime
@@ -62,4 +63,5 @@ __all__ = [
     "patch_remote_cache_helpers",
     "patch_speech_generation_capture",
     "patch_tts_cache_position_compat",
+    "require_export_mode",
 ]

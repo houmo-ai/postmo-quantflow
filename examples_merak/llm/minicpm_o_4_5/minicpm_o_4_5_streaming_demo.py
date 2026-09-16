@@ -15,6 +15,7 @@ from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import (
     ensure_tts_sampling_config,
     patch_audio_attention_return_compat,
     patch_dynamic_cache_seen_tokens,
+    require_export_mode,
 )
 from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_fixtures import (
     CERTIFIED_STREAMING_CASES,
@@ -137,8 +138,9 @@ def _build_real_runtime(args: argparse.Namespace) -> tuple[StreamingHost, Any, A
     work_dir = Path(args.work_dir)
     if not model_dir.is_dir():
         raise FileNotFoundError(f"model directory not found: {model_dir}")
-    if not (work_dir / "export_meta_info.json").is_file():
-        raise FileNotFoundError(f"exported HMONNX artifacts missing under work-dir: {work_dir}")
+    case = resolve_case(args.case)
+    expected_mode = "session" if case.api_family == "session" else "stream"
+    require_export_mode(work_dir, expected_mode, operation=f"streaming demo case {case.name}")
     _use_exec_device_as_default(args.exec_device)
     import torch
     from transformers import AutoConfig, AutoModel, AutoTokenizer, DynamicCache

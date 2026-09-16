@@ -50,11 +50,9 @@ def _runtime_with_fake_sessions():
 
     def session(role: str):
         def run(*inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-            valid_mel_length = int(inputs[1].item())
-            past_length = int(inputs[2].item())
-            calls.append((role, valid_mel_length, past_length))
-            prefix = runtime.prefix_overlap_first if role == "stream_prefill" else runtime.prefix_overlap_later
-            current_length = (valid_mel_length + 1) // 2 - (prefix + 1) // 2 - (runtime.suffix_overlap + 1) // 2
+            past_length = int(inputs[1].item())
+            current_length = int(inputs[2].item())
+            calls.append((role, past_length, current_length))
             embeddings = torch.arange(20, dtype=torch.float16).reshape(1, 4, 5)
             present_length = past_length + current_length
             present_keys = tuple(
@@ -96,7 +94,7 @@ def test_forward_streaming_routes_first_then_later_chunks_and_advances_cache() -
         past_key_values=first.past_key_values,
     )
 
-    assert calls == [("stream_prefill", 7, 0), ("stream_decode", 6, 3)]
+    assert calls == [("stream_prefill", 0, 3), ("stream_decode", 3, 1)]
     assert runtime.streaming_cache_length == 4
     assert isinstance(first, BaseModelOutputWithPast)
     assert first.last_hidden_state.shape == (1, 1, 5)
@@ -115,10 +113,9 @@ def test_forward_streaming_routes_session_geometry_without_extra_context() -> No
 
     def session(role: str):
         def run(*inputs: torch.Tensor) -> tuple[torch.Tensor, ...]:
-            valid_mel_length = int(inputs[1].item())
-            past_length = int(inputs[2].item())
-            calls.append((role, valid_mel_length, past_length))
-            current_length = int(inputs[3].item())
+            past_length = int(inputs[1].item())
+            current_length = int(inputs[2].item())
+            calls.append((role, past_length, current_length))
             embeddings = torch.arange(20, dtype=torch.float16).reshape(1, 4, 5)
             present_keys = tuple(
                 torch.full(runtime.kv_cache_shape, float(index + 1), dtype=torch.float16)
@@ -148,7 +145,7 @@ def test_forward_streaming_routes_session_geometry_without_extra_context() -> No
         use_extra_context=False,
     )
 
-    assert calls == [("session_prefill", 5, 0), ("session_decode", 5, 3)]
+    assert calls == [("session_prefill", 0, 3), ("session_decode", 3, 3)]
     assert runtime.streaming_cache_length == 6
 
 
@@ -273,17 +270,6 @@ def test_set_exec_device_moves_native_audio_projection_modules() -> None:
     assert moves == ["cuda:0", "cuda:0", "cuda:0"]
 
 
-def test_runtime_accepts_offline_only_audio_metadata_and_rejects_streaming_clearly() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_audio import MiniCPMO45AudioHMONNXRuntime
-
-    runtime = object.__new__(MiniCPMO45AudioHMONNXRuntime)
-    runtime.stream_prefill_session = None
-    runtime.stream_decode_session = None
-    runtime.streaming_enabled = False
-    with pytest.raises(RuntimeError, match="metadata/graphs"):
-        runtime.forward_streaming(torch.ones((1, 80, 7), dtype=torch.float16), valid_mel_length=7)
-
-
 def test_official_audio_method_keeps_full_signature_and_resets_at_capacity() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.hf_compatible import (
         create_audio_wraped_cls,
@@ -352,7 +338,7 @@ def test_official_audio_method_keeps_full_signature_and_resets_at_capacity() -> 
     )
 
     assert received == [(True, 2, 2, 9)]
-    assert calls[-1] == ("stream_decode", 6, 0)
+    assert calls[-1] == ("stream_decode", 0, 1)
     assert runtime.streaming_cache_length == 1
     assert result[0][0].shape == (1, 1, 5)
 

@@ -90,8 +90,13 @@ PYTHONPATH=$PWD python \
 `work_dirs/minicpm_o_4_5_xh2a_w4a8_gptq_export`。
 
 导出物仍需原始模型目录中的 processor、tokenizer、remote code 和 Token2Wav assets。
-Audio Offline 对超过静态 batch 容量的长音频会分块执行并按原顺序拼接；流式 Audio 使用独立
-session 图。
+`export.mode` 决定导出的运行模式：
+
+- `offline`：非流式 `chat`；
+- `session`：`streaming_prefill` / `streaming_generate`；
+- `stream`：Duplex。
+
+默认导出 `offline`，可通过 `--export-mode session` 或 `--export-mode stream` 选择其他模式。
 
 ## HMONNX Demo
 
@@ -99,7 +104,7 @@ session 图。
 PYTHONPATH=$PWD python \
   examples_merak/llm/minicpm_o_4_5/minicpm_o_4_5_hmonnx_demo.py \
   --model-dir /path/to/MiniCPM-o-4_5 \
-  --work-dir work_dirs/minicpm_o_4_5_xh2a_w8a8_gptq_export \
+  --work-dir work_dirs/minicpm_o_4_5_xh2a_w4a8_gptq_export \
   --video /path/to/video.mp4 \
   --exec-device cuda:0
 ```
@@ -109,15 +114,10 @@ PYTHONPATH=$PWD python \
 
 ## 流式 Demo
 
-流式入口支持以下固定用例：
+流式 demo 与导出模式的对应关系：
 
-```text
-session_audio_text
-session_audio_reply
-duplex_audio_text
-duplex_audio_reply
-duplex_omni_reply
-```
+- `session`：`session_audio_text`、`session_audio_reply`；
+- `stream`：`duplex_audio_text`、`duplex_audio_reply`、`duplex_omni_reply`。
 
 示例：
 
@@ -126,15 +126,13 @@ PYTHONPATH=$PWD python \
   examples_merak/llm/minicpm_o_4_5/minicpm_o_4_5_streaming_demo.py \
   --case session_audio_reply \
   --model-dir /path/to/MiniCPM-o-4_5 \
-  --work-dir work_dirs/minicpm_o_4_5_xh2a_w8a8_gptq_export \
+  --work-dir work_dirs/minicpm_o_4_5_xh2a_w4a8_gptq_export_session \
   --media /path/to/input.wav \
   --exec-device cuda:0 \
-  --require-full-hmonnx \
   --output-dir work_dirs/minicpm_o_4_5_streaming_demo
 ```
 
-Session 与 Duplex API 不能在同一会话中交错使用。流式 Token2Wav 的神经网络阶段只使用
-HMONNX 图，不提供 native fallback；固定容量不足时运行时会明确报错。
+`minicpm_o_4_5_hmonnx_demo.py` 使用 `offline` 产物。
 
 ## Golden
 

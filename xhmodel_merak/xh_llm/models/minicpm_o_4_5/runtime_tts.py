@@ -8,25 +8,19 @@ import torch
 from torch import Tensor, nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from ...hmonnx.hmonnx_model import HMONNXModel
 from ...types import LLMModelMeta
 from .runtime_text_decoder import MiniCPMO45FixedCacheTextLLMHMONNXModel, _load_decoder_child_meta
 
 
-class ProjectorSemanticGraph(nn.Module):
-    """nn.Module stand-in that routes ``tts.projector_semantic`` through HMONNX.
-
-    The official modeling code calls ``tts.projector_semantic(llm_hidden)``
-    (4096 -> 768) directly; this wrapper replaces the native module so those
-    calls execute the exported HMONNX small graph instead of host PyTorch.
-    """
-
+class DeferredProjectorSemantic(nn.Module):
     def __init__(self, runtime: MiniCPMO45TTSHMONNXRuntime) -> None:
         super().__init__()
-        self.runtime = runtime
+        object.__setattr__(self, "_runtime", runtime)
 
     def forward(self, hidden_states: Tensor) -> Tensor:
-        return self.runtime.project_semantic(hidden_states)
+        runtime = self._runtime
+        runtime.defer_semantic_hidden_states(hidden_states)
+        return hidden_states.new_zeros((*hidden_states.shape[:-1], runtime.tts_hidden_size))
 
 
 def _last_tts_decoder_output(outputs: Sequence[tuple[Tensor | Sequence[Tensor], int]]) -> Tensor | Sequence[Tensor]:
@@ -47,6 +41,14 @@ def _resolve_tts_meta(root: Path, component: dict[str, Any]) -> LLMModelMeta:
     ``LLMModelMeta`` contract as the LLM export.
     """
     return _load_decoder_child_meta(root, component)
+
+
+def _load_host_embedding(path: Path) -> nn.Embedding:
+    state = torch.load(path, map_location="cpu", weights_only=True)
+    weight = state["weight"]
+    embedding = nn.Embedding(weight.shape[0], weight.shape[1], dtype=weight.dtype)
+    embedding.load_state_dict(state)
+    return embedding
 
 
 class MiniCPMO45TTSHMONNXRuntime(MiniCPMO45FixedCacheTextLLMHMONNXModel, nn.Module):
@@ -79,87 +81,48 @@ class MiniCPMO45TTSHMONNXRuntime(MiniCPMO45FixedCacheTextLLMHMONNXModel, nn.Modu
             enable_golden=enable_golden,
             device_map=device_map,
         )
-        self.root = root
-        self._projection_hmonnx_options = {
-            "enable_golden": enable_golden,
-            "enable_cuda_graph": enable_cuda_graph,
-            "enable_auto_offload": enable_auto_offload,
-            "device_map": self._valid_devices,
-        }
-        self.projection_graphs = meta.get("projection_graphs") or {}
-        self._maybe_open_projection_graph("projector_semantic")
-        self._maybe_open_projection_graph("head_code")
-        self.projection_seq_capacity = int(meta.get("projection_seq_capacity", self.prefill_length))
+        self.semantic_hidden_size = int(meta["semantic_hidden_size"])
+        self.tts_hidden_size = int(meta["tts_hidden_size"])
+        self.text_embedding_path = root / str(meta["text_embedding"])
+        self.code_embedding_path = root / str(meta["code_embedding"])
+        self._pending_semantic_hidden_states: Tensor | None = None
+
+    def install_host_embeddings(self, tts_module: nn.Module) -> None:
+        text_embedding = _load_host_embedding(self.text_embedding_path)
+        code_embedding = _load_host_embedding(self.code_embedding_path)
+        tts_module.emb_text = text_embedding
+        tts_module.emb_code = nn.ModuleList([code_embedding])
 
     @staticmethod
     def _build_embed_tokens_from_meta(_meta: LLMModelMeta) -> nn.Embedding:
         """TTS uses caller-supplied embeddings; satisfy the shared base only."""
         return nn.Embedding(1, 1, dtype=torch.float16)
 
-    def _maybe_open_projection_graph(self, role: str):
-        path = self.projection_graphs.get(role)
-        if not path:
-            setattr(self, f"{role}_session", None)
-            return None
-        session = HMONNXModel(
-            str(self.root / path),
-            **self._projection_hmonnx_options,
+    def defer_semantic_hidden_states(self, hidden_states: Tensor) -> None:
+        if hidden_states.ndim == 2:
+            hidden_states = hidden_states.unsqueeze(0)
+        self._pending_semantic_hidden_states = hidden_states
+
+    def _take_semantic_inputs(self, inputs_embeds: Tensor) -> tuple[Tensor, Tensor]:
+        current_length = int(inputs_embeds.shape[1])
+        semantic = torch.zeros(
+            (inputs_embeds.shape[0], current_length, self.semantic_hidden_size),
+            dtype=inputs_embeds.dtype,
+            device=inputs_embeds.device,
         )
-        setattr(self, f"{role}_session", session)
-        return session
-
-    def project_semantic(self, hidden_states: Tensor) -> Tensor:
-        """LLM hidden (..., 4096) -> TTS hidden (..., 768) via the HMONNX graph.
-
-        Accepts either 3-D ``(1, seq, 4096)`` or 2-D ``(seq, 4096)`` inputs (the
-        official call site slices ``last_hidden_states[tts_bound[0]:tts_bound[1]]``
-        which drops the batch dim). Sequences longer than the exported capacity are
-        processed in capacity-sized chunks and concatenated, since the official
-        tts_bound span is unbounded.
-        """
-        if self.projector_semantic_session is None:
-            raise RuntimeError("TTS projector_semantic graph is not available in this artifact")
-        squeezed = hidden_states.ndim == 2
-        if squeezed:
-            hidden_states = hidden_states.unsqueeze(0)
-        batch, seq, _ = hidden_states.shape
-        capacity = self.projection_seq_capacity
-        chunks: list[Tensor] = []
-        for start in range(0, seq, capacity):
-            chunk = hidden_states[:, start : start + capacity]
-            padded = torch.nn.functional.pad(chunk, (0, 0, 0, capacity - chunk.shape[1]))
-            padded = padded.to(device=self.device, dtype=torch.float16)
-            projected = torch.as_tensor(self.projector_semantic_session(padded))
-            chunks.append(projected[:, : chunk.shape[1]])
-        projected = torch.cat(chunks, dim=1)
-        if squeezed:
-            projected = projected[0]
-        return projected
-
-    def project_head_code(self, hidden_states: Tensor) -> Tensor:
-        """TTS hidden (..., 768) -> audio code logits (..., 6562) via the HMONNX graph.
-
-        Accepts either 3-D ``(1, seq, 768)`` or 2-D ``(seq, 768)`` inputs.
-        Sequences longer than the exported capacity are chunked and concatenated.
-        """
-        if self.head_code_session is None:
-            raise RuntimeError("TTS head_code graph is not available in this artifact")
-        squeezed = hidden_states.ndim == 2
-        if squeezed:
-            hidden_states = hidden_states.unsqueeze(0)
-        batch, seq, _ = hidden_states.shape
-        capacity = self.projection_seq_capacity
-        chunks: list[Tensor] = []
-        for start in range(0, seq, capacity):
-            chunk = hidden_states[:, start : start + capacity]
-            padded = torch.nn.functional.pad(chunk, (0, 0, 0, capacity - chunk.shape[1]))
-            padded = padded.to(device=self.device, dtype=torch.float16)
-            logits = torch.as_tensor(self.head_code_session(padded))
-            chunks.append(logits[:, : chunk.shape[1]])
-        logits = torch.cat(chunks, dim=1)
-        if squeezed:
-            logits = logits[0]
-        return logits
+        mask = torch.zeros(
+            (inputs_embeds.shape[0], current_length, 1),
+            dtype=inputs_embeds.dtype,
+            device=inputs_embeds.device,
+        )
+        pending = self._pending_semantic_hidden_states
+        self._pending_semantic_hidden_states = None
+        if pending is None:
+            return semantic, mask
+        semantic_length = pending.shape[1]
+        semantic[:, :semantic_length].copy_(pending.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype))
+        mask[:, :semantic_length] = 1
+        return semantic, mask
 
     def __call__(self, **kwargs: Any) -> BaseModelOutputWithPast:
         return self.forward_hf(**kwargs)
@@ -172,6 +135,8 @@ class MiniCPMO45TTSHMONNXRuntime(MiniCPMO45FixedCacheTextLLMHMONNXModel, nn.Modu
         past_key_caches: Sequence[Tensor],
         past_value_caches: Sequence[Tensor],
         attention_mask: Tensor,
+        semantic_hidden_states: Tensor,
+        semantic_mask: Tensor,
     ) -> Tensor | Sequence[Tensor]:
         outputs = self.run_decoder_graph(
             inputs_embeds,
@@ -180,6 +145,7 @@ class MiniCPMO45TTSHMONNXRuntime(MiniCPMO45FixedCacheTextLLMHMONNXModel, nn.Modu
             past_key_caches=past_key_caches,
             past_value_caches=past_value_caches,
             attention_mask=attention_mask,
+            extra_sequence_inputs=(semantic_hidden_states, semantic_mask),
         )
         return _last_tts_decoder_output(outputs)
 
@@ -243,6 +209,7 @@ class MiniCPMO45TTSHMONNXRuntime(MiniCPMO45FixedCacheTextLLMHMONNXModel, nn.Modu
         value_caches = (
             self.past_value_caches if use_cache else [torch.zeros_like(value) for value in self.past_value_caches]
         )
+        semantic_hidden_states, semantic_mask = self._take_semantic_inputs(inputs_embeds)
         output = _last_tts_decoder_output(
             self.run_decoder_graph(
                 inputs_embeds,
@@ -251,13 +218,14 @@ class MiniCPMO45TTSHMONNXRuntime(MiniCPMO45FixedCacheTextLLMHMONNXModel, nn.Modu
                 past_key_caches=key_caches,
                 past_value_caches=value_caches,
                 attention_mask=attention_mask,
+                extra_sequence_inputs=(semantic_hidden_states, semantic_mask),
                 on_graph_call=commit,
             )
         )
         if isinstance(output, Tensor):
             hidden = output[:, :current_length]
         else:
-            hidden = output[1] if len(output) > 1 else output[0]
+            hidden = output[0]
             hidden = hidden[:, :current_length]
         return BaseModelOutputWithPast(
             last_hidden_state=hidden,
@@ -314,6 +282,14 @@ class MiniCPMO45TTSHMONNXRuntime(MiniCPMO45FixedCacheTextLLMHMONNXModel, nn.Modu
                 target.copy_(backup)
             raise
         self.hf_cache.commit_length(imported_length)
+
+    def reset_state(self) -> None:
+        self._pending_semantic_hidden_states = None
+        super().reset_state()
+
+    def release_state(self) -> None:
+        self._pending_semantic_hidden_states = None
+        super().release_state()
 
 
 __all__ = ["MiniCPMO45TTSHMONNXRuntime", "_resolve_tts_meta"]

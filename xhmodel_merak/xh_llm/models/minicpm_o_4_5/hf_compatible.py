@@ -240,6 +240,43 @@ def reuse_initialized_tts(host_model, tokenizer, create_duplex):
         host_model.init_tts = original_init_tts
 
 
+def bind_duplex_fused_tts_semantic_inputs(duplex):
+    tts = duplex.model.tts
+    projector = tts.projector_semantic
+
+    def convert_results_to_fused_tts_input(self, results):
+        del self
+        if not results:
+            audio_bos = tts.emb_text(
+                torch.tensor(
+                    [tts.audio_bos_token_id],
+                    device=tts.emb_text.weight.device,
+                    dtype=torch.long,
+                )
+            )
+            return audio_bos.unsqueeze(0)
+
+        token_ids = torch.as_tensor(
+            [hidden[0] for hidden in results],
+            device=tts.emb_text.weight.device,
+            dtype=torch.long,
+        )
+        token_embeds = tts.emb_text(token_ids)
+        semantic_hidden = torch.cat([hidden[1].squeeze(0) for hidden in results], dim=0)
+        projector(semantic_hidden)
+        audio_bos = tts.emb_text(
+            torch.tensor(
+                [tts.audio_bos_token_id],
+                device=tts.emb_text.weight.device,
+                dtype=torch.long,
+            )
+        )
+        return torch.cat((token_embeds, audio_bos), dim=0).unsqueeze(0)
+
+    duplex._convert_results_to_tts_input = MethodType(convert_results_to_fused_tts_input, duplex)
+    return duplex
+
+
 def bind_duplex_hmonnx_reset(duplex, reset_components, is_active=lambda: True):
     if not hasattr(duplex, "model"):
         return duplex
@@ -329,6 +366,10 @@ def create_llm_wraped_cls(cls):
     class _MiniCPMOLLMWrapped(cls):
         def _setup(self, *args, **kwargs):
             pass
+
+        @property
+        def device(self):
+            return self._llm_model.device
 
         @property
         def prefill(self) -> bool:
@@ -800,17 +841,12 @@ class ConditionalChatTTSGenerationOutput(ModelOutput):
 def create_tts_model_wraped_cls(cls):
     class _ChatTTSModel(cls):
         def _normalize_tts_logits(self, model_output):
-            """Normalize wrapped model outputs to logits tensor with shape [B, S, C, VQ]."""
             if isinstance(model_output, torch.Tensor):
                 logits = model_output
             elif hasattr(model_output, "logits") and model_output.logits is not None:
                 logits = model_output.logits
             elif hasattr(model_output, "last_hidden_state") and model_output.last_hidden_state is not None:
-                hidden_states = model_output.last_hidden_state
-                if not hasattr(self, "head_code"):
-                    raise RuntimeError("TTS output is hidden_states but head_code is missing.")
-                logits_per_vq = [self._head_code_hmonnx(hidden_states) for _ in range(self.num_vq)]
-                logits = torch.stack(logits_per_vq, dim=-1)
+                logits = model_output.last_hidden_state
             elif isinstance(model_output, (tuple, list)) and len(model_output) > 0:
                 logits = model_output[0]
             else:
@@ -820,18 +856,7 @@ def create_tts_model_wraped_cls(cls):
                 return logits
             if logits.dim() == 3 and logits.shape[-1] == self.config.num_audio_tokens and self.num_vq == 1:
                 return logits.unsqueeze(-1)
-            if logits.dim() == 3 and hasattr(self, "head_code"):
-                logits_per_vq = [self._head_code_hmonnx(logits) for _ in range(self.num_vq)]
-                return torch.stack(logits_per_vq, dim=-1)
             raise RuntimeError(f"Unexpected TTS logits shape {tuple(logits.shape)}; expected [B, S, C, VQ].")
-
-        def _head_code_hmonnx(self, hidden_states):
-            """Route tts.head_code through the HMONNX head-code graph (num_vq == 1)."""
-            tts_llama_model = getattr(self, "model", None)
-            project = getattr(tts_llama_model, "project_head_code", None)
-            if project is None:
-                raise RuntimeError("TTS head_code HMONNX graph is not available")
-            return project(hidden_states)
 
         @torch.inference_mode()
         def generate_chunk(
@@ -1397,6 +1422,10 @@ def create_tts_model_wraped_cls(cls):
 
 def create_minicpo_wraped_cls(cls):
     class _MiniCPMO(cls):
+        @property
+        def device(self):
+            return self.llm._llm_model.device
+
         def get_audio_embedding_streaming(
             self,
             data,
@@ -1568,10 +1597,11 @@ def create_minicpo_wraped_cls(cls):
             else:
                 vision_hidden_states = data["vision_hidden_states"]
 
+            input_embedding = self.llm.get_input_embeddings()
             if hasattr(self.llm.config, "scale_emb"):
-                vllm_embedding = self.llm.model.embed_tokens(data["input_ids"]) * self.llm.config.scale_emb
+                vllm_embedding = input_embedding(data["input_ids"]) * self.llm.config.scale_emb
             else:
-                vllm_embedding = self.llm.model.embed_tokens(data["input_ids"])
+                vllm_embedding = input_embedding(data["input_ids"])
 
             vision_hidden_states = [
                 i.to(device=vllm_embedding.device, dtype=vllm_embedding.dtype) if isinstance(i, torch.Tensor) else i
@@ -1638,7 +1668,9 @@ class MiniCPMO_HFCompatible:  # noqa: N801
             minicpm_llm.__class__ = _llm_cls
             minicpm_llm._modules.pop("_llm_model", None)
             object.__setattr__(minicpm_llm, "_llm_model", llm_model)
-            minicpm_llm.embed_tokens = hf_model.llm.model.embed_tokens
+            exported_embedding = llm_model.get_input_embeddings()
+            minicpm_llm.embed_tokens = exported_embedding
+            minicpm_llm.model.embed_tokens = exported_embedding
             # In upstream modeling, `self.llm.prepare_inputs_for_generation` is monkey-patched on the instance.
             # An instance attribute shadows the class method, so our wrapper's implementation won't be invoked.
             # Remove the instance-bound attribute to fall back to the class method we define here.
@@ -1717,10 +1749,12 @@ class MiniCPMO_HFCompatible:  # noqa: N801
             minicpo_tts_model.__class__ = _tts_cls
             minicpo_tts_model._tts_llama_model = tts_llama_model
             minicpo_tts_model.model = tts_llama_model
-            if getattr(tts_llama_model, "projector_semantic_session", None) is not None:
-                from .runtime_tts import ProjectorSemanticGraph
+            from .runtime_tts import DeferredProjectorSemantic
 
-                minicpo_tts_model.projector_semantic = ProjectorSemanticGraph(tts_llama_model)
+            # Projector and head_code already run inside the fused TTS graph.
+            minicpo_tts_model.projector_semantic = DeferredProjectorSemantic(tts_llama_model)
+            minicpo_tts_model.config.normalize_projected_hidden = False
+            minicpo_tts_model.head_code = nn.ModuleList([nn.Identity()])
 
             patch_audio_attention_return_compat(hf_model)
         return hf_model

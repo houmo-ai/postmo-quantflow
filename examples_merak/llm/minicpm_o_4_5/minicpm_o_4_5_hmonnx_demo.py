@@ -17,6 +17,7 @@ from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import (
     normalize_minicpmo_video,
     patch_audio_attention_return_compat,
     patch_dynamic_cache_seen_tokens,
+    require_export_mode,
 )
 
 
@@ -81,6 +82,7 @@ def main() -> None:
     args = parse_args()
     if args.generate_audio and args.ref_audio is None:
         raise ValueError("--ref-audio is required with --generate-audio")
+    require_export_mode(args.work_dir, "offline", operation="non-streaming HMONNX demo")
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True)
     config = AutoConfig.from_pretrained(args.model_dir, trust_remote_code=True)
     host = AutoModel.from_pretrained(

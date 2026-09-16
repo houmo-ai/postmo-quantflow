@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import onnx
@@ -104,30 +105,28 @@ def export_minicpm_o_4_5_campplus(
     if not source.exists():
         raise FileNotFoundError(f"campplus source onnx not found: {source}")
     seq_capacity = int(component_cfg.get("sequence_length", 1000))
-    component_dir = work_dir / "Speaker"
-    onnx_file = _export_onnx_artifact(
-        source,
-        component_dir / "onnx" / "campplus.onnx",
-        {"batch_size": 1, "sequence_length": seq_capacity},
-    )
+    component_dir = work_dir / "speaker"
     dummy_input = torch.randn(1, seq_capacity, 80)
     quant_type = str(component_cfg.get("quant_type", "w8a16_sefp"))
-    hmonnx_file = (
-        component_dir / "hmonnx" / f"{(model_name or 'minicpm_o_4_5')}_campplus_{target_device}_{quant_type}.onnx"
-    )
-    _convert_to_hmonnx(
-        onnx_file,
-        [dummy_input],
-        [_CAMPPLUS_INPUT],
-        [_CAMPPLUS_OUTPUT],
-        hmonnx_file,
-        target_device,
-        quant_type,
-    )
+    hmonnx_file = component_dir / f"{(model_name or 'minicpm_o_4_5')}_campplus_{target_device}_{quant_type}.onnx"
+    with TemporaryDirectory(prefix="minicpmo45_campplus_onnx_") as temporary_dir:
+        onnx_file = _export_onnx_artifact(
+            source,
+            Path(temporary_dir) / "campplus.onnx",
+            {"batch_size": 1, "sequence_length": seq_capacity},
+        )
+        _convert_to_hmonnx(
+            onnx_file,
+            [dummy_input],
+            [_CAMPPLUS_INPUT],
+            [_CAMPPLUS_OUTPUT],
+            hmonnx_file,
+            target_device,
+            quant_type,
+        )
     return {
         "quant_type": quant_type,
         "graphs": {"campplus": str(hmonnx_file.relative_to(work_dir))},
-        "onnx": str(onnx_file.relative_to(work_dir)),
         "sequence_length": seq_capacity,
         "input_dim": 80,
         "output_dim": 192,
@@ -225,34 +224,32 @@ def export_minicpm_o_4_5_speech_tokenizer(
         raise FileNotFoundError(f"speech_tokenizer source onnx not found: {source}")
     n_mels = int(component_cfg.get("n_mels", 128))
     feats_length = int(component_cfg.get("feats_length", 3000))
-    component_dir = work_dir / "SpeechTokenizer"
-    onnx_file = _export_onnx_artifact(
-        source,
-        component_dir / "onnx" / "speech_tokenizer_v2_25hz.onnx",
-        {"T": feats_length},
-        preprocess=lambda model: _fold_speech_tokenizer_expand(model, feats_length),
-    )
+    component_dir = work_dir / "speech2tokenizer"
     dummy_feats = torch.randn(1, n_mels, feats_length)
     dummy_length = torch.tensor([feats_length], dtype=torch.int32)
     quant_type = str(component_cfg.get("quant_type", "w8a16_sefp"))
-    hmonnx_file = (
-        component_dir
-        / "hmonnx"
-        / f"{(model_name or 'minicpm_o_4_5')}_speech_tokenizer_v2_25hz_{target_device}_{quant_type}.onnx"
+    hmonnx_file = component_dir / (
+        f"{(model_name or 'minicpm_o_4_5')}_speech_tokenizer_v2_25hz_{target_device}_{quant_type}.onnx"
     )
-    _convert_to_hmonnx(
-        onnx_file,
-        [dummy_feats, dummy_length],
-        ["feats", "feats_length"],
-        ["indices"],
-        hmonnx_file,
-        target_device,
-        quant_type,
-    )
+    with TemporaryDirectory(prefix="minicpmo45_speech_tokenizer_onnx_") as temporary_dir:
+        onnx_file = _export_onnx_artifact(
+            source,
+            Path(temporary_dir) / "speech_tokenizer_v2_25hz.onnx",
+            {"T": feats_length},
+            preprocess=lambda model: _fold_speech_tokenizer_expand(model, feats_length),
+        )
+        _convert_to_hmonnx(
+            onnx_file,
+            [dummy_feats, dummy_length],
+            ["feats", "feats_length"],
+            ["indices"],
+            hmonnx_file,
+            target_device,
+            quant_type,
+        )
     return {
         "quant_type": quant_type,
         "graphs": {"speech_tokenizer": str(hmonnx_file.relative_to(work_dir))},
-        "onnx": str(onnx_file.relative_to(work_dir)),
         "n_mels": n_mels,
         "feats_length": feats_length,
         "input_names": ["feats", "feats_length"],

@@ -282,7 +282,7 @@ def test_tts_runtime_splits_long_prefill_and_masks_padded_query_rows() -> None:
     assert torch.all(calls[-1][3][:, :, 2:, :] == torch.finfo(torch.float16).min)
 
 
-def test_tts_logits_normalizer_projects_hidden_tensor() -> None:
+def test_tts_logits_normalizer_accepts_fused_head_output() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.hf_compatible import create_tts_model_wraped_cls
 
     class Base:
@@ -291,12 +291,7 @@ def test_tts_logits_normalizer_projects_hidden_tensor() -> None:
     wrapped = object.__new__(create_tts_model_wraped_cls(Base))
     wrapped.config = SimpleNamespace(num_audio_tokens=5)
     wrapped.num_vq = 1
-    wrapped.head_code = [object()]
-    wrapped.model = SimpleNamespace(
-        project_head_code=lambda hidden: torch.ones((*hidden.shape[:-1], 5), dtype=hidden.dtype)
-    )
-
-    logits = wrapped._normalize_tts_logits(torch.ones((1, 3, 8), dtype=torch.float16))
+    logits = wrapped._normalize_tts_logits(torch.ones((1, 3, 5), dtype=torch.float16))
 
     assert logits.shape == (1, 3, 5, 1)
 
@@ -356,29 +351,6 @@ def test_tts_multi_token_continuation_uses_prefill_not_decode() -> None:
     assert calls == ["prefill"]
 
 
-def test_host_attachment_omits_tts_when_host_did_not_initialize_it(monkeypatch) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime as runtime_module
-
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        runtime_module.MiniCPMOHFCompatible,
-        "to_hf_compatible",
-        lambda host, **kwargs: captured.update(kwargs) or host,
-    )
-    runtime = object.__new__(runtime_module.MiniCPMO45HMONNXRuntime)
-    runtime.vision = SimpleNamespace()
-    runtime.audio = SimpleNamespace()
-    runtime.llm = SimpleNamespace()
-    runtime.tts = SimpleNamespace()
-    host = SimpleNamespace(vpm=SimpleNamespace(embeddings=SimpleNamespace(patch_size=14, num_patches_per_side=70)))
-
-    runtime.attach_host(host)
-
-    assert captured["tts_llama_model"] is None
-    assert runtime.vision.patch_size == 14
-    assert runtime.vision.num_patches_per_side == 70
-
-
 def test_host_attachment_supplies_vision_wrap_config(monkeypatch) -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime as runtime_module
 
@@ -392,8 +364,11 @@ def test_host_attachment_supplies_vision_wrap_config(monkeypatch) -> None:
     runtime.vision = SimpleNamespace()
     runtime.audio = SimpleNamespace()
     runtime.llm = SimpleNamespace()
-    runtime.tts = SimpleNamespace()
-    host = SimpleNamespace(vpm=SimpleNamespace(embeddings=SimpleNamespace(patch_size=14, num_patches_per_side=70)))
+    runtime.tts = SimpleNamespace(install_host_embeddings=lambda _tts: None)
+    host = SimpleNamespace(
+        vpm=SimpleNamespace(embeddings=SimpleNamespace(patch_size=14, num_patches_per_side=70)),
+        tts=SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace())),
+    )
 
     runtime.attach_host(host)
 
@@ -411,7 +386,8 @@ def test_host_attachment_bypasses_native_resampler_for_post_resampler_graph(monk
     runtime.vision = SimpleNamespace()
     runtime.audio = SimpleNamespace()
     runtime.llm = SimpleNamespace()
-    runtime.tts = SimpleNamespace()
+    runtime.tts = SimpleNamespace(install_host_embeddings=lambda _tts: None)
+    host.tts = SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace()))
     monkeypatch.setattr(runtime_module.MiniCPMOHFCompatible, "to_hf_compatible", lambda model, **_kwargs: model)
 
     runtime.attach_host(host)
@@ -559,9 +535,7 @@ def test_runtime_places_native_tts_generation_modules_on_hmonnx_device() -> None
 
     assert moves == [
         ("emb_text", "cuda:1"),
-        ("projector_semantic", "cuda:1"),
         ("emb_code", "cuda:1"),
-        ("head_code", "cuda:1"),
     ]
 
 
@@ -577,7 +551,7 @@ def test_host_attachment_preserves_native_tts_model_config(monkeypatch) -> None:
     runtime.vision = SimpleNamespace()
     runtime.audio = SimpleNamespace()
     runtime.llm = SimpleNamespace()
-    runtime.tts = SimpleNamespace()
+    runtime.tts = SimpleNamespace(install_host_embeddings=lambda _tts: None)
     monkeypatch.setattr(runtime_module.MiniCPMOHFCompatible, "to_hf_compatible", lambda model, **_kwargs: model)
 
     runtime.attach_host(host)

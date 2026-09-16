@@ -103,7 +103,7 @@ class XHMiniCPMOAudioModel(XHMiniCPMOBaseModel):
     def prepare_inputs_for_graph(self, data) -> tuple[Tensor, ...]:
         if self.streaming:
             inputs = self.prepare_inputs(data)
-            return (inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], *inputs[5], *inputs[6])
+            return (inputs[0], inputs[1], inputs[2], inputs[3], *inputs[4], *inputs[5])
         return self.prepare_inputs(data)
 
     def prepare_inputs(self, data) -> tuple[Tensor, Tensor]:
@@ -111,7 +111,6 @@ class XHMiniCPMOAudioModel(XHMiniCPMOBaseModel):
             execution_device = self.__dict__.get("_exec_device") or self.__dict__.get("_device", torch.device("cpu"))
             return (
                 data["input_features"].to(execution_device),
-                torch.tensor([int(data["valid_mel_length"])], dtype=torch.int32, device=execution_device),
                 torch.tensor([int(data["past_seq_length"])], dtype=torch.int32, device=execution_device),
                 torch.tensor([int(data["current_input_length"])], dtype=torch.int32, device=execution_device),
                 data["attention_mask"].to(execution_device),

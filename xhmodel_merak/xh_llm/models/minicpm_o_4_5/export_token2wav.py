@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import copy
-import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import onnx
@@ -17,34 +17,22 @@ from xhquant.api import DeviceType, QuantScheme, convert_onnx_to_hmonnx, create_
 
 from .minicpmo_token2wav_modules import (
     DeterministicHiftForwardWrapper,
+    DeterministicHiftPart1Wrapper,
     FlowDecoderWrapper,
     FlowEstimatorStepWrapper,
     FlowFrontendWrapper,
     FlowStreamingFrontendWrapper,
+    HiftPart2Wrapper,
     _normalize_embedding,
 )
 from .streaming_token2wav import (
     FLOW_CACHE_NAMES,
-    HiftStreamFinalWrapper,
+    HiftStreamPart1Wrapper,
     HiftStreamWrapper,
 )
 
 
 _RANDOM_ONNX_OPERATORS = frozenset({"RandomNormal", "RandomNormalLike", "RandomUniform", "RandomUniformLike"})
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def create_flow_decoder_noise(template: Tensor, *, seed: int) -> Tensor:
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    return torch.randn(template.shape, dtype=template.dtype, generator=generator)
 
 
 def constantize_dynamic_expand_shapes(model: onnx.ModelProto) -> onnx.ModelProto:
@@ -341,6 +329,11 @@ def require_deterministic_onnx(model: onnx.ModelProto) -> None:
         raise RuntimeError(f"HiFT ONNX contains random operators: {', '.join(random_operators)}")
 
 
+def prepare_deterministic_onnx(model: onnx.ModelProto) -> onnx.ModelProto:
+    require_deterministic_onnx(model)
+    return model
+
+
 def load_token2wav_modules(model_dir: str) -> tuple[nn.Module, nn.Module]:
     import stepaudio2.token2wav as token2wav
     from hyperpyyaml import load_hyperpyyaml
@@ -368,43 +361,39 @@ def _convert(
     prepare: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
 ) -> Path:
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    onnx_dir = output_file.parent / "onnx"
-    hmonnx_dir = output_file.parent / "hmonnx"
-    onnx_dir.mkdir(parents=True, exist_ok=True)
-    hmonnx_dir.mkdir(parents=True, exist_ok=True)
-    source_file = onnx_dir / f"{output_file.stem}_source.onnx"
-    hmonnx_file = hmonnx_dir / output_file.name
-    with _exportable_normalize():
-        torch.onnx.export(
-            module,
-            tuple(inputs),
+    with TemporaryDirectory(prefix="minicpmo45_token2wav_onnx_") as temporary_dir:
+        source_file = Path(temporary_dir) / f"{output_file.stem}_source.onnx"
+        with _exportable_normalize():
+            torch.onnx.export(
+                module,
+                tuple(inputs),
+                str(source_file),
+                input_names=list(names[0]),
+                output_names=list(names[1]),
+                opset_version=17,
+                do_constant_folding=True,
+            )
+        folded_model = staticize_known_shape_nodes(onnx.load(str(source_file)))
+        folded_model = constantize_dynamic_expand_shapes(folded_model)
+        folded_model = remove_identity_expands(folded_model)
+        folded_model = remove_static_broadcast_expands(folded_model)
+        if prepare is not None:
+            folded_model = prepare(folded_model)
+        onnx.save(folded_model, str(source_file))
+        onnx.checker.check_model(str(source_file))
+        if target_device != "XH2a":
+            raise RuntimeError(f"Unsupported Token2Wav target device: {target_device}")
+        quant_config = create_quant_config(QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type))
+        convert_onnx_to_hmonnx(
             str(source_file),
+            [value.cpu() for value in inputs],
+            DeviceType.XH2a,
+            str(output_file),
+            quant_config=quant_config,
             input_names=list(names[0]),
             output_names=list(names[1]),
-            opset_version=17,
-            do_constant_folding=True,
         )
-    folded_model = staticize_known_shape_nodes(onnx.load(str(source_file)))
-    folded_model = constantize_dynamic_expand_shapes(folded_model)
-    folded_model = remove_identity_expands(folded_model)
-    folded_model = remove_static_broadcast_expands(folded_model)
-    if prepare is not None:
-        folded_model = prepare(folded_model)
-    onnx.save(folded_model, str(source_file))
-    onnx.checker.check_model(str(source_file))
-    if target_device != "XH2a":
-        raise RuntimeError(f"Unsupported Token2Wav target device: {target_device}")
-    quant_config = create_quant_config(QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type))
-    convert_onnx_to_hmonnx(
-        str(source_file),
-        [value.cpu() for value in inputs],
-        DeviceType.XH2a,
-        str(hmonnx_file),
-        quant_config=quant_config,
-        input_names=list(names[0]),
-        output_names=list(names[1]),
-    )
-    return hmonnx_file
+    return output_file
 
 
 def prepare_hift_onnx(model: onnx.ModelProto, *, frame_capacity: int) -> onnx.ModelProto:
@@ -612,23 +601,6 @@ def prepare_hift_stream_onnx(model: onnx.ModelProto) -> onnx.ModelProto:
         constant_values[initializer_name] = np.asarray(value, dtype=np.int64)
         node.input[1] = initializer_name
     for node in model.graph.node:
-        if node.op_type != "STFT":
-            continue
-        for input_index in range(1, min(len(node.input), 4)):
-            name = node.input[input_index]
-            if name in initializer_names:
-                continue
-            value = evaluate_constant(name)
-            if value is None:
-                continue
-            initializer_name = f"hift_stream_stft_{slice_index}_{input_index}"
-            slice_index += 1
-            array = np.asarray(value)
-            model.graph.initializer.append(numpy_helper.from_array(array, initializer_name))
-            initializer_names.add(initializer_name)
-            constant_values[initializer_name] = array
-            node.input[input_index] = initializer_name
-    for node in model.graph.node:
         if node.op_type != "Pow" or node.input[1] in initializer_names:
             continue
         value = evaluate_constant(node.input[1])
@@ -676,6 +648,7 @@ def export_flow_frontend(
     target_device: str,
     name_prefix: str = "",
 ) -> dict[str, object]:
+    export_mode = str(config["export_mode"])
     token_capacity = int(config["token_capacity"])
     mel_capacity = int(config["mel_capacity"])
     quant_type = str(config["quant_type"])
@@ -686,18 +659,21 @@ def export_flow_frontend(
         torch.tensor([mel_capacity // 2], dtype=torch.int32),
         torch.zeros((1, 192), dtype=torch.float32),
     )
-    graph = _convert(
-        FlowFrontendWrapper(flow, mel_capacity),
-        inputs,
-        (("tokens", "token_length", "prompt_feat", "prompt_feat_length", "embedding"), ("mu", "mask", "spks", "cond")),
-        component_dir / "Offline" / f"{name_prefix}token2wav_flow_frontend_offline_{target_device}_{quant_type}.onnx",
-        target_device,
-        quant_type,
-    )
-    graphs = {"main": graph}
-    stream_contract = None
-    streaming = config.get("streaming")
-    if isinstance(streaming, Mapping):
+    graphs: dict[str, Path] = {}
+    if export_mode == "offline":
+        graphs["main"] = _convert(
+            FlowFrontendWrapper(flow, mel_capacity),
+            inputs,
+            (
+                ("tokens", "token_length", "prompt_feat", "prompt_feat_length", "embedding"),
+                ("mu", "mask", "spks", "cond"),
+            ),
+            component_dir / f"{name_prefix}token2wav_flow_frontend_offline_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+        )
+    if export_mode in {"session", "stream"}:
+        streaming = config["streaming"]
         prompt_token_capacity = int(streaming["prompt_token_capacity"])
         prompt_mel_capacity = int(streaming["prompt_mel_capacity"])
         stream_inputs = (
@@ -709,31 +685,21 @@ def export_flow_frontend(
             stream_inputs[0],
             stream_inputs[1],
             stream_inputs[2],
-            n_timesteps=int(config.get("n_timesteps", 10)),
+            n_timesteps=int(config["n_timesteps"]),
         )
         configured_base_shapes = {
             name: tuple(int(value) for value in streaming["base_cache_shapes"][name]) for name in FLOW_CACHE_NAMES
         }
-        base_cache_files = {}
         for name in FLOW_CACHE_NAMES:
             actual_shape = tuple(int(value) for value in base_cache[name].shape)
             if actual_shape != configured_base_shapes[name]:
                 raise RuntimeError(
                     f"Token2Wav base cache {name} shape {actual_shape} != configured {configured_base_shapes[name]}"
                 )
-            cache_file = component_dir / f"{name}_base.pt"
-            torch.save(base_cache[name].detach().cpu(), cache_file)
-            base_cache_files[name] = cache_file
         stream_contract = {
-            "initialization_backend": "official_host",
-            "base_cache_artifact_kind": "deterministic_template",
-            "prompt_token_capacity": prompt_token_capacity,
-            "prompt_mel_capacity": prompt_mel_capacity,
             "pre_lookahead_len": int(streaming["pre_lookahead_len"]),
             "base_cache_valid_length": int(streaming["base_cache_valid_length"]),
             "base_cache_shapes": {name: list(shape) for name, shape in configured_base_shapes.items()},
-            "cache_dtypes": {name: "float32" for name in FLOW_CACHE_NAMES},
-            "base_cache_files": base_cache_files,
         }
         all_cache_shapes = {
             name: tuple(int(value) for value in streaming["cache_shapes"][name]) for name in FLOW_CACHE_NAMES
@@ -742,49 +708,45 @@ def export_flow_frontend(
         frontend_input_names = tuple(streaming["frontend_input_names"])
         frontend_output_names = tuple(streaming["frontend_output_names"])
         chunk_tokens = int(streaming["chunk_token_capacity"])
-        stream_roles = {role: dict(role_config) for role, role_config in streaming["roles"].items()}
-        for role, last_chunk in (("stream_flow_frontend", False), ("stream_flow_frontend_final", True)):
-            frontend_inputs = (
-                torch.zeros((1, chunk_tokens), dtype=torch.int32),
-                torch.tensor([chunk_tokens], dtype=torch.int32),
-                torch.zeros((1, 192), dtype=torch.float32),
-                torch.zeros(cache_shapes["conformer_cnn_cache"], dtype=torch.float32),
-                torch.zeros(cache_shapes["conformer_att_cache"], dtype=torch.float32),
-                torch.tensor([int(streaming["base_cache_valid_length"])], dtype=torch.int32),
-            )
-            graph_path = (
-                component_dir
-                / "Stream"
-                / f"{name_prefix}token2wav_flow_frontend_{role}_{target_device}_{quant_type}.onnx"
-            )
-            graphs[role] = _convert(
-                FlowStreamingFrontendWrapper(flow, last_chunk=last_chunk),
-                frontend_inputs,
-                (frontend_input_names, frontend_output_names),
-                graph_path,
-                target_device,
-                quant_type,
-            )
+        output_mel_capacities = {mode: int(capacity) for mode, capacity in streaming["output_mel_capacities"].items()}
+        frontend_inputs = (
+            torch.zeros((1, chunk_tokens), dtype=torch.int32),
+            torch.tensor([chunk_tokens], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+            torch.zeros((1, 192), dtype=torch.float32),
+            torch.zeros(cache_shapes["conformer_cnn_cache"], dtype=torch.float32),
+            torch.zeros(cache_shapes["conformer_att_cache"], dtype=torch.float32),
+            torch.tensor([int(streaming["base_cache_valid_length"])], dtype=torch.int32),
+        )
+        role = "stream_flow_frontend"
+        graph_path = component_dir / f"{name_prefix}token2wav_flow_frontend_{role}_{target_device}_{quant_type}.onnx"
+        graphs[role] = _convert(
+            FlowStreamingFrontendWrapper(flow),
+            frontend_inputs,
+            (frontend_input_names, frontend_output_names),
+            graph_path,
+            target_device,
+            quant_type,
+        )
         stream_contract.update(
             {
                 "frontend_input_names": list(frontend_input_names),
-                "frontend_output_names": list(frontend_output_names),
                 "cache_shapes": {name: list(shape) for name, shape in all_cache_shapes.items()},
                 "frontend_cache_shapes": {name: list(shape) for name, shape in cache_shapes.items()},
                 "chunk_token_capacity": chunk_tokens,
                 "base_conformer_layers": int(streaming["base_conformer_layers"]),
-                "cache_alignment": str(streaming["cache_alignment"]),
-                "roles": stream_roles,
+                "output_mel_capacities": output_mel_capacities,
             }
         )
     result = {
+        "export_mode": export_mode,
         "quant_type": quant_type,
         "graphs": graphs,
         "token_capacity": token_capacity,
         "mel_capacity": mel_capacity,
         "up_rate": int(flow.up_rate),
     }
-    if stream_contract is not None:
+    if export_mode in {"session", "stream"}:
         result["stream_contract"] = stream_contract
     return result
 
@@ -796,6 +758,8 @@ def export_flow_decoder(
     target_device: str,
     name_prefix: str = "",
 ) -> dict[str, object]:
+    component_dir.mkdir(parents=True, exist_ok=True)
+    export_mode = str(config["export_mode"])
     mel_capacity = int(config["mel_capacity"])
     quant_type = str(config["quant_type"])
     inputs = (
@@ -806,23 +770,18 @@ def export_flow_decoder(
         torch.zeros((2, 80)),
         torch.zeros((2, 80, mel_capacity)),
     )
-    graph = _convert(
-        FlowDecoderWrapper(flow.decoder.estimator),
-        inputs,
-        (("x", "mask", "mu", "t", "spks", "cond"), ("estimator_out",)),
-        component_dir / "Offline" / f"{name_prefix}token2wav_flow_decoder_offline_{target_device}_{quant_type}.onnx",
-        target_device,
-        quant_type,
-    )
-    rand_noise_seed = int(config.get("noise_seed", 1024))
-    rand_noise_file = component_dir / "rand_noise.pt"
-    rand_noise = create_flow_decoder_noise(flow.decoder.rand_noise, seed=rand_noise_seed)
-    torch.save(rand_noise, rand_noise_file)
-    rand_noise_sha256 = _file_sha256(rand_noise_file)
-    graphs = {"main": graph}
-    stream_contract = None
-    streaming = config.get("streaming")
-    if isinstance(streaming, Mapping):
+    graphs: dict[str, Path] = {}
+    if export_mode == "offline":
+        graphs["main"] = _convert(
+            FlowDecoderWrapper(flow.decoder.estimator),
+            inputs,
+            (("x", "mask", "mu", "t", "spks", "cond"), ("estimator_out",)),
+            component_dir / f"{name_prefix}token2wav_flow_decoder_offline_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+        )
+    if export_mode in {"session", "stream"}:
+        streaming = config["streaming"]
         step_shapes = streaming["estimator_step_cache_shapes"]
         stream_inputs = (
             torch.zeros((2, 80, int(streaming["append_capacity"]))),
@@ -839,7 +798,6 @@ def export_flow_decoder(
         output_names = tuple(streaming["estimator_step_output_names"])
         graph_path = (
             component_dir
-            / "Stream"
             / f"{name_prefix}token2wav_flow_decoder_stream_flow_estimator_step_{target_device}_{quant_type}.onnx"
         )
         graphs["stream_flow_estimator_step"] = _convert(
@@ -850,33 +808,24 @@ def export_flow_decoder(
             target_device,
             quant_type,
         )
-        host_timestep_cache_banks = int(streaming.get("host_timestep_cache_banks", 10))
+        host_timestep_cache_banks = int(streaming["host_timestep_cache_banks"])
         stream_contract = {
-            "input_names": list(input_names),
-            "output_names": list(output_names),
             "estimator_step_cache_shapes": dict(step_shapes),
             "append_capacity": int(streaming["append_capacity"]),
             "base_cache_valid_length": int(streaming["base_cache_valid_length"]),
             "host_timestep_cache_banks": host_timestep_cache_banks,
             "prompt_cache_policy": dict(streaming["prompt_cache_policy"]),
-            "roles": {
-                "stream_flow_estimator_step": {
-                    "cfg_batch_size": int(step_shapes["input_att"][1]),
-                    "host_timestep_cache_banks": host_timestep_cache_banks,
-                }
-            },
         }
     result = {
+        "export_mode": export_mode,
         "quant_type": quant_type,
         "graphs": graphs,
         "mel_capacity": mel_capacity,
-        "n_timesteps": int(config.get("n_timesteps", 10)),
+        "n_timesteps": int(config["n_timesteps"]),
         "cfg_rate": float(flow.decoder.inference_cfg_rate),
-        "rand_noise_file": rand_noise_file,
-        "rand_noise_seed": rand_noise_seed,
-        "rand_noise_sha256": rand_noise_sha256,
+        "noise_shape": [int(value) for value in flow.decoder.rand_noise.shape],
     }
-    if stream_contract is not None:
+    if export_mode in {"session", "stream"}:
         result["stream_contract"] = stream_contract
     return result
 
@@ -888,62 +837,77 @@ def export_hift(
     target_device: str,
     name_prefix: str = "",
 ) -> dict[str, object]:
+    export_mode = str(config["export_mode"])
     frame_capacity = int(config["frame_capacity"])
     quant_type = str(config["quant_type"])
     source_length = frame_capacity * 480 - 480
-    phase_noise, source_noise = create_hift_random_inputs(
-        harmonic_count=int(hift.nb_harmonics) + 1,
-        source_length=source_length,
-        seed=int(config.get("source_seed", 1024)),
-    )
-    inputs = (torch.zeros((1, 80, frame_capacity)), phase_noise, source_noise)
-    output_file = component_dir / "Offline" / f"{name_prefix}token2wav_hift_offline_{target_device}_{quant_type}.onnx"
-    onnx_dir = output_file.parent / "onnx"
-    hmonnx_dir = output_file.parent / "hmonnx"
-    onnx_dir.mkdir(parents=True, exist_ok=True)
-    hmonnx_dir.mkdir(parents=True, exist_ok=True)
-    source_file = onnx_dir / f"{output_file.stem}_source.onnx"
-    torch.onnx.export(
-        DeterministicHiftForwardWrapper(hift),
-        inputs,
-        source_file,
-        input_names=["speech_feat", "phase_noise", "source_noise"],
-        output_names=["waveform"],
-        opset_version=17,
-        do_constant_folding=True,
-    )
-    prepared_file = onnx_dir / f"{output_file.stem}_prepared.onnx"
-    prepared_model = prepare_hift_onnx(onnx.load(source_file), frame_capacity=frame_capacity)
-    require_deterministic_onnx(prepared_model)
-    onnx.save(prepared_model, prepared_file)
-    onnx.checker.check_model(str(prepared_file))
-    if target_device != "XH2a":
-        raise RuntimeError(f"Unsupported Token2Wav target device: {target_device}")
-    quant_config = create_quant_config(QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type))
-    hmonnx_file = hmonnx_dir / output_file.name
-    convert_onnx_to_hmonnx(
-        str(prepared_file),
-        [value.cpu() for value in inputs],
-        DeviceType.XH2a,
-        str(hmonnx_file),
-        quant_config=quant_config,
-        input_names=["speech_feat", "phase_noise", "source_noise"],
-        output_names=["waveform"],
-    )
-    phase_noise_file = component_dir / "phase_noise.pt"
-    source_noise_file = component_dir / "source_noise.pt"
-    torch.save(phase_noise, phase_noise_file)
-    torch.save(source_noise, source_noise_file)
-    graphs = {"main": hmonnx_file}
-    stream_contract = None
-    streaming = config.get("streaming")
-    if isinstance(streaming, Mapping):
+    harmonic_count = int(hift.nb_harmonics) + 1
+    graphs: dict[str, Path] = {}
+    result: dict[str, object] = {
+        "export_mode": export_mode,
+        "quant_type": quant_type,
+        "graphs": graphs,
+        "frame_capacity": frame_capacity,
+        "hop_length": 480,
+        "source_length": source_length,
+        "harmonic_count": harmonic_count,
+        "stft": {
+            "n_fft": int(hift.istft_params["n_fft"]),
+            "hop_length": int(hift.istft_params["hop_len"]),
+        },
+    }
+    if export_mode == "offline":
+        phase_noise, source_noise = create_hift_random_inputs(
+            harmonic_count=harmonic_count,
+            source_length=source_length,
+            seed=1024,
+        )
+        inputs = (torch.zeros((1, 80, frame_capacity)), phase_noise, source_noise)
+
+        def prepare_offline(model: onnx.ModelProto) -> onnx.ModelProto:
+            model = prepare_hift_onnx(model, frame_capacity=frame_capacity)
+            require_deterministic_onnx(model)
+            return model
+
+        graphs["main"] = _convert(
+            DeterministicHiftForwardWrapper(hift, waveform_length=frame_capacity * 480),
+            inputs,
+            (("speech_feat", "phase_noise", "source_noise"), ("waveform",)),
+            component_dir / f"{name_prefix}token2wav_hift_offline_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+            prepare=prepare_offline,
+        )
+        graphs["part1"] = _convert(
+            DeterministicHiftPart1Wrapper(hift),
+            inputs,
+            (("speech_feat", "phase_noise", "source_noise"), ("full_source",)),
+            component_dir / f"{name_prefix}token2wav_hift_offline_part1_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+            prepare=prepare_offline,
+        )
+        stft_frames = frame_capacity * 480 // int(hift.istft_params["hop_len"]) + 1
+        graphs["part2"] = _convert(
+            HiftPart2Wrapper(hift, waveform_length=frame_capacity * 480),
+            (
+                torch.zeros((1, 80, frame_capacity)),
+                torch.zeros((1, int(hift.istft_params["n_fft"]) + 2, stft_frames)),
+            ),
+            (("speech_feat", "source_stft"), ("waveform",)),
+            component_dir / f"{name_prefix}token2wav_hift_offline_part2_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+            prepare=prepare_deterministic_onnx,
+        )
+    if export_mode in {"session", "stream"}:
+        streaming = config["streaming"]
         stream_frame_capacity = int(streaming["frame_capacity"])
         stream_source_length = (stream_frame_capacity + int(streaming["mel_cache_length"])) * 480
         stream_phase_noise, stream_source_noise = create_hift_random_inputs(
-            harmonic_count=int(hift.nb_harmonics) + 1,
+            harmonic_count=harmonic_count,
             source_length=stream_source_length,
-            seed=int(config.get("source_seed", 1024)),
+            seed=1024,
         )
         source_cache_length = int(streaming["source_cache_length"])
         stream_inputs = (
@@ -967,70 +931,56 @@ def export_hift(
             "source_noise",
         )
         output_names = ("raw_waveform", "full_source")
-        role_wrappers = {"stream_hift": HiftStreamWrapper, "stream_hift_final": HiftStreamFinalWrapper}
-        for role, wrapper_type in role_wrappers.items():
-            role_inputs = stream_inputs
-            graphs[role] = _convert(
-                wrapper_type(
-                    hift,
-                    source_cache_length=source_cache_length,
-                    mel_cache_length=int(streaming["mel_cache_length"]),
-                    waveform_length=stream_source_length,
-                ),
-                role_inputs,
-                (input_names, output_names),
-                component_dir / "Stream" / f"{name_prefix}token2wav_hift_{role}_{target_device}_{quant_type}.onnx",
-                target_device,
-                quant_type,
-                prepare=prepare_hift_stream_onnx,
-            )
-        stream_phase_file = component_dir / "stream_phase_noise.pt"
-        stream_source_file = component_dir / "stream_source_noise.pt"
-        initial_source_file = component_dir / "initial_source_cache.pt"
-        torch.save(stream_phase_noise, stream_phase_file)
-        torch.save(stream_source_noise, stream_source_file)
-        torch.save(stream_inputs[4], initial_source_file)
+        graphs["stream_hift"] = _convert(
+            HiftStreamWrapper(
+                hift,
+                source_cache_length=source_cache_length,
+                mel_cache_length=int(streaming["mel_cache_length"]),
+                waveform_length=stream_source_length,
+            ),
+            stream_inputs,
+            (input_names, output_names),
+            component_dir / f"{name_prefix}token2wav_hift_stream_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+            prepare=prepare_hift_stream_onnx,
+        )
+        graphs["stream_hift_part1"] = _convert(
+            HiftStreamPart1Wrapper(
+                hift,
+                source_cache_length=source_cache_length,
+                mel_cache_length=int(streaming["mel_cache_length"]),
+                waveform_length=stream_source_length,
+            ),
+            stream_inputs,
+            (input_names, ("prepared_speech_feat", "full_source")),
+            component_dir / f"{name_prefix}token2wav_hift_stream_part1_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+            prepare=prepare_hift_stream_onnx,
+        )
+        stream_stft_frames = stream_source_length // int(hift.istft_params["hop_len"]) + 1
+        graphs["stream_hift_part2"] = _convert(
+            HiftPart2Wrapper(hift, waveform_length=stream_source_length),
+            (
+                torch.zeros((1, 80, stream_frame_capacity + int(streaming["mel_cache_length"]))),
+                torch.zeros((1, int(hift.istft_params["n_fft"]) + 2, stream_stft_frames)),
+            ),
+            (("prepared_speech_feat", "source_stft"), ("raw_waveform",)),
+            component_dir / f"{name_prefix}token2wav_hift_stream_part2_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+            prepare=prepare_deterministic_onnx,
+        )
         stream_contract = {
-            "input_names": list(input_names),
-            "output_names": list(output_names),
-            "host_state_owner": "official_token2wav.stream",
-            "cache_inputs": {"mel": "past_mel", "source": "past_source"},
-            "source_output": "full_source",
             "frame_capacity": stream_frame_capacity,
-            "combined_frame_capacity": stream_frame_capacity + int(streaming["mel_cache_length"]),
             "mel_cache_length": int(streaming["mel_cache_length"]),
             "source_cache_length": source_cache_length,
             "speech_cache_length": int(streaming["speech_cache_length"]),
-            "hop_length": 480,
-            "cache_axes": {"mel": 2, "source": 2},
-            "graph_dtype": "float16",
-            "roles": {"stream_hift": {"last_chunk": False}, "stream_hift_final": {"last_chunk": True}},
-            "cache_tails": {
-                "mel": {"capacity": int(streaming["mel_cache_length"]), "axis": 2},
-                "source": {"capacity": source_cache_length, "axis": 2},
-            },
-            "first_valid_lengths": {"mel": 0, "source": 0, "speech": 0},
-            "host_overlap": {
-                "owner": "official_token2wav.stream",
-                "speech_cache_length": int(streaming["speech_cache_length"]),
-                "overlap_window_length": int(streaming["speech_cache_length"]) * 2,
-                "normal": "withhold one speech-cache tail after host overlap-add",
-                "final": "emit full waveform after host overlap-add",
-            },
-            "phase_noise_file": stream_phase_file,
-            "source_noise_file": stream_source_file,
-            "initial_source_cache_file": initial_source_file,
+            "harmonic_count": harmonic_count,
+            "source_length": stream_source_length,
         }
-    result = {
-        "quant_type": quant_type,
-        "graphs": graphs,
-        "frame_capacity": frame_capacity,
-        "hop_length": 480,
-        "phase_noise_file": phase_noise_file,
-        "source_noise_file": source_noise_file,
-        "source_length": source_length,
-    }
-    if stream_contract is not None:
+    if export_mode in {"session", "stream"}:
         result["stream_contract"] = stream_contract
     return result
 
@@ -1049,7 +999,7 @@ def export_minicpm_o_4_5_token2wav_flow_frontend(
     flow, _ = load_token2wav_modules(model_dir)
     return export_flow_frontend(
         flow,
-        work_dir / "Token2WavFlowFrontend",
+        work_dir / "token2wav_flow_frontend",
         component_cfg,
         target_device,
         name_prefix=f"{model_name or 'minicpm_o_4_5'}_",
@@ -1070,7 +1020,7 @@ def export_minicpm_o_4_5_token2wav_flow_decoder(
     flow, _ = load_token2wav_modules(model_dir)
     return export_flow_decoder(
         flow,
-        work_dir / "Token2WavFlowDecoder",
+        work_dir / "token2wav_flow_decoder",
         component_cfg,
         target_device,
         name_prefix=f"{model_name or 'minicpm_o_4_5'}_",
@@ -1091,7 +1041,7 @@ def export_minicpm_o_4_5_token2wav_hift(
     _, hift = load_token2wav_modules(model_dir)
     return export_hift(
         hift,
-        work_dir / "Token2WavHiFT",
+        work_dir / "token2wav_hift",
         component_cfg,
         target_device,
         name_prefix=f"{model_name or 'minicpm_o_4_5'}_",

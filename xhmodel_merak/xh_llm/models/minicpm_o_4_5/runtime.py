@@ -10,6 +10,7 @@ from torch import Tensor, nn
 from ...hmonnx.hmonnx_model import HMONNXBaseModel, HMONNXModel
 from .hf_compatible import (
     MiniCPMOHFCompatible,
+    bind_duplex_fused_tts_semantic_inputs,
     bind_duplex_hmonnx_reset,
     patch_speech_generation_capture,
     reuse_initialized_tts,
@@ -35,11 +36,26 @@ STREAMING_CASES = (
 )
 
 
+def load_export_metadata(work_dir: str | Path) -> dict[str, Any]:
+    return json.loads((Path(work_dir) / "export_meta_info.json").read_text(encoding="utf-8"))
+
+
+def require_export_mode(work_dir: str | Path, expected: str, *, operation: str) -> dict[str, Any]:
+    meta = load_export_metadata(work_dir)
+    actual = str(meta["export_mode"])
+    if actual != expected:
+        raise RuntimeError(
+            f"{operation} requires an artifact exported with export.mode={expected}; "
+            f"got export.mode={actual} from {Path(work_dir)}"
+        )
+    return meta
+
+
 def move_native_tts_modules(host_model: nn.Module, device: str) -> None:
     tts = getattr(host_model, "tts", None)
     if tts is None:
         return
-    for name in ("emb_text", "projector_semantic", "emb_code", "head_code"):
+    for name in ("emb_text", "emb_code"):
         module = getattr(tts, name, None)
         if module is not None:
             module.to(device)
@@ -103,9 +119,11 @@ class MiniCPMO45HMONNXRuntime:
         enable_cuda_graph: bool = False,
         enable_auto_offload: bool = False,
         enable_golden: bool = False,
+        noise_seed: int | None = None,
     ) -> None:
         root = Path(work_dir)
-        meta = json.loads((root / "export_meta_info.json").read_text(encoding="utf-8"))
+        meta = load_export_metadata(root)
+        self.export_mode = str(meta["export_mode"])
         components = meta["components"]
         graph_options = {
             "device_map": device_map,
@@ -117,14 +135,18 @@ class MiniCPMO45HMONNXRuntime:
         self.audio = MiniCPMO45AudioHMONNXRuntime(root, components["audio"], **graph_options)
         self.llm = MiniCPMO45LLMHMONNXRuntime(root, components["llm"], **graph_options)
         self.tts = MiniCPMO45TTSHMONNXRuntime(root, components["tts"], **graph_options)
-        self.token2wav = MiniCPMO45Token2WavHMONNXRuntime(root, components, **graph_options)
+        self.token2wav = MiniCPMO45Token2WavHMONNXRuntime(
+            root,
+            components,
+            noise_seed=noise_seed,
+            **graph_options,
+        )
         self.host_model = None
         if host_model is not None:
             self.attach_host(host_model)
 
     def attach_host(self, host_model: nn.Module) -> nn.Module:
-        native_tts_model = getattr(getattr(host_model, "tts", None), "model", None)
-        native_tts_config = getattr(native_tts_model, "config", None)
+        native_tts_config = host_model.tts.model.config
         for name in (
             "reset_session",
             "init_token2wav_cache",
@@ -146,10 +168,10 @@ class MiniCPMO45HMONNXRuntime:
             vision_model=self.vision,
             audio_model=self.audio,
             llm_model=self.llm,
-            tts_llama_model=self.tts if hasattr(host_model, "tts") else None,
+            tts_llama_model=self.tts,
         )
-        if native_tts_config is not None:
-            self.tts.config = native_tts_config
+        self.tts.install_host_embeddings(self.host_model.tts)
+        self.tts.config = native_tts_config
         if hasattr(host_model, "tts") and hasattr(host_model, "_generate_speech_non_streaming"):
             audio_tokenizer = getattr(host_model.tts, "audio_tokenizer", None)
             if audio_tokenizer is None:
@@ -170,6 +192,8 @@ class MiniCPMO45HMONNXRuntime:
     def chat(self, *args: Any, **kwargs: Any) -> Any:
         if self.host_model is None:
             raise RuntimeError("MiniCPM-o-4.5 host model is not attached")
+        if self.export_mode != "offline":
+            raise RuntimeError("chat requires an artifact exported with export.mode=offline")
         return self.host_model.chat(*args, **kwargs)
 
     def reset_session(self, reset_token2wav_cache: bool = True) -> Any:
@@ -202,6 +226,8 @@ class MiniCPMO45HMONNXRuntime:
     def streaming_prefill(self, session_id: str, msgs: list[dict[str, Any]], **kwargs: Any) -> Any:
         if self.host_model is None:
             raise RuntimeError("MiniCPM-o-4.5 host model is not attached")
+        if self.export_mode != "session":
+            raise RuntimeError("streaming_prefill requires an artifact exported with export.mode=session")
         self._claim_streaming_mode("session")
         session_id_before = getattr(self, "_session_id", None)
         if session_id_before is not None and session_id_before != session_id:
@@ -213,6 +239,8 @@ class MiniCPMO45HMONNXRuntime:
     def streaming_generate(self, session_id: str, **kwargs: Any) -> Any:
         if self.host_model is None:
             raise RuntimeError("MiniCPM-o-4.5 host model is not attached")
+        if self.export_mode != "session":
+            raise RuntimeError("streaming_generate requires an artifact exported with export.mode=session")
         self._claim_streaming_mode("session")
         session_id_before = getattr(self, "_session_id", None)
         if session_id_before is not None and session_id_before != session_id:
@@ -226,6 +254,8 @@ class MiniCPMO45HMONNXRuntime:
     def as_duplex(self, device: str | None = None, **kwargs: Any) -> Any:
         if self.host_model is None:
             raise RuntimeError("MiniCPM-o-4.5 host model is not attached")
+        if self.export_mode != "stream":
+            raise RuntimeError("as_duplex requires an artifact exported with export.mode=stream")
         self._claim_streaming_mode("duplex")
         as_duplex = getattr(self, "_official_as_duplex", self.host_model.as_duplex)
         tokenizer = getattr(getattr(self.host_model, "tts", None), "audio_tokenizer", None)
@@ -236,6 +266,7 @@ class MiniCPMO45HMONNXRuntime:
             tokenizer,
             lambda: as_duplex(device=device, **kwargs),
         )
+        duplex = bind_duplex_fused_tts_semantic_inputs(duplex)
         return bind_duplex_hmonnx_reset(
             duplex,
             self._reset_streaming_components,

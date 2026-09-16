@@ -7,6 +7,7 @@ def test_runtime_delegates_session_calls() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime import MiniCPMO45HMONNXRuntime
 
     runtime = object.__new__(MiniCPMO45HMONNXRuntime)
+    runtime.export_mode = "session"
     runtime.host_model = SimpleNamespace(
         reset_session=lambda value=True: ("reset", value),
         init_token2wav_cache=lambda speech: ("cache", speech),
@@ -28,6 +29,7 @@ def test_runtime_delegates_session_calls() -> None:
 
     assert list(runtime.streaming_generate("s0", generate_audio=False)) == [("chunk", False)]
     runtime.reset_session()
+    runtime.export_mode = "stream"
     assert runtime.as_duplex(device="cuda:0", extra=2) == ((), {"device": "cuda:0", "extra": 2})
 
 

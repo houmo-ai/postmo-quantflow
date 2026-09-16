@@ -65,9 +65,10 @@ def test_fixed_conformer_frontend_matches_official_dynamic_cache(
         )
         official_mu = official_flow.encoder_proj(official_hidden).transpose(1, 2).contiguous()
 
-        fixed = FlowStreamingFrontendWrapper(official_flow, last_chunk=last_chunk)(
+        fixed = FlowStreamingFrontendWrapper(official_flow)(
             padded_tokens,
             torch.tensor([token_valid_length], dtype=torch.int32),
+            torch.tensor([int(last_chunk)], dtype=torch.int32),
             embedding,
             cnn_cache,
             pack_conformer_attention_cache(
@@ -129,9 +130,10 @@ def test_fixed_conformer_frontend_matches_official_across_cache_truncation(offic
                 att_cache=official_att,
             )
             official_mu = official_flow.encoder_proj(official_hidden).transpose(1, 2).contiguous()
-            fixed = FlowStreamingFrontendWrapper(official_flow, last_chunk=False)(
+            fixed = FlowStreamingFrontendWrapper(official_flow)(
                 tokens,
                 torch.tensor([tokens.shape[1]], dtype=torch.int32),
+                torch.tensor([0], dtype=torch.int32),
                 embedding,
                 fixed_cnn,
                 pack_conformer_attention_cache(

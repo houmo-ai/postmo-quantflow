@@ -1,0 +1,243 @@
+schema_version: 2
+external:
+  model:
+    id: minicpm_o_4_5
+    family: minicpm_o
+    display_name: MiniCPM-o 4.5
+  parameters:
+    total: 9371787666
+    active: 9371787666
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 512]
+    prefill: 9.596711
+    decode: 0.018744
+    unit: TFLOPs
+    status: inferred
+    note: >-
+      Dense 512-token estimate from the 9,371,787,666 parameters in the
+      primary safetensors checkpoint. Vision, audio, TTS and Token2Wav
+      execution varies by request and is not included in this estimate.
+  precision:
+    float_format: FP16
+    quantized_format: w4a8h0_ssfp
+    comparisons:
+    - name: daily_omni_hf_vs_w4a8_hmonnx_50
+      dataset: Daily-Omni / first 50 samples
+      metric: Accuracy (%)，HF BF16 vs W4A8 HMONNX
+      float: 84.0
+      quant: 84.0
+      delta: 0.0
+      evidence: https://houmo.feishu.cn/wiki/DsXUwsWOXiYcZUkWDotcBjMQn0g
+      status: verified
+    - name: covost2_bleu_hf_vs_w4a8_hmonnx_50
+      dataset: CoVoST2 en-to-zh / first 50 samples
+      metric: BLEU，HF BF16 vs W4A8 HMONNX
+      float: 46.5518
+      quant: 46.3583
+      delta: -0.1935
+      evidence: https://houmo.feishu.cn/wiki/DsXUwsWOXiYcZUkWDotcBjMQn0g
+      status: verified
+    - name: covost2_chrf2_hf_vs_w4a8_hmonnx_50
+      dataset: CoVoST2 en-to-zh / first 50 samples
+      metric: chrF2，HF BF16 vs W4A8 HMONNX
+      float: 31.0589
+      quant: 35.1491
+      delta: 4.0902
+      evidence: https://houmo.feishu.cn/wiki/DsXUwsWOXiYcZUkWDotcBjMQn0g
+      status: verified
+    - name: seedtts_wer_hf_vs_w4a8_hmonnx_50
+      dataset: Seed-TTS-Eval EN / first 50 samples
+      metric: WER (%)，lower is better，HF BF16 vs W4A8 HMONNX
+      float: 1.43816
+      quant: 1.963268
+      delta: 0.525108
+      evidence: https://houmo.feishu.cn/wiki/DsXUwsWOXiYcZUkWDotcBjMQn0g
+      status: verified
+    - name: daily_omni_w4a8_hmonnx_500
+      dataset: Daily-Omni / first 500 samples
+      metric: Accuracy (%) ↑，HF FP16 vs W4A8 HMONNX
+      float: 79.36
+      quant: 80.2
+      delta: 0.84
+      evidence: https://houmo.feishu.cn/wiki/DsXUwsWOXiYcZUkWDotcBjMQn0g
+      status: verified
+    - name: covost2_bleu_w4a8_hmonnx_2000
+      dataset: CoVoST2 en-to-zh / first 2000 samples
+      metric: BLEU ↑，HF FP16 vs W4A8 HMONNX
+      float: 45.54
+      quant: 44.6253483542
+      delta: -0.9146516458
+      evidence: https://houmo.feishu.cn/wiki/DsXUwsWOXiYcZUkWDotcBjMQn0g
+      status: verified
+    - name: seedtts_wer_w4a8_hmonnx_100
+      dataset: Seed-TTS-Eval EN / first 100 samples
+      metric: Mean per-sample WER (%) ↓，HF FP16 vs W4A8 HMONNX
+      float: 2.25
+      quant: 2.238994235898261
+      delta: -0.011005764101739
+      evidence: https://houmo.feishu.cn/wiki/DsXUwsWOXiYcZUkWDotcBjMQn0g
+      status: verified
+    - name: full_duplex_bench_v1_candor_turn_taking_hf_fp16_vs_w4a8_hmonnx_119
+      dataset: Full-Duplex-Bench v1.0 / Candor Turn-Taking / all 119 samples
+      metric: Candor Turn-Taking Rate (%) ↑，HF FP16 vs W4A8 HMONNX
+      float: 97.47899159663865
+      quant: 96.63865546218487
+      delta: -0.84033613445378
+      evidence: https://houmo.feishu.cn/wiki/DsXUwsWOXiYcZUkWDotcBjMQn0g
+      status: verified
+  owner: ye.li
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    - image
+    - video
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - xh2a
+    - llm
+    - multimodal
+    - speech
+  source:
+    provider: OpenBMB
+    name: MiniCPM-o-4_5
+    url: https://huggingface.co/openbmb/MiniCPM-o-4_5
+    license: apache-2.0
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: MiniCPM-o 4.5
+    type: llm_models
+    precision: w4a8h0_ssfp
+    inputs:
+    - name: messages
+      type: multimodal
+      required: true
+      description: Text, image, video or audio conversation messages.
+    outputs:
+    - name: response
+      type: text_audio
+      required: false
+      description: Generated text and optional speech waveform.
+  - id: vision
+    display_name: Vision encoder
+    type: MiniCPMO45VisionModel
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: audio
+    display_name: Audio encoder
+    type: MiniCPMO45AudioModel
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: llm
+    display_name: Qwen3 language model
+    type: MiniCPMO45LLMModel
+    precision: w4a8h0_ssfp
+    inputs: []
+    outputs: []
+  - id: tts
+    display_name: TTS decoder
+    type: MiniCPMO45TTSModel
+    precision: w8a8_sefp
+    inputs: []
+    outputs: []
+  - id: token2wav_flow_frontend
+    display_name: Token2Wav Flow frontend
+    type: flow_frontend
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: token2wav_flow_decoder
+    display_name: Token2Wav Flow decoder
+    type: flow_decoder
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: token2wav_hift
+    display_name: Token2Wav HiFT
+    type: hift
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  - id: speaker
+    display_name: Speaker encoders
+    type: speaker
+    precision: w8a16_sefp
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: messages
+      type: multimodal
+      required: true
+      description: Text, image, video or audio conversation messages.
+    outputs:
+    - name: response
+      type: text_audio
+      required: false
+      description: Generated text and optional speech waveform.
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/minicpm_o_4_5/minicpm_o_4_5_xh2a_w4a8_gptq.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w4a8h0_ssfp
+      components:
+        vision: w8a16_sefp
+        audio: w8a16_sefp
+        llm: w4a8h0_ssfp
+        tts: w8a8_sefp
+        token2wav_flow_frontend: w8a16_sefp
+        token2wav_flow_decoder: w8a16_sefp
+        token2wav_hift: w8a16_sefp
+        speaker: w8a16_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/minicpm_o_4_5
+  release:
+    version_id: minicpm_o_4_5_w4a8h0_ssfp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: MiniCPM-o 4.5
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w4a8h0_ssfp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: >-
+      MiniCPM-o 4.5 XH2a omni-modal workflow for text, image, video and
+      audio understanding plus speech generation. The validated W4A8 release
+      uses a W4A8 LLM backbone and component-specific W8A8/W8A16 precision,
+      with separate offline, session and duplex-stream artifact families.
+    demo:
+      kind: cli
+    limitations:
+    - One export artifact serves exactly one runtime family; offline, session and duplex-stream artifacts are not interchangeable.
+    - The validated LLM graph uses a 32768-token context limit and a 256-token prefill chunk.
+    - Duplex turn-taking is quantization-sensitive in long conversations; a tested W4A8 audio-only run remained in listen state for 36 seconds while the BF16 reference began speaking at the final chunk.
+    evidence:
+      examples:
+      - examples_merak/llm/minicpm_o_4_5
+      readme:
+      - examples_merak/llm/minicpm_o_4_5/README.md

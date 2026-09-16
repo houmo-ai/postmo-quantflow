@@ -143,32 +143,39 @@ class MiniCPMO45AudioHMONNXRuntime(HMONNXBaseModel):
         }
         self.num_hidden_layers = 0
         self._kvcache_mixin: FixedCapacityKVCacheMixin | None = None
-        self.graph = root / meta["graphs"]["main"]
-        self.input_shapes = _input_shapes(self.graph)
-        self.session = HMONNXModel(str(self.graph), **graph_options)
-        streaming_keys = {"stream_prefill", "stream_decode"}
-        if not streaming_keys.issubset(meta["graphs"]):
+        graphs = meta["graphs"]
+        self.session = None
+        self.input_shapes: tuple[tuple[int, ...], ...] = ()
+        self.stream_prefill_session = None
+        self.stream_decode_session = None
+        self.session_prefill_session = None
+        self.session_decode_session = None
+        export_mode = str(meta["export_mode"])
+        if export_mode == "offline":
+            self.graph = root / graphs["main"]
+            self.input_shapes = _input_shapes(self.graph)
+            self.session = HMONNXModel(str(self.graph), **graph_options)
             self.streaming_enabled = False
             return
+        if export_mode == "stream":
+            self.stream_prefill_session = HMONNXModel(str(root / graphs["stream_prefill"]), **graph_options)
+            self.stream_decode_session = HMONNXModel(str(root / graphs["stream_decode"]), **graph_options)
+            self.stream_prefill_frames = int(meta["stream_prefill_frames"])
+            self.stream_decode_frames = int(meta["stream_decode_frames"])
+            self.session_prefill_frames = self.session_decode_frames = 0
+        else:
+            self.session_prefill_session = HMONNXModel(str(root / graphs["session_prefill"]), **graph_options)
+            self.session_decode_session = HMONNXModel(str(root / graphs["session_decode"]), **graph_options)
+            self.session_prefill_frames = int(meta["session_prefill_frames"])
+            self.session_decode_frames = int(meta["session_decode_frames"])
+            self.stream_prefill_frames = self.stream_decode_frames = 0
         self.streaming_enabled = True
-        self.stream_prefill_session = HMONNXModel(str(root / meta["graphs"]["stream_prefill"]), **graph_options)
-        self.stream_decode_session = HMONNXModel(str(root / meta["graphs"]["stream_decode"]), **graph_options)
-        for role in ("session_prefill", "session_decode"):
-            name = f"{role}_session"
-            if role in meta["graphs"]:
-                setattr(self, name, HMONNXModel(str(root / meta["graphs"][role]), **graph_options))
-            else:
-                setattr(self, name, None)
-        self.stream_prefill_frames = int(meta["stream_prefill_frames"])
-        self.stream_decode_frames = int(meta["stream_decode_frames"])
-        self.session_prefill_frames = int(meta.get("session_prefill_frames", self.stream_prefill_frames))
-        self.session_decode_frames = int(meta.get("session_decode_frames", self.stream_decode_frames))
         self.kv_cache_shape = tuple(int(value) for value in meta["kv_cache_shape"])
         cache_capacity = int(meta["cache_capacity"])
         self.prefix_overlap_first = int(meta["prefix_overlap_first"])
         self.prefix_overlap_later = int(meta["prefix_overlap_later"])
         self.suffix_overlap = int(meta["suffix_overlap"])
-        self.pool_step = int(meta.get("pool_step", 5))
+        self.pool_step = int(meta["pool_step"])
         self.audio_encoder_layer = int(meta["audio_encoder_layer"])
         if self.audio_encoder_layer != -1:
             raise RuntimeError(
@@ -294,8 +301,6 @@ class MiniCPMO45AudioHMONNXRuntime(HMONNXBaseModel):
             prefix_overlap = 0
             suffix_overlap = 0
             session = self.session_prefill_session if use_prefill else self.session_decode_session
-            if session is None:
-                raise RuntimeError("Session Audio graphs are not available in this artifact")
         if input_features.shape[-1] > expected_frames:
             raise RuntimeError(
                 f"Streaming Audio accepts at most {expected_frames} Mel frames, got {input_features.shape[-1]}"
@@ -321,8 +326,6 @@ class MiniCPMO45AudioHMONNXRuntime(HMONNXBaseModel):
             input_features,
             (0, expected_frames - input_features.shape[-1]),
         )
-        if session is None:
-            raise RuntimeError("Streaming Audio graph sessions are not loaded")
         query_capacity = _streaming_current_length(expected_frames, prefix_overlap, suffix_overlap)
         attention_mask = torch.full(
             (1, 1, query_capacity, self.cache_capacity),
@@ -333,7 +336,6 @@ class MiniCPMO45AudioHMONNXRuntime(HMONNXBaseModel):
         attention_mask[..., : self.cache_length + current_length] = 0
         outputs = session(
             padded_features.to(torch.float16),
-            torch.tensor([valid_length], dtype=torch.int32, device=input_features.device),
             torch.tensor([self.cache_length], dtype=torch.int32, device=input_features.device),
             torch.tensor([current_length], dtype=torch.int32, device=input_features.device),
             attention_mask,

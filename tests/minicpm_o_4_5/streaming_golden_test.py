@@ -28,8 +28,6 @@ def test_real_golden_enables_every_audio_runtime_session() -> None:
         tts=SimpleNamespace(
             prefill_model=None,
             decode_model=None,
-            projector_semantic_session=None,
-            head_code_session=None,
         ),
         token2wav=SimpleNamespace(),
     )
@@ -61,11 +59,16 @@ def test_streaming_graph_roles_are_complete_and_case_manifest_is_reproducible() 
                 "graphs": {
                     "main": "flow/main.onnx",
                     "stream_flow_frontend": "flow/frontend.onnx",
-                    "stream_flow_frontend_final": "flow/frontend_final.onnx",
                 }
             },
             "token2wav_flow_decoder": {"graphs": {"stream_flow_estimator_step": "flow/step.onnx"}},
-            "token2wav_hift": {"graphs": {"stream_hift": "hift/n.onnx", "stream_hift_final": "hift/final.onnx"}},
+            "token2wav_hift": {
+                "graphs": {
+                    "stream_hift": "hift/reference.onnx",
+                    "stream_hift_part1": "hift/part1.onnx",
+                    "stream_hift_part2": "hift/part2.onnx",
+                }
+            },
         }
     }
 
@@ -82,10 +85,9 @@ def test_streaming_graph_roles_are_complete_and_case_manifest_is_reproducible() 
         "tts/prefill",
         "tts/decode",
         "token2wav_flow_frontend/stream_flow_frontend",
-        "token2wav_flow_frontend/stream_flow_frontend_final",
         "token2wav_flow_decoder/stream_flow_estimator_step",
-        "token2wav_hift/stream_hift",
-        "token2wav_hift/stream_hift_final",
+        "token2wav_hift/stream_hift_part1",
+        "token2wav_hift/stream_hift_part2",
     ]
 
 
@@ -129,13 +131,15 @@ def test_synthetic_streaming_inputs_are_metadata_driven_and_deterministic(tmp_pa
     component = {
         "stream_prefill_frames": 7,
         "num_hidden_layers": 2,
+        "cache_capacity": 9,
         "kv_cache_shape": [1, 2, 9, 4],
         "graph_contracts": {
             "stream_prefill": {
                 "input_names": [
                     "input_features",
-                    "valid_mel_length",
                     "past_seq_length",
+                    "current_input_length",
+                    "attention_mask",
                     "past_k_cache_0",
                     "past_k_cache_1",
                     "past_v_cache_0",
@@ -152,33 +156,13 @@ def test_synthetic_streaming_inputs_are_metadata_driven_and_deterministic(tmp_pa
         (1, 80, 7),
         (1,),
         (1,),
+        (1, 1, 4, 9),
         (1, 2, 9, 4),
         (1, 2, 9, 4),
         (1, 2, 9, 4),
         (1, 2, 9, 4),
     ]
     assert all(torch.equal(left, right) for left, right in zip(first, second, strict=True))
-
-
-def test_synthetic_hift_final_inputs_include_all_cache_lengths(tmp_path: Path) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.synthetic_golden import synthetic_golden_inputs
-
-    torch.save(torch.zeros((1, 3)), tmp_path / "phase.pt")
-    torch.save(torch.zeros((1, 1, 3)), tmp_path / "source.pt")
-    component = {
-        "stream_contract": {
-            "frame_capacity": 4,
-            "mel_cache_length": 2,
-            "source_cache_length": 3,
-            "phase_noise_file": "phase.pt",
-            "source_noise_file": "source.pt",
-        }
-    }
-
-    inputs = synthetic_golden_inputs(tmp_path, "token2wav_hift", "stream_hift_final", component)
-
-    assert len(inputs) == 8
-    assert inputs[-1].shape == (1, 1, 3)
 
 
 def test_synthetic_flow_frontend_inputs_include_token_and_cache_valid_lengths(tmp_path: Path) -> None:
@@ -193,6 +177,7 @@ def test_synthetic_flow_frontend_inputs_include_token_and_cache_valid_lengths(tm
             "frontend_input_names": [
                 "tokens",
                 "token_valid_length",
+                "last_chunk",
                 "embedding",
                 "past_conformer_cnn_cache",
                 "past_conformer_att_cache",
@@ -204,9 +189,10 @@ def test_synthetic_flow_frontend_inputs_include_token_and_cache_valid_lengths(tm
 
     inputs = synthetic_golden_inputs(tmp_path, "token2wav_flow_frontend", "stream_flow_frontend", component)
 
-    assert len(inputs) == 6
+    assert len(inputs) == 7
     assert inputs[0].shape == (1, 5)
     assert torch.equal(inputs[1], torch.tensor([5], dtype=torch.int32))
+    assert torch.equal(inputs[2], torch.tensor([0], dtype=torch.int32))
     assert inputs[-1].shape == (1,)
     assert inputs[-1].dtype == torch.int32
 

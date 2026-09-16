@@ -59,17 +59,6 @@ class XHMiniCPMOLLMModel(LLMBaseModel, XHMiniCPMOBaseModel):
         finally:
             if restore_llm_model_ref is not None:
                 llm_module._llm_model = restore_llm_model_ref
-        # 4.5 uses projector_semantic; 2.6 used projector
-        if hasattr(hf_model.tts, "projector_semantic"):
-            self._wrap_model.chat_tts_projector = hf_model.tts.projector_semantic
-            self._normalize_projected_hidden = getattr(hf_model.tts.config, "normalize_projected_hidden", True)
-        elif hasattr(hf_model.tts, "projector"):
-            self._wrap_model.chat_tts_projector = hf_model.tts.projector
-            self._normalize_projected_hidden = False
-        else:
-            self._wrap_model.chat_tts_projector = None
-            self._normalize_projected_hidden = False
-
         self.token_embedding = deepcopy(self._wrap_model.model.get_input_embeddings())
         self.generation_config = self._wrap_model.generation_config
         self.config = self._wrap_model.config

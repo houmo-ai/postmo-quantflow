@@ -37,7 +37,7 @@ def export_minicpm_o_4_5_vision(
         quantize_and_export(
             model,
             capture_vision_inputs(host, model),
-            work_dir / "Vision",
+            work_dir / "visual",
             f"{model_name or 'minicpm_o_4_5'}_vision_offline_{target_device}_{component_cfg['quant_type']}",
             device,
         )

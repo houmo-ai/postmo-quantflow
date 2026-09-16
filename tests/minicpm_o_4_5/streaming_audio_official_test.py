@@ -88,7 +88,7 @@ def test_official_audio_encoder_method_is_used_when_importable() -> None:
         cnn_min_length=9,
     )
 
-    assert calls[-1] == ("stream_prefill", 7, 0)
+    assert calls[-1] == ("stream_prefill", 0, 3)
     assert len(projection_calls) == 1
     assert len(pooling_calls) == 1
     # The streaming graph already includes the official pool_step=5 downsampling.
@@ -262,4 +262,4 @@ def test_official_streaming_audio_preserves_processor_length_for_padded_features
         suffix_extra_frames=2,
     )
 
-    assert [call[1] for call in calls] == [5, 6]
+    assert calls == [("stream_prefill", 0, 2), ("stream_decode", 2, 1)]

@@ -166,10 +166,9 @@ def test_five_cases_have_stable_identity_and_roles() -> None:
         "tts.prefill",
         "tts.decode",
         "token2wav.stream_flow_frontend",
-        "token2wav.stream_flow_frontend_final",
         "token2wav.stream_flow_estimator_step",
-        "token2wav.stream_hift",
-        "token2wav.stream_hift_final",
+        "token2wav.stream_hift_part1",
+        "token2wav.stream_hift_part2",
     )
 
 

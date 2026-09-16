@@ -29,6 +29,7 @@ from .synthetic_golden import dump_synthetic_golden
 # here keeps export.llm.quant_type consistent with the optional GPTQ block.
 _W4A8_LLM_QUANT_TYPE = "w4a8h0_ssfp"
 _W4A8_PREFILL_CHUNK_LENGTH = 256
+_EXPORT_MODES = {"offline", "session", "stream"}
 
 
 class MiniCPMO45Workflow(BaseLLMWorkflow):
@@ -131,6 +132,9 @@ class MiniCPMO45Workflow(BaseLLMWorkflow):
                 "MiniCPM-o-4.5 runtime requires all components; omit redundant enabled fields: "
                 + ", ".join(explicit_enabled)
             )
+        export_mode = str(export_cfg["mode"])
+        if export_mode not in _EXPORT_MODES:
+            raise ValueError(f"MiniCPM-o-4.5 export.mode must be one of {sorted(_EXPORT_MODES)}, got {export_mode!r}")
         llm_cfg = components["llm"]
         llm_quant_type = llm_cfg.get("quant_type")
         if quant_cfg is not None and int(quant_cfg.get("bits", 4)) == 4:
@@ -204,6 +208,7 @@ class MiniCPMO45Workflow(BaseLLMWorkflow):
         target_device = str(model_cfg["chip_arch"])
         model_name = str(model_cfg["model_name"])
         components = export_cfg["components"]
+        export_mode = str(export_cfg["mode"])
 
         export_basename, export_file_stem = self._format_export_basename(model_cfg, quant_cfg)
         meta: dict[str, Any] = {
@@ -216,6 +221,7 @@ class MiniCPMO45Workflow(BaseLLMWorkflow):
             "export_basename": export_basename,
             "hf_model": model_dir,
             "config": str(Path(config_file).relative_to(work_dir)),
+            "export_mode": export_mode,
             "components": {},
         }
         meta_file = work_dir / "export_meta_info.json"
@@ -240,6 +246,7 @@ class MiniCPMO45Workflow(BaseLLMWorkflow):
         }
         for name in self.SUPPORTED_COMPONENTS:
             component = dict(components[name])
+            component["export_mode"] = export_mode
             # The GPTQ corpus is declared once under ``quant``.  Reuse it for
             # the LLM activation calibration export instead of maintaining a
             # second, potentially stale path in ``export.components.llm``.
@@ -247,6 +254,8 @@ class MiniCPMO45Workflow(BaseLLMWorkflow):
                 if "calibration_jsonl" not in component and quant_cfg.get("calibration_jsonl"):
                     component["calibration_jsonl"] = quant_cfg["calibration_jsonl"]
                 component.setdefault("calibration_samples", min(5, int(quant_cfg.get("nsamples", 5))))
+            if name == "token2wav_flow_frontend":
+                component["n_timesteps"] = components["token2wav_flow_decoder"]["n_timesteps"]
             component_model_dir = model_dir
             component_kwargs: dict[str, Any] = {}
             if name == "llm":

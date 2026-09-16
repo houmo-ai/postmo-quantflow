@@ -33,7 +33,6 @@ class Token2WavExecutionReport:
     stream_flow_final_count: int = 0
     stream_estimator_step_count: int = 0
     stream_hift_count: int = 0
-    stream_hift_final_count: int = 0
     host_initialization_count: int = 0
     host_initialization_backend: str = "official_host"
     streaming_attached: bool = False
@@ -60,7 +59,6 @@ class Token2WavExecutionReport:
             "token2wav_flow_stream": self.full_backends["token2wav_flow_stream"],
             "token2wav_flow_stream_final": self.full_backends["token2wav_flow_stream_final"],
             "token2wav_hift_stream": self.full_backends["token2wav_hift_stream"],
-            "token2wav_hift_stream_final": self.full_backends["token2wav_hift_stream_final"],
         }
 
     @property
@@ -69,7 +67,6 @@ class Token2WavExecutionReport:
             "token2wav_flow_stream": self.stream_flow_count,
             "token2wav_flow_stream_final": self.stream_flow_final_count,
             "token2wav_hift_stream": self.stream_hift_count,
-            "token2wav_hift_stream_final": self.stream_hift_final_count,
         }
 
     def record_flow_frontend(self) -> None:
@@ -94,10 +91,8 @@ class Token2WavExecutionReport:
         self.host_initialization_count += 1
 
     def record_stream_hift(self, final: bool) -> None:
-        if final:
-            self.stream_hift_final_count += 1
-        else:
-            self.stream_hift_count += 1
+        del final
+        self.stream_hift_count += 1
 
     @property
     def full_backends(self) -> dict[str, str]:
@@ -109,7 +104,6 @@ class Token2WavExecutionReport:
             "token2wav_flow_stream": stream_backend(self.stream_flow_count),
             "token2wav_flow_stream_final": stream_backend(self.stream_flow_final_count),
             "token2wav_hift_stream": stream_backend(self.stream_hift_count),
-            "token2wav_hift_stream_final": stream_backend(self.stream_hift_final_count),
             "token2wav_initialization": self.host_initialization_backend,
         }
 
@@ -120,7 +114,6 @@ class Token2WavExecutionReport:
             "token2wav_flow_stream": self.stream_flow_count,
             "token2wav_flow_stream_final": self.stream_flow_final_count,
             "token2wav_hift_stream": self.stream_hift_count,
-            "token2wav_hift_stream_final": self.stream_hift_final_count,
             "token2wav_initialization": self.host_initialization_count,
         }
 
@@ -135,7 +128,7 @@ class Token2WavExecutionReport:
         if self.streaming_attached:
             if self.stream_flow_count + self.stream_flow_final_count <= 0:
                 raise RuntimeError("Token2Wav HMONNX streaming Flow role did not execute")
-            if self.stream_hift_count + self.stream_hift_final_count <= 0:
+            if self.stream_hift_count <= 0:
                 raise RuntimeError("Token2Wav HMONNX streaming HiFT role did not execute")
             return
         missing = [name for name, count in self.execution_counts.items() if count <= 0]
@@ -227,3 +220,27 @@ def prepare_hift_input(mel: Tensor, *, frame_capacity: int) -> Tensor:
 
 def crop_hift_waveform(waveform: Tensor, *, mel_frames: int, hop_length: int = 480) -> Tensor:
     return waveform[:, : mel_frames * hop_length]
+
+
+def run_hift_stft_on_cpu(
+    source: Tensor,
+    *,
+    n_fft: int,
+    hop_length: int,
+    target_device: torch.device,
+    target_dtype: torch.dtype = torch.float16,
+) -> Tensor:
+    """Run the unsupported STFT on CPU between the split HiFT graphs."""
+    host_source = source.detach().to(device="cpu", dtype=torch.float32).squeeze(1)
+    window = torch.hann_window(n_fft, periodic=True, dtype=torch.float32, device="cpu")
+    spectrum = torch.stft(
+        host_source,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=n_fft,
+        window=window,
+        center=True,
+        return_complex=True,
+    )
+    source_stft = torch.cat((spectrum.real, spectrum.imag), dim=1)
+    return source_stft.to(device=target_device, dtype=target_dtype)

@@ -60,6 +60,7 @@ def _decoder_inputs(
     past_key_caches: Sequence[Tensor],
     past_value_caches: Sequence[Tensor],
     attention_mask: Tensor | None = None,
+    extra_sequence_inputs: Sequence[Tensor] = (),
 ) -> list[Tensor]:
     inputs = [
         inputs_embeds,
@@ -70,6 +71,7 @@ def _decoder_inputs(
     ]
     if attention_mask is not None:
         inputs.append(attention_mask)
+    inputs.extend(extra_sequence_inputs)
     return inputs
 
 
@@ -84,13 +86,20 @@ def _iter_decoder_graph_outputs(
     past_value_caches: Sequence[Tensor],
     prefill_length: int,
     attention_mask: Tensor | None = None,
+    extra_sequence_inputs: Sequence[Tensor] = (),
     on_graph_call: Callable[[int], None] | None = None,
 ) -> list[tuple[DecoderOutput, int]]:
     """Traverse MiniCPM's fixed decoder graphs and return valid chunks."""
     if inputs_embeds.shape[1] <= 1:
         output = decode_session(
             *_decoder_inputs(
-                inputs_embeds, past_seq_length, current_input_length, past_key_caches, past_value_caches, attention_mask
+                inputs_embeds,
+                past_seq_length,
+                current_input_length,
+                past_key_caches,
+                past_value_caches,
+                attention_mask,
+                extra_sequence_inputs,
             )
         )
         if on_graph_call is not None:
@@ -102,8 +111,12 @@ def _iter_decoder_graph_outputs(
         real_length = min(prefill_length, inputs_embeds.shape[1] - processed)
         chunk = inputs_embeds[:, processed : processed + real_length]
         chunk_mask = None if attention_mask is None else attention_mask[:, :, processed : processed + real_length]
+        extra_chunks = [value[:, processed : processed + real_length] for value in extra_sequence_inputs]
         if real_length < prefill_length:
             chunk = torch.nn.functional.pad(chunk, (0, 0, 0, prefill_length - real_length))
+            extra_chunks = [
+                torch.nn.functional.pad(value, (0, 0, 0, prefill_length - real_length)) for value in extra_chunks
+            ]
             if chunk_mask is not None:
                 padding = torch.full(
                     (*chunk_mask.shape[:2], prefill_length - real_length, chunk_mask.shape[3]),
@@ -113,7 +126,15 @@ def _iter_decoder_graph_outputs(
                 )
                 chunk_mask = torch.cat((chunk_mask, padding), dim=2)
         output = prefill_session(
-            *_decoder_inputs(chunk, past_seq_length, real_length, past_key_caches, past_value_caches, chunk_mask)
+            *_decoder_inputs(
+                chunk,
+                past_seq_length,
+                real_length,
+                past_key_caches,
+                past_value_caches,
+                chunk_mask,
+                extra_chunks,
+            )
         )
         processed += real_length
         past_seq_length += real_length
@@ -197,14 +218,9 @@ class MiniCPMO45FixedCacheTextLLMHMONNXModel(TextLLMHMONNXModel):
         past_key_caches: Sequence[Tensor] | None = None,
         past_value_caches: Sequence[Tensor] | None = None,
         attention_mask: Tensor | None = None,
+        extra_sequence_inputs: Sequence[Tensor] = (),
         on_graph_call: Callable[[int], None] | None = None,
     ) -> list[tuple[DecoderOutput, int]]:
-        """Run the shared prefill/decode traversal for this fixed graph ABI.
-
-        ``attention_mask`` is deliberately an optional extension: ordinary
-        text graphs use the base input ABI, while MiniCPM TTS has this extra
-        final input.  Both still share the same graph sessions and cache lists.
-        """
         return _iter_decoder_graph_outputs(
             self.prefill_model,
             self.decode_model,
@@ -215,6 +231,7 @@ class MiniCPMO45FixedCacheTextLLMHMONNXModel(TextLLMHMONNXModel):
             past_value_caches=self.past_value_caches if past_value_caches is None else past_value_caches,
             prefill_length=self.prefill_length,
             attention_mask=attention_mask,
+            extra_sequence_inputs=extra_sequence_inputs,
             on_graph_call=on_graph_call,
         )
 

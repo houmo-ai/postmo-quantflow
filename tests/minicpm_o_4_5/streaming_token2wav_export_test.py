@@ -48,8 +48,11 @@ def test_token2wav_convert_passes_string_path_to_legacy_onnx_export(tmp_path, mo
         "w16a16_sefp",
     )
 
-    assert exported_paths == [str(tmp_path / "onnx" / "large_source.onnx")]
-    assert saved_paths == [str(tmp_path / "onnx" / "large_source.onnx")]
+    assert len(exported_paths) == len(saved_paths) == 1
+    assert isinstance(exported_paths[0], str)
+    assert exported_paths == saved_paths
+    assert Path(exported_paths[0]).name == "large_source.onnx"
+    assert not Path(exported_paths[0]).is_relative_to(tmp_path)
 
 
 def test_stream_export_copy_bounds_registered_flow_buffers_without_mutating_source() -> None:
@@ -125,6 +128,7 @@ def test_streaming_frontend_uses_official_host_initialization_and_exports_fronte
         Flow(),
         tmp_path,
         {
+            "export_mode": "stream",
             "token_capacity": 8,
             "mel_capacity": 8,
             "quant_type": "w16a16_sefp",
@@ -152,6 +156,7 @@ def test_streaming_frontend_uses_official_host_initialization_and_exports_fronte
                 "frontend_input_names": [
                     "tokens",
                     "token_valid_length",
+                    "last_chunk",
                     "embedding",
                     "past_conformer_cnn_cache",
                     "past_conformer_att_cache",
@@ -164,22 +169,16 @@ def test_streaming_frontend_uses_official_host_initialization_and_exports_fronte
                     "present_conformer_att_cache",
                     "present_conformer_cache_valid_length",
                 ],
-                "roles": {
-                    "stream_flow_frontend": {"output_mel_capacity": 2},
-                    "stream_flow_frontend_final": {"output_mel_capacity": 4},
-                },
+                "output_mel_capacities": {"normal": 2, "final": 4},
             },
         },
         "XH2a",
     )
 
-    assert set(result["graphs"]) == {"main", "stream_flow_frontend", "stream_flow_frontend_final"}
-    assert len(converted_roles) == 3
-    assert result["stream_contract"]["initialization_backend"] == "official_host"
-    assert result["stream_contract"]["base_cache_artifact_kind"] == "deterministic_template"
+    assert set(result["graphs"]) == {"stream_flow_frontend"}
+    assert len(converted_roles) == 1
     assert result["stream_contract"]["chunk_token_capacity"] == 4
     assert result["stream_contract"]["base_conformer_layers"] == 1
-    assert result["stream_contract"]["cache_alignment"] == "right"
 
 
 def test_flow_frontend_normalization_does_not_export_dynamic_shape_expand(tmp_path) -> None:
@@ -246,18 +245,6 @@ def test_yaml_declares_token2wav_stream_contract() -> None:
     assert components["token2wav_hift"]["quant_type"] == "w8a16_sefp"
 
 
-def test_yaml_declares_decomposed_flow_roles_without_monolithic_graphs() -> None:
-    config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
-    components = config["export"]["components"]
-    assert set(components["token2wav_flow_frontend"]["streaming"]["roles"]) == {
-        "stream_flow_frontend",
-        "stream_flow_frontend_final",
-    }
-    decoder = components["token2wav_flow_decoder"]["streaming"]
-    assert decoder["host_timestep_cache_banks"] == 10
-    assert "roles" not in decoder
-
-
 def test_frontend_capacity_is_declared_per_role() -> None:
     config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     streaming = config["export"]["components"]["token2wav_flow_frontend"]["streaming"]
@@ -268,84 +255,7 @@ def test_frontend_capacity_is_declared_per_role() -> None:
         "present_conformer_att_cache",
         "present_conformer_cache_valid_length",
     ]
-    assert streaming["roles"]["stream_flow_frontend"]["output_mel_capacity"] == 50
-    assert streaming["roles"]["stream_flow_frontend_final"]["output_mel_capacity"] == 56
-
-
-def test_streaming_frontend_returns_conformer_valid_length_as_tensor() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.minicpmo_token2wav_modules import (
-        FlowStreamingFrontendWrapper,
-    )
-
-    class Encoder(nn.Module):
-        def forward_chunk(self, *, xs, last_chunk, cnn_cache, att_cache):
-            del last_chunk
-            return xs, cnn_cache + 1, att_cache + 1
-
-    class Flow(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.spk_embed_affine_layer = nn.Identity()
-            self.input_embedding = nn.Embedding(8, 4)
-            self.encoder = Encoder()
-            self.encoder_proj = nn.Identity()
-
-    wrapper = FlowStreamingFrontendWrapper(Flow(), last_chunk=False)
-    outputs = wrapper(
-        torch.tensor([[1, 2]], dtype=torch.int64),
-        torch.tensor([2], dtype=torch.int32),
-        torch.ones(1, 4),
-        torch.zeros(1, 2, 1),
-        torch.zeros(1, 1, 1, 2, 1),
-        torch.tensor([2], dtype=torch.int32),
-    )
-
-    assert len(outputs) == 5
-    assert outputs[-1].dtype == torch.int32
-    assert outputs[-1].reshape(()).item() == 4
-
-
-def test_streaming_frontend_valid_tokens_match_clamped_reference() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.minicpmo_token2wav_modules import (
-        FlowStreamingFrontendWrapper,
-    )
-
-    class Encoder(nn.Module):
-        def forward_chunk(self, *, xs, last_chunk, cnn_cache, att_cache):
-            del last_chunk
-            return xs, cnn_cache + xs.mean(), att_cache + xs.mean()
-
-    class Flow(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.spk_embed_affine_layer = nn.Identity()
-            self.input_embedding = nn.Embedding(8, 4)
-            self.encoder = Encoder()
-            self.encoder_proj = nn.Identity()
-
-    flow = Flow()
-    tokens = torch.tensor([[1, 7]], dtype=torch.int64)
-    wrapper = FlowStreamingFrontendWrapper(flow, last_chunk=False)
-    inputs = (
-        tokens,
-        torch.tensor([2], dtype=torch.int32),
-        torch.ones(1, 4),
-        torch.zeros(1, 2, 1),
-        torch.zeros(1, 1, 1, 2, 1),
-        torch.tensor([2], dtype=torch.int32),
-    )
-    actual = wrapper(*inputs)
-    embedded = flow.input_embedding(torch.clamp(tokens, min=0))
-    hidden, present_cnn, present_att = flow.encoder.forward_chunk(
-        xs=embedded,
-        last_chunk=False,
-        cnn_cache=inputs[3],
-        att_cache=inputs[4],
-    )
-
-    assert torch.equal(actual[0], flow.encoder_proj(hidden).transpose(1, 2).contiguous())
-    assert torch.equal(actual[2], present_cnn)
-    assert torch.equal(actual[3], present_att)
+    assert streaming["output_mel_capacities"] == {"normal": 50, "final": 56}
 
 
 def test_final_frontend_masks_padded_tokens_after_biased_encoder_embedding() -> None:
@@ -400,7 +310,7 @@ def test_final_frontend_masks_padded_tokens_after_biased_encoder_embedding() -> 
             self.encoder_proj = nn.Identity()
 
     torch.manual_seed(5)
-    wrapper = FlowStreamingFrontendWrapper(Flow(), last_chunk=True)
+    wrapper = FlowStreamingFrontendWrapper(Flow())
     common = (
         torch.ones(1, 4),
         torch.zeros(1, 4, 6),
@@ -410,68 +320,17 @@ def test_final_frontend_masks_padded_tokens_after_biased_encoder_embedding() -> 
     reference = wrapper(
         torch.tensor([[1, 2]], dtype=torch.int64),
         torch.tensor([2], dtype=torch.int32),
+        torch.tensor([1], dtype=torch.int32),
         *common,
     )
     fixed_capacity = wrapper(
         torch.tensor([[1, 2, 7, 7]], dtype=torch.int64),
         torch.tensor([2], dtype=torch.int32),
+        torch.tensor([1], dtype=torch.int32),
         *common,
     )
 
     assert torch.allclose(fixed_capacity[0][:, :, : reference[0].shape[2]], reference[0])
-
-
-def test_streaming_frontend_onnx_has_no_integer_clip(tmp_path) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.minicpmo_token2wav_modules import (
-        FlowStreamingFrontendWrapper,
-    )
-
-    class Encoder(nn.Module):
-        def forward_chunk(self, *, xs, last_chunk, cnn_cache, att_cache):
-            del last_chunk
-            return xs, cnn_cache, att_cache
-
-    class Flow(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.spk_embed_affine_layer = nn.Identity()
-            self.input_embedding = nn.Embedding(8, 4)
-            self.encoder = Encoder()
-            self.encoder_proj = nn.Identity()
-
-    output = tmp_path / "stream_frontend.onnx"
-    torch.onnx.export(
-        FlowStreamingFrontendWrapper(Flow(), last_chunk=False),
-        (
-            torch.tensor([[1, 2]], dtype=torch.int32),
-            torch.tensor([2], dtype=torch.int32),
-            torch.ones(1, 4),
-            torch.zeros(1, 2, 1),
-            torch.zeros(1, 1, 1, 2, 1),
-            torch.tensor([2], dtype=torch.int32),
-        ),
-        output,
-        input_names=(
-            "tokens",
-            "token_valid_length",
-            "embedding",
-            "past_conformer_cnn_cache",
-            "past_conformer_att_cache",
-            "conformer_cache_valid_length",
-        ),
-        output_names=(
-            "mu",
-            "spks",
-            "present_conformer_cnn_cache",
-            "present_conformer_att_cache",
-            "present_conformer_cache_valid_length",
-        ),
-        opset_version=17,
-    )
-    model = onnx.load(output)
-    token_consumers = [node for node in model.graph.node if "tokens" in node.input]
-
-    assert all(node.op_type != "Clip" for node in token_consumers)
 
 
 def test_hift_stream_preparation_fixes_dynamic_slice_axes(tmp_path) -> None:
@@ -509,8 +368,7 @@ def test_hift_stream_preparation_fixes_dynamic_slice_axes(tmp_path) -> None:
     pads = [node for node in prepared.graph.node if node.op_type == "Pad"]
     assert len(pads) == 3
     assert all(node.input[1] in initializers for node in pads)
-    stft = next(node for node in prepared.graph.node if node.op_type == "STFT")
-    assert all(input_name in initializers for input_name in stft.input[1:4])
+    assert all(node.op_type != "STFT" for node in prepared.graph.node)
     assert all(node.op_type != "Pow" or node.input[1] in initializers for node in prepared.graph.node)
     assert all(
         node.op_type not in {"ReduceMean", "ReduceSum"} or len(node.input) < 2 or node.input[1] in initializers
@@ -576,11 +434,10 @@ def test_streaming_frontend_declares_real_token_length_and_fixed_capacity_policy
     config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     streaming = config["export"]["components"]["token2wav_flow_frontend"]["streaming"]
 
-    assert streaming["frontend_input_names"][:3] == ["tokens", "token_valid_length", "embedding"]
+    assert streaming["frontend_input_names"][:4] == ["tokens", "token_valid_length", "last_chunk", "embedding"]
     assert streaming["cache_alignment"] == "right"
     assert streaming["base_conformer_layers"] == 6
-    assert streaming["roles"]["stream_flow_frontend"] == {"output_mel_capacity": 50}
-    assert streaming["roles"]["stream_flow_frontend_final"] == {"output_mel_capacity": 56}
+    assert streaming["output_mel_capacities"] == {"normal": 50, "final": 56}
 
 
 def test_stream_config_contains_only_behavior_driving_values() -> None:
@@ -589,10 +446,7 @@ def test_stream_config_contains_only_behavior_driving_values() -> None:
     flow = config["export"]["components"]["token2wav_flow_decoder"]["streaming"]
     hift = config["export"]["components"]["token2wav_hift"]["streaming"]
 
-    assert frontend["roles"] == {
-        "stream_flow_frontend": {"output_mel_capacity": 50},
-        "stream_flow_frontend_final": {"output_mel_capacity": 56},
-    }
+    assert frontend["output_mel_capacities"] == {"normal": 50, "final": 56}
     assert flow["host_timestep_cache_banks"] == 10
     assert "roles" not in flow
     assert flow["prompt_cache_policy"] == {"recent_mel_frames": 100}
@@ -633,6 +487,7 @@ def test_flow_stream_roles_use_explicit_cache_contract_and_seven_outputs(tmp_pat
         Flow(),
         tmp_path,
         {
+            "export_mode": "stream",
             "mel_capacity": 8,
             "quant_type": "w16a16_sefp",
             "n_timesteps": 1,
@@ -676,9 +531,9 @@ def test_flow_stream_roles_use_explicit_cache_contract_and_seven_outputs(tmp_pat
         "XH2a",
     )
 
-    assert set(result["graphs"]) == {"main", "stream_flow_estimator_step"}
-    assert len(calls) == 2
-    _, input_names, output_names, input_shapes = calls[1]
+    assert set(result["graphs"]) == {"stream_flow_estimator_step"}
+    assert len(calls) == 1
+    _, input_names, output_names, input_shapes = calls[0]
     assert input_names == tuple(
         [
             "x_cfg",
@@ -698,54 +553,10 @@ def test_flow_stream_roles_use_explicit_cache_contract_and_seven_outputs(tmp_pat
     assert input_shapes[7:] == (torch.Size((1,)), torch.Size((1,)))
 
 
-def test_flow_decoder_export_uses_configured_reproducible_noise(tmp_path, monkeypatch) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import export_token2wav
-
-    class Decoder(nn.Module):
-        def __init__(self, fill_value: float) -> None:
-            super().__init__()
-            self.estimator = nn.Identity()
-            self.inference_cfg_rate = 0.7
-            self.rand_noise = torch.full((1, 80, 16), fill_value)
-
-    class Flow(nn.Module):
-        def __init__(self, fill_value: float) -> None:
-            super().__init__()
-            self.decoder = Decoder(fill_value)
-
-    monkeypatch.setattr(
-        export_token2wav,
-        "_convert",
-        lambda _module, _inputs, _names, output_file, _target_device, _quant_type: output_file,
-    )
-    config = {
-        "mel_capacity": 16,
-        "quant_type": "w16a16_sefp",
-        "n_timesteps": 1,
-        "noise_seed": 20260821,
-    }
-    (tmp_path / "first").mkdir()
-    (tmp_path / "second").mkdir()
-    rng_state = torch.random.get_rng_state()
-    first = export_token2wav.export_flow_decoder(Flow(1.0), tmp_path / "first", config, "XH2a")
-    second = export_token2wav.export_flow_decoder(Flow(2.0), tmp_path / "second", config, "XH2a")
-
-    first_noise = torch.load(first["rand_noise_file"], map_location="cpu", weights_only=True)
-    second_noise = torch.load(second["rand_noise_file"], map_location="cpu", weights_only=True)
-    assert torch.equal(first_noise, second_noise)
-    assert torch.equal(torch.random.get_rng_state(), rng_state)
-    assert first["rand_noise_seed"] == second["rand_noise_seed"] == 20260821
-    assert first["rand_noise_sha256"] == second["rand_noise_sha256"]
-    assert len(first["rand_noise_sha256"]) == 64
-
-
 def test_hift_stream_export_formal_inputs_match_wrapper_order() -> None:
     from inspect import signature
 
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import (
-        HiftStreamFinalWrapper,
-        HiftStreamWrapper,
-    )
+    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamWrapper
 
     expected = (
         "speech_feat",
@@ -759,7 +570,6 @@ def test_hift_stream_export_formal_inputs_match_wrapper_order() -> None:
     )
     parameters = tuple(signature(HiftStreamWrapper.forward).parameters)[1:]
     assert parameters == expected
-    assert tuple(signature(HiftStreamFinalWrapper.forward).parameters)[1:] == expected
 
 
 def test_hift_stream_config_omits_exporter_derived_cache_metadata() -> None:
@@ -769,131 +579,6 @@ def test_hift_stream_config_omits_exporter_derived_cache_metadata() -> None:
     assert "cache_outputs" not in streaming
     assert "valid_length_outputs" not in streaming
     assert "cache_axes" not in streaming
-
-
-def test_production_flow_wrapper_source_outputs_depend_on_past_and_new_input(tmp_path) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import FlowStreamWrapper
-
-    class ProductionFlow:
-        def inference_chunk(self, token, spk, cache, last_chunk, n_timesteps):
-            del last_chunk, n_timesteps
-            new_value = token.to(torch.float32).mean() + spk.mean()
-            present = {name: value + new_value for name, value in cache.items()}
-            return torch.zeros(1, 80, 50), present
-
-    wrapper = FlowStreamWrapper(ProductionFlow(), 1, 150)
-    inputs = (
-        torch.zeros(1, 28, dtype=torch.int32),
-        torch.zeros(1, 192),
-        torch.zeros(1, 512, 6),
-        torch.zeros(10, 1, 8, 150, 128),
-        torch.zeros(16, 16, 2, 1024, 2),
-        torch.zeros(16, 16, 2, 8, 150, 128),
-        torch.tensor([50], dtype=torch.int32),
-        torch.tensor([50], dtype=torch.int32),
-    )
-    torch.onnx.export(
-        wrapper,
-        inputs,
-        tmp_path / "flow_stream.onnx",
-        input_names=(
-            "tokens",
-            "embedding",
-            "past_conformer_cnn",
-            "past_conformer_att",
-            "past_estimator_cnn",
-            "past_estimator_att",
-            "conformer_cache_valid_length",
-            "estimator_cache_valid_length",
-        ),
-        output_names=(
-            "chunk_mel",
-            "present_conformer_cnn",
-            "present_conformer_att",
-            "present_estimator_cnn",
-            "present_estimator_att",
-            "present_conformer_cache_valid_length",
-            "present_estimator_cache_valid_length",
-        ),
-        opset_version=17,
-    )
-    model = onnx.load(tmp_path / "flow_stream.onnx")
-    graph_inputs = {value.name for value in model.graph.input}
-    assert {"past_conformer_att", "tokens"} <= graph_inputs
-
-
-def test_flow_stream_graph_keeps_cache_capacity_static_and_lengths_scalar(tmp_path) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import FlowStreamWrapper
-
-    class FixedFlow:
-        def inference_chunk(self, token, spk, cache, last_chunk, n_timesteps):
-            del last_chunk, n_timesteps
-            delta = token.to(torch.float32).mean() + spk.mean()
-            return torch.zeros(1, 80, 4), {name: value + delta for name, value in cache.items()}
-
-    cache_shapes = {
-        "conformer_cnn_cache": (1, 512, 6),
-        "conformer_att_cache": (10, 1, 8, 150, 128),
-        "estimator_cnn_cache": (16, 16, 2, 1024, 2),
-        "estimator_att_cache": (16, 16, 2, 8, 150, 128),
-    }
-    inputs = (
-        torch.zeros(1, 28, dtype=torch.int32),
-        torch.zeros(1, 192),
-        *(torch.zeros(shape) for shape in cache_shapes.values()),
-        torch.tensor([50], dtype=torch.int32),
-        torch.tensor([50], dtype=torch.int32),
-    )
-    torch.onnx.export(
-        FlowStreamWrapper(FixedFlow(), n_timesteps=1, cache_capacity=150),
-        inputs,
-        tmp_path / "flow_stream_static.onnx",
-        input_names=(
-            "tokens",
-            "embedding",
-            "past_conformer_cnn_cache",
-            "past_conformer_att_cache",
-            "past_estimator_cnn_cache",
-            "past_estimator_att_cache",
-            "conformer_cache_valid_length",
-            "estimator_cache_valid_length",
-        ),
-        output_names=(
-            "chunk_mel",
-            "present_conformer_cnn_cache",
-            "present_conformer_att_cache",
-            "present_estimator_cnn_cache",
-            "present_estimator_att_cache",
-            "present_conformer_cache_valid_length",
-            "present_estimator_cache_valid_length",
-        ),
-        opset_version=17,
-    )
-    model = onnx.load(tmp_path / "flow_stream_static.onnx")
-
-    dynamic_inputs = {"conformer_cache_valid_length", "estimator_cache_valid_length"}
-    producers = {output: node for node in model.graph.node for output in node.output}
-    consumers = {
-        value: [node for node in model.graph.node if value in node.input] for value in dynamic_inputs | set(producers)
-    }
-    reachable = set(dynamic_inputs)
-    frontier = list(dynamic_inputs)
-    while frontier:
-        value = frontier.pop()
-        for node in consumers.get(value, []):
-            for output in node.output:
-                if output not in reachable:
-                    reachable.add(output)
-                    frontier.append(output)
-    assert not [
-        node
-        for node in model.graph.node
-        if node.op_type in {"Slice", "Expand"} and any(value in reachable for value in node.input)
-    ]
-    output_shapes = [
-        tuple(dim.dim_value for dim in output.type.tensor_type.shape.dim) for output in model.graph.output[1:5]
-    ]
-    assert output_shapes == [cache_shapes[name] for name in cache_shapes]
 
 
 def _realistic_hift_module(
@@ -998,12 +683,8 @@ def test_hift_stream_wrapper_left_aligns_logical_mel_and_returns_raw_source() ->
 
 
 @pytest.mark.parametrize("past_mel_valid", (0, 8))
-@pytest.mark.parametrize("role_wrapper_type", ("normal", "final"))
-def test_hift_stream_decode_source_aligns_with_mel_frames(role_wrapper_type: str, past_mel_valid: int) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import (
-        HiftStreamFinalWrapper,
-        HiftStreamWrapper,
-    )
+def test_hift_stream_decode_source_aligns_with_mel_frames(past_mel_valid: int) -> None:
+    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamWrapper
 
     frame_capacity = 58
     mel_cache_length = 8
@@ -1016,8 +697,7 @@ def test_hift_stream_decode_source_aligns_with_mel_frames(role_wrapper_type: str
         mel_cache_length=mel_cache_length,
         source_cache_length=source_cache_length,
     )
-    wrapper_type = HiftStreamWrapper if role_wrapper_type == "normal" else HiftStreamFinalWrapper
-    wrapper = wrapper_type(
+    wrapper = HiftStreamWrapper(
         module,
         source_cache_length=source_cache_length,
         mel_cache_length=mel_cache_length,
@@ -1104,6 +784,7 @@ def test_hift_stream_graph_excludes_speech_cache_and_overlap_window(tmp_path) ->
     ]
     assert [dim.dim_value for dim in model.graph.output[1].type.tensor_type.shape.dim] == [1, 1, 31680]
     assert sum(node.op_type == "ConvTranspose" for node in model.graph.node) == 0
+    assert all(node.op_type != "STFT" for node in model.graph.node)
     assert all("speech_window" not in initializer.name for initializer in model.graph.initializer)
     resize_nodes = [node for node in model.graph.node if node.op_type == "Resize"]
     resize_sizes = {
@@ -1116,47 +797,7 @@ def test_hift_stream_graph_excludes_speech_cache_and_overlap_window(tmp_path) ->
     assert set(resize_sizes.values()) == {(1, 1, 31680), (1, 1, 66)}
 
 
-def test_hift_stream_contract_uses_separate_role_wrappers() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import (
-        HiftStreamFinalWrapper,
-    )
-
-    assert HiftStreamFinalWrapper.forward.__name__ == "forward"
-
-
-def test_stream_flow_wrapper_flattens_cache_outputs() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import (
-        FlowStreamWrapper,
-    )
-
-    class Flow:
-        def setup_cache(self, token, mel, spk, n_timesteps):
-            del token, mel, spk, n_timesteps
-            return {
-                "conformer_cnn_cache": torch.ones(1, 512, 6),
-                "conformer_att_cache": torch.ones(10, 1, 8, 50, 128),
-                "estimator_cnn_cache": torch.ones(16, 16, 2, 1024, 2),
-                "estimator_att_cache": torch.ones(16, 16, 2, 8, 50, 128),
-            }
-
-        def inference_chunk(self, token, spk, cache, last_chunk, n_timesteps):
-            del token, spk, last_chunk, n_timesteps
-            return torch.zeros(1, 80, 4), {key: value + 1 for key, value in cache.items()}
-
-    flow = FlowStreamWrapper(Flow(), n_timesteps=1, cache_capacity=150)
-    prompt_cache = tuple(Flow().setup_cache(None, None, None, 1).values())
-    stream_output = flow(
-        torch.zeros(1, 28, dtype=torch.int32),
-        torch.zeros(1, 192),
-        *prompt_cache,
-        torch.tensor([50], dtype=torch.int32),
-        torch.tensor([50], dtype=torch.int32),
-    )
-    assert stream_output[0].shape == (1, 80, 4)
-    assert len(stream_output) == 7
-
-
-def test_workflow_metadata_keeps_offline_and_stream_roles(tmp_path, monkeypatch) -> None:
+def test_workflow_metadata_defaults_to_offline_roles(tmp_path, monkeypatch) -> None:
     from xhmodel_merak.workflows import AutoWorkflow
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import workflow as workflow_module
     from xhmodel_merak.xh_llm.workflows.result import QuantResult
@@ -1168,14 +809,8 @@ def test_workflow_metadata_keeps_offline_and_stream_roles(tmp_path, monkeypatch)
         component_cfg = kwargs["component_cfg"]
         # Distinguish by structural config keys, not quant_type: the default
         # config now uses w8a16_sefp for both flow decoder and hift.
-        if "token_capacity" in component_cfg:
-            roles = ("main",)
-        elif "frame_capacity" in component_cfg:
-            roles = ("main", "stream_hift", "stream_hift_final")
-        elif "n_timesteps" in component_cfg:
-            roles = ("main", "stream_flow", "stream_flow_final")
-        else:
-            roles = ("main",)
+        assert component_cfg["export_mode"] == "offline"
+        roles = ("main",)
         return {
             "graphs": {role: tmp_path / f"{name}_{role}.onnx" for role in roles},
             "stream_contract": {"cache_inputs": ["cache"], "cache_outputs": ["present_cache"]},
@@ -1210,16 +845,8 @@ def test_workflow_metadata_keeps_offline_and_stream_roles(tmp_path, monkeypatch)
     )
     meta = json.loads((Path(result.work_dir) / "export_meta_info.json").read_text(encoding="utf-8"))
     assert set(meta["components"]["token2wav_flow_frontend"]["graphs"]) == {"main"}
-    assert set(meta["components"]["token2wav_flow_decoder"]["graphs"]) == {
-        "main",
-        "stream_flow",
-        "stream_flow_final",
-    }
-    assert set(meta["components"]["token2wav_hift"]["graphs"]) == {
-        "main",
-        "stream_hift",
-        "stream_hift_final",
-    }
+    assert set(meta["components"]["token2wav_flow_decoder"]["graphs"]) == {"main"}
+    assert set(meta["components"]["token2wav_hift"]["graphs"]) == {"main"}
 
 
 def _constant_rooted_expand_model() -> onnx.ModelProto:

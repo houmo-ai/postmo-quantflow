@@ -9,6 +9,7 @@ quant:
   # MiniCPM host at quantization time.
   llm_backbone_dir: null
 export:
+  mode: offline
   model:
     chip_arch: XH2a
     model_type: MiniCPMO45Model
@@ -97,6 +98,8 @@ export:
       - past_seq_length
       - current_input_length
       - attention_mask
+      - semantic_hidden_states
+      - semantic_mask
       output_names:
       - logits
     token2wav_flow_frontend:
@@ -159,14 +162,13 @@ export:
           - 8
           - 942
           - 128
-        roles:
-          stream_flow_frontend:
-            output_mel_capacity: 50
-          stream_flow_frontend_final:
-            output_mel_capacity: 56
+        output_mel_capacities:
+          normal: 50
+          final: 56
         frontend_input_names:
         - tokens
         - token_valid_length
+        - last_chunk
         - embedding
         - past_conformer_cnn_cache
         - past_conformer_att_cache
@@ -181,7 +183,6 @@ export:
       quant_type: w8a16_sefp
       mel_capacity: 2048
       n_timesteps: 10
-      noise_seed: 20260821
       streaming:
         append_capacity: 56
         base_cache_valid_length: 842
