@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision, VariantRecipe
@@ -171,8 +172,41 @@ def _moe_recipe(
     )
 
 
+def _macaron_recipe() -> ModelRecipe:
+    recipe = _moe_recipe(
+        "macaron-v1-tall",
+        "Macaron V1 Tall",
+        "macaron_v1_tall",
+        (
+            variant(
+                "full",
+                f"{_QWEN35_MOE}/35b_a3b/macaron_v1_tall_w4a8.yaml",
+            ),
+        ),
+        hidden_size=2048,
+        num_hidden_layers=40,
+        num_experts=256,
+        router_aux_loss_coef=0.001,
+    )
+    return replace(
+        recipe,
+        default_precision=ResolvedPrecision(weight="w4", activation="a8"),
+        supported_precisions=(("w4", "a8"),),
+        deployment_precision={component: "w4a8h0_ssfp" for component in recipe.components},
+        config_replacements=(
+            ("export.model.fuse_gdr_ops", False),
+            ("export.model.fuse_gdr_block_recurrent_ops", False),
+        ),
+        source_constraints=(
+            ("architectures.0", "Qwen3_5MoeForConditionalGeneration"),
+            *recipe.source_constraints,
+        ),
+    )
+
+
 def _recipes() -> tuple[ModelRecipe, ...]:
     return (
+        _macaron_recipe(),
         _dense_recipe(
             "qwen3.5-0.8b",
             "Qwen3.5 0.8B",

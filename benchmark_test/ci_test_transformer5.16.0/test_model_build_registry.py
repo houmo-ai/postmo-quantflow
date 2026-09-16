@@ -15,6 +15,7 @@ from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_
 
 
 EXPECTED_VARIANTS = {
+    "macaron-v1-tall": ["full"],
     "qwen3.5-0.8b": ["full"],
     "qwen3.5-2b": ["full"],
     "qwen3.5-4b": ["full"],
@@ -48,7 +49,7 @@ def test_distributed_catalog_preserves_the_full_public_description_snapshot():
     # First-release API: one public model_id; export naming stays internal.
     payload = json.dumps(descriptions, sort_keys=True, separators=(",", ":")).encode()
 
-    assert hashlib.sha256(payload).hexdigest() == "00da6c279e72b31a69e07c7f67e1547fbd48b4c88859aa1ca87f86c5c1701b28"
+    assert hashlib.sha256(payload).hexdigest() == "56847513a2af0d3c74c4b60da2fe4249ceeb4eeeb7c334780455f767619e0045"
 
 
 @pytest.mark.parametrize("model_id", EXPECTED_VARIANTS)
@@ -185,7 +186,7 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
         json.dumps(description)
         assert description["input_schema"]["type"] == "object"
         assert description["output_schema"]["type"] == "object"
-        if not model.startswith(("qwen", "ornith")) or model == "qwen3-next-80b-a3b":
+        if not model.startswith(("macaron", "qwen", "ornith")) or model == "qwen3-next-80b-a3b":
             assert description["vision"] is None
         else:
             assert description["vision"] == {
