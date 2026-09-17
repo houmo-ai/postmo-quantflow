@@ -6,6 +6,7 @@
       "patterns": [
         "examples_merak/llm/qwen3/debug_scripts/qwen3_xh_generate.py",
         "examples_merak/llm/qwen3/debug_scripts/_qwen3_xh_generate.py",
+        "examples_merak/llm/qwen3/debug_scripts/qwen3_xh2a_forward.py",
         "examples_merak/llm/qwen3/debug_scripts/qwen3_xh_generate_workflow.py"
       ]
     }

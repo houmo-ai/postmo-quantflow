@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen3-debug-reports",
+      "patterns": [
+        "examples_merak/llm/qwen3/debug_scripts/qwen3_layerwise_diff.py",
+        "examples_merak/llm/qwen3/debug_scripts/qwen3_layerwise_diff_2.py",
+        "examples_merak/llm/qwen3/debug_scripts/qwen3_layerwise_diff_3.py",
+        "examples_merak/llm/qwen3/debug_scripts/qwen3_quanted_hmonnx_layerwise_diff.py",
+        "examples_merak/llm/qwen3/debug_scripts/qwen3_xh2a_forward.py"
+      ]
+    }
+  ]
+}

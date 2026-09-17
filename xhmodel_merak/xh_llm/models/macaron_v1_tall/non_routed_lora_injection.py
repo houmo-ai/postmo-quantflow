@@ -389,6 +389,14 @@ def bind_non_routed_lora_graph(
 ) -> int:
     """Add two Linear nodes and one Add node for every planned target."""
 
+    # Import the SDK opset before querying its registered schema. Older XH2a
+    # Add schemas have no saturate switch, so retain their fixed SDK behavior.
+    # Newer schemas require an explicit value; disable saturation there.
+    from xhquant.export.onnx.onnx_opset import xh2a_opset1
+
+    add_schema = onnx.defs.get_schema("Add", xh2a_opset1.version, DOMAIN)
+    add_attributes = {"saturate": 0} if "saturate" in add_schema.attributes else {}
+
     bindings_by_qweight = {binding.target.qweight_name: binding for binding in bindings}
     rewritten_nodes: list[onnx.NodeProto] = []
     shared_a_outputs: dict[tuple[str, str], str] = {}
@@ -469,6 +477,7 @@ def bind_non_routed_lora_graph(
                 [original_output],
                 name=_as_node_name(original_output),
                 domain=DOMAIN,
+                **add_attributes,
             )
         )
         modified += 1

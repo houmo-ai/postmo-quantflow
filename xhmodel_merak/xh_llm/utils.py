@@ -260,6 +260,7 @@ def hf_auto_offload(
     device_map="auto",
     max_memory=None,
     dtype: str | torch.dtype | None = None,
+    offload_buffers: bool = False,
 ):
     from transformers.modeling_utils import _get_device_map
 
@@ -269,7 +270,6 @@ def hf_auto_offload(
         if hasattr(m, "module._hf_hook"):
             return
 
-    max_memory = None
     hf_quantizer = None
     dtype = resolve_model_dtype(dtype)
     keep_in_fp32_regex = None
@@ -284,7 +284,6 @@ def hf_auto_offload(
 
     offload_folder = None
     offload_index = None
-    offload_buffers = False
     device_map_kwargs = {
         "device_map": device_map,
         "offload_dir": offload_folder,

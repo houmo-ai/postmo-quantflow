@@ -69,26 +69,64 @@ def _load_weights_module():
     return importlib.import_module("xhmodel_merak.xh_llm.models.macaron_v1_tall.lora_weights")
 
 
+@pytest.fixture(params=["installed", "legacy", "saturate"])
+def xh2a_add_schema(request):
+    """Check real graphs against both SDK schema generations and the local SDK."""
+    importlib.import_module("xhquant.export.onnx.onnx_opset")
+    original = onnx.defs.get_schema("Add", 1, "ai.houmo.xh2a")
+    if request.param == "installed":
+        yield original
+        return
+
+    schema = onnx.defs.OpSchema(
+        "Add",
+        original.domain,
+        original.since_version,
+        inputs=original.inputs,
+        outputs=original.outputs,
+        type_constraints=[
+            (item.type_param_str, item.allowed_type_strs, item.description)
+            for item in original.type_constraints
+        ],
+        attributes=(
+            [onnx.defs.OpSchema.Attribute("saturate", onnx.defs.OpSchema.AttrType.INT)]
+            if request.param == "saturate" else []
+        ),
+    )
+    onnx.defs.deregister_schema(original.name, original.since_version, original.domain)
+    try:
+        onnx.defs.register_schema(schema)
+        yield schema
+    finally:
+        if onnx.defs.has(original.name, original.since_version, original.domain):
+            onnx.defs.deregister_schema(original.name, original.since_version, original.domain)
+        onnx.defs.register_schema(original)
+
+
 def _single_linear_graph(qweight: str, graph_name: str):
-    # Use a schema-valid base op even when this test runs without an earlier
-    # exporter importing the SDK's ONNX schemas into the process.
-    scale = f"{qweight}.scale"
+    # The imported SDK schema also validates this base op in focused runs.
+    scale_name = qweight.removesuffix(".qweight") + ".scale"
+    packed_weight, packed_scale = _load_module().quantize_non_routed_lora_weight(
+        np.ones((4, 4), dtype=np.float16), dim=0, mode="ssfp", nshare=64,
+        man_bit=8, hidden_bit=False, rounding="RNE",
+    )
     return helper.make_graph(
         [
             helper.make_node(
                 linear_schema.name,
-                ["hidden", qweight, scale],
+                ["hidden", qweight, scale_name],
                 ["output"],
                 domain=linear_schema.domain,
+                have_bias=0,
                 in_features=4,
                 out_features=4,
-                have_bias=0,
                 mode="ssfp",
                 hmfp_act_exp_bit=5,
                 hmfp_act_man_bit=8,
                 hmfp_act_nshare=64,
                 hmfp_act_rounding="RNE",
                 hmfp_act_hidden_bit=1,
+                hmfp_act_max_exp_boost=0,
                 hmfp_weight_exp_bit=5,
                 hmfp_weight_man_bit=8,
                 hmfp_weight_nshare=64,
@@ -103,8 +141,8 @@ def _single_linear_graph(qweight: str, graph_name: str):
         [helper.make_tensor_value_info("hidden", TensorProto.FLOAT16, [1, 4])],
         [helper.make_tensor_value_info("output", TensorProto.FLOAT16, [1, 4])],
         initializer=[
-            numpy_helper.from_array(np.ones((4, 4), dtype=np.int8), qweight),
-            numpy_helper.from_array(np.zeros((1, 4), dtype=np.int8), scale),
+            numpy_helper.from_array(packed_weight, qweight),
+            numpy_helper.from_array(packed_scale, scale_name),
         ],
     )
 
@@ -305,6 +343,7 @@ def test_packed_routed_expert_lora_matches_peft_param_wrapper_layout() -> None:
 
 def test_attention_lora_uses_canonical_initializer_and_adapter_constant_packs(
     tmp_path: Path,
+    xh2a_add_schema,
 ) -> None:
     module = _load_module()
     qweight = "model.language_model.layers.0.self_attn.q_proj.qweight"
@@ -335,6 +374,11 @@ def test_attention_lora_uses_canonical_initializer_and_adapter_constant_packs(
 
     assert modified == 1
     assert not [value.name for value in graph.input if "lora" in value.name]
+    residual_add = next(node for node in graph.node if node.op_type == "Add")
+    assert residual_add.domain == xh2a_add_schema.domain
+    assert {attr.name: helper.get_attribute_value(attr) for attr in residual_add.attribute} == (
+        {"saturate": 0} if "saturate" in xh2a_add_schema.attributes else {}
+    )
     assert len(runtime_input_order) == 4
     assert all(name == name.lower() for name in runtime_input_order)
     assert not any(node.op_type == "Mul" for node in graph.node)
@@ -390,10 +434,10 @@ def test_decode_reuses_prefill_non_routed_lora_constants(
         quantization_calls += 1
         return quantize(*args, **kwargs)
 
+    prefill = _single_linear_graph(qweight, "prefill")
+    decode = _single_linear_graph(qweight, "decode")
     monkeypatch.setattr(module, "quantize_non_routed_lora_weight", count_quantization)
     with MacaronLoRAConstantBundle(tmp_path) as bundle:
-        prefill = _single_linear_graph(qweight, "prefill")
-        decode = _single_linear_graph(qweight, "decode")
         prefill_bindings = module.build_non_routed_lora_bindings(prefill, (target,), rank=2)
         decode_bindings = module.build_non_routed_lora_bindings(decode, (target,), rank=2)
         assert prefill_bindings == decode_bindings
@@ -444,6 +488,7 @@ def test_decode_reuses_prefill_non_routed_lora_constants(
 
 def test_shared_expert_lora_uses_canonical_initializer_and_adapter_constant_packs(
     tmp_path: Path,
+    xh2a_add_schema,
 ) -> None:
     module = _load_module()
     qweight = "model.language_model.layers.0.mlp.shared_expert.gate_proj.qweight"
@@ -474,6 +519,11 @@ def test_shared_expert_lora_uses_canonical_initializer_and_adapter_constant_pack
 
     assert modified == 1
     assert "lora_adapter_idx" not in {value.name for value in graph.input}
+    residual_add = next(node for node in graph.node if node.op_type == "Add")
+    assert residual_add.domain == xh2a_add_schema.domain
+    assert {attr.name: helper.get_attribute_value(attr) for attr in residual_add.attribute} == (
+        {"saturate": 0} if "saturate" in xh2a_add_schema.attributes else {}
+    )
     assert len(runtime_input_order) == 4
     assert all(name == name.lower() for name in runtime_input_order)
     assert not [value.name for value in graph.input if value.name in runtime_input_order]

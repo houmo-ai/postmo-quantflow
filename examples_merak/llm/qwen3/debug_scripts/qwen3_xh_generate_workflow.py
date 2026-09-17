@@ -10,11 +10,13 @@ from xhmodel_merak.xh_llm import (
     LLMInferenceContextManager,
     LLMModelState,
 )
+from xhquant.core.context import get_current_context
 from xhquant.utils import ContextManagers, MemoryTracker, TimeProfiler
 
 
 if TYPE_CHECKING:
     from xhmodel_merak.xh_llm.models.qwen3 import XHQwen3Model
+from examples_merak.llm.qwen3.debug_scripts.qwen3_xh2a_forward import _read_prompt
 from xhquant.api import get_xhquant_logger, set_random_seed, xhquant_init
 
 
@@ -83,7 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompt",
         default="请用中文介绍一下你自己。",
-        help="Prompt text or a file containing the prompt.",
+        help="Prompt text, UTF-8 text file, or .json/.jsonl file with a string 'query' field.",
     )
     parser.add_argument("--think", action="store_true", help="Enable think mode.")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging.")
@@ -111,7 +113,7 @@ def main() -> None:
     xhquant_init(str(work_dir / "generate.log"), args.debug)
     set_random_seed(1024)
     logger = get_xhquant_logger()
-
+    get_current_context().kvcache.fast_mode = True
     # 初始化工作流
     from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
 
@@ -133,9 +135,7 @@ def main() -> None:
     eval_type = LLMModelState.from_string(args.eval_type)
     xh_model.set_state(eval_type)
 
-    prompt = args.prompt
-    if Path(prompt).is_file():
-        prompt = Path(prompt).read_text()
+    prompt = _read_prompt(args.prompt)
     messages = [{"role": "user", "content": prompt}]
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -159,7 +159,7 @@ def main() -> None:
             **model_inputs,
             max_new_tokens=1024,
             streamer=streamer,
-            do_sample=True,
+            do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
 

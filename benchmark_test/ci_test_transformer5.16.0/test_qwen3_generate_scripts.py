@@ -159,6 +159,9 @@ def _install_import_stubs(monkeypatch):
     xhquant.__path__ = []
     xhquant_api = types.ModuleType("xhquant.api")
     xhquant_utils = types.ModuleType("xhquant.utils")
+    records.current_context = SimpleNamespace(kvcache=SimpleNamespace(fast_mode=False))
+    xhquant_context = types.ModuleType("xhquant.core.context")
+    xhquant_context.get_current_context = lambda: records.current_context
 
     def xhquant_init(log_file, debug):
         records.xhquant_init = (log_file, debug)
@@ -183,6 +186,7 @@ def _install_import_stubs(monkeypatch):
         "xhquant": xhquant,
         "xhquant.api": xhquant_api,
         "xhquant.utils": xhquant_utils,
+        "xhquant.core.context": xhquant_context,
     }
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -237,7 +241,7 @@ def _assert_generation_contract(records, model_config, *, prompt, think, expecte
     assert model_config.use_cache is True
     assert records.generate_kwargs["input_ids"] == [[10, 11]]
     assert records.generate_kwargs["max_new_tokens"] == 1024
-    assert records.generate_kwargs["do_sample"] is True
+    assert records.generate_kwargs["do_sample"] is False
     assert records.generate_kwargs["pad_token_id"] == 7
     assert records.generate_kwargs["streamer"] is records.streamers[0]
     assert records.decoded[-1] == (expected_output_ids, True)

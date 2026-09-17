@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 import torch
 from transformers import TextStreamer
 
+from examples_merak.llm.qwen3.debug_scripts.qwen3_xh2a_forward import _read_prompt
 from xhmodel_merak.xh_llm import (
     AutoLLMConfig,
     AutoLLMModel,
@@ -72,11 +73,7 @@ def main(args):
     xh_model.set_state(eval_type)
 
     enable_think = args.think
-    # prompt = "你多大了？用中文回答。"
-    prompt = args.prompt
-    if Path(prompt).is_file():
-        with open(prompt, "r") as f:
-            prompt = f.read()
+    prompt = _read_prompt(args.prompt)
     messages = [
         {"role": "user", "content": prompt},
     ]
@@ -98,7 +95,11 @@ def main(args):
     ]
     with ContextManagers(contexts):
         generated_ids = xh_model.generate(
-            **model_inputs, max_new_tokens=1024, streamer=streamer, do_sample=True, pad_token_id=tokenizer.eos_token_id
+            **model_inputs,
+            max_new_tokens=1024,
+            streamer=streamer,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
         )
 
     output_ids = generated_ids[0][len(model_inputs.input_ids[0]) :].tolist()

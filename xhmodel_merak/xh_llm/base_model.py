@@ -1546,6 +1546,13 @@ class XHBaseModel(DeviceMixin):
                 ]:
                     inference_model.to(device)
 
+                def apply_fn(module):
+                    if not hasattr(module, "_set_device"):
+                        return
+                    module._set_device(device)
+
+                inference_model.apply(apply_fn)
+
     def _set_dtype(self, dtype: torch.dtype | str | None):
         if dtype is None:
             return
@@ -1562,6 +1569,14 @@ class XHBaseModel(DeviceMixin):
                 inference_model = inference_model.to(self._dtype)
         else:
             inference_model = inference_model.to(self._dtype)
+        if dtype is not None:
+
+            def apply_fn(module):
+                if not hasattr(module, "_set_dtype"):
+                    return
+                module._set_dtype(dtype)
+
+            inference_model.apply(apply_fn)
 
     # 模型导出
     @classmethod

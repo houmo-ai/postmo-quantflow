@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "remove-saturate",
+      "patterns": [
+        "examples_merak/llm/qwen3/debug_scripts/remove_staure.py"
+      ]
+    }
+  ]
+}
