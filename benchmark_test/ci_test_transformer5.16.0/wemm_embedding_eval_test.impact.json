@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "wemm-embedding-evaluation",
+      "patterns": [
+        "examples_merak/llm/wemm_embedding/**"
+      ]
+    }
+  ]
+}

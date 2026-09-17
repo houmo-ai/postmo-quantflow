@@ -1,0 +1,96 @@
+schema_version: 2
+external:
+  model:
+    id: wemm_embedding_9b
+    family: wemm_embedding
+    display_name: WeMM-Embedding 9B
+  parameters:
+    total: 9407831280
+    active: 9407831280
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 256]
+    prefill: 4.81681
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 按 2 × checkpoint 参数量 × 256 token 估算的 Dense 上界；embedding runtime 不支持 decode。
+  precision:
+    float_format: BF16
+    quantized_format: w4a8h0_ssfp
+    comparisons: []
+  owner: jing.huang
+internal:
+  model:
+    type: llm_models
+    modality: [embedding, text, image, video]
+    task: [inference, retrieval]
+    tags: [merak, xh2a, autoround, gptq, w4a8]
+  source:
+    provider: Tencent
+    name: WeMM-Embedding-9B
+    url: https://huggingface.co/tencent/WeMM-Embedding-9B
+    license: Apache-2.0
+    raw_model_path: /data01/datasets/WeMM-Embedding-9B
+  components:
+  - id: model
+    display_name: WeMM-Embedding 9B
+    type: llm_models
+    precision: language_w4a8_visual_w8a8
+    inputs:
+    - name: multimodal_input
+      type: text_image_video
+      required: true
+      description: 文本、图像、视频或混合多模态 item；视觉图使用与 Qwen3.5 相同的动态 patch 档位。
+    outputs:
+    - name: embedding
+      type: tensor
+      required: true
+      description: 4096 维 FP32 L2 归一化 embedding。
+  io:
+    inputs:
+    - name: multimodal_input
+      type: text_image_video
+      required: true
+      description: 文本、图像、视频或混合多模态 item；视觉图使用与 Qwen3.5 相同的动态 patch 档位。
+    outputs:
+    - name: embedding
+      type: tensor
+      required: true
+      description: 4096 维 FP32 L2 归一化 embedding。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/wemm_embedding/9b/wemm_embedding_9b_xh2a_w4a8.yaml
+    model_dir: /data01/datasets/WeMM-Embedding-9B
+    class: auto
+    actions: [quant, export, dump_golden, eval]
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: language_w4a8_visual_w8a8
+      components:
+        model_quant_scheme: w4a8h0_ssfp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 42
+    work_dir: work_dirs/merak_delivery/wemm_embedding_9b
+  release:
+    version_id: wemm_embedding_9b_w4a8h0_ssfp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models: []
+  presentation:
+    summary: WeMM-Embedding 9B 的 AutoRound/GPTQ W4G64 语言分支与 W8A8 视觉分支 HMONNX workflow；AutoRound int_sym_xh 已完成 Flickr30K 与两项 MMEB-v3 图像任务复测。
+    demo:
+      kind: python
+      path: examples_merak/llm/wemm_embedding/hmonnx_demo.py
+    limitations:
+    - HMONNX embedding API 使用 256-token prefill 图重复执行，每个 item 累计最多支持 2048 个 processed tokens。
+    - 当前 patch 档位图尚需验证真实视频推理。
+    - 本轮 MMEB-v3 仅覆盖 Visual7W 和 ChartQA 两项图像任务；结果见 examples_merak/llm/wemm_embedding/ACCURACY_REPORT.md。
+    - GPTQ 旧产物已清理，本轮只重新量化 AutoRound。
+    evidence:
+      examples: [examples_merak/llm/wemm_embedding]
+      readme: [examples_merak/llm/wemm_embedding/README.md, examples_merak/llm/wemm_embedding/ACCURACY_REPORT.md]

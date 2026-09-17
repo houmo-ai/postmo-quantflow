@@ -36,6 +36,9 @@ EXPECTED_VARIANTS = {
     "pi0.5-libero": ["lerobot-h50"],
     "kokoro-82m-v1.1-zh": ["full"],
     "moss-transcribe-diarize-0.9b": ["full"],
+    "wemm-embedding-2b": ["full"],
+    "wemm-embedding-4b": ["full"],
+    "wemm-embedding-9b": ["full"],
 }
 
 
@@ -51,7 +54,7 @@ def test_distributed_catalog_preserves_the_full_public_description_snapshot():
     # First-release API: one public model_id; export naming stays internal.
     payload = json.dumps(descriptions, sort_keys=True, separators=(",", ":")).encode()
 
-    assert hashlib.sha256(payload).hexdigest() == "ba6189a7b3874181266ffb82f9a828672cbf46da53d00465feb813b49c9c242f"
+    assert hashlib.sha256(payload).hexdigest() == "12dd7cb8c46f8d5b4ef91029fc86fe1e72651915e5f19aa413a94db861be4d93"
 
 
 @pytest.mark.parametrize("model_id", EXPECTED_VARIANTS)
@@ -201,6 +204,13 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
                 "image_token_gears": [96, 196, 384, 704, 1024, 1280],
                 "static_profiles": [],
             }
+        elif model.startswith("wemm-embedding"):
+            assert description["vision"] == {
+                "mode": "dynamic_token_gears",
+                "profile": "visualm96-196-384-704-1536",
+                "image_token_gears": [96, 196, 384, 704, 1536],
+                "static_profiles": [],
+            }
         elif not model.startswith(("macaron", "qwen", "ornith")) or model == "qwen3-next-80b-a3b":
             assert description["vision"] is None
         else:
@@ -221,8 +231,7 @@ def test_paddleocr_vl_description_exposes_document_runtime_contract():
         {
             "name": "full",
             "workflow_config": (
-                "configs_merak/workflows/xh2a/llm_models/paddleocr_vl/"
-                "paddleocr_vl_1_6_r1_autoround_w8_token_gears.yaml"
+                "configs_merak/workflows/xh2a/llm_models/paddleocr_vl/paddleocr_vl_1_6_r1_autoround_w8_token_gears.yaml"
             ),
             "speculative_mode": None,
             "requires_lora": False,

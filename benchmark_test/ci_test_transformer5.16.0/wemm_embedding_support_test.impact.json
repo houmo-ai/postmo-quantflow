@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "wemm-embedding-support",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/wemm_embedding/**",
+        "xhmodel_merak/xh_llm/models/qwen3_5/data_preprocess.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/processing_qwen3_5.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/quant_adapter.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_processor.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/visual_token_gears.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/workflow.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py",
+        "configs_merak/workflows/xh2a/llm_models/wemm_embedding/**",
+        "examples_merak/llm/wemm_embedding/**"
+      ]
+    }
+  ]
+}

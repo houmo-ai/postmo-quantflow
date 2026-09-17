@@ -1,0 +1,63 @@
+quant:
+  # Qwen3.5 dispatches on algorithm; backend is not a workflow schema key.
+  algorithm: gptqmodel  # GPTQModel library backend, not the quant method
+  method: autoround  # AutoRound algorithm selected by this recipe
+  output_format: gptqmodel_hf
+  artifact_format: gptqmodel_hf
+  # 当前 Qwen3.5 AutoRound recipe 仅量化语言分支；视觉分支不参与
+  # AutoRound 权重量化，并在下方按 W8A8 方案导出。
+  mode: llm-only
+  bits: 4
+  group_size: 64
+  rotation: false
+  calibration:
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    text_key: text
+    nsamples: 256
+    seqlen: 2048
+  runtime:
+    batch_size: 8
+    trust_remote_code: true
+    low_gpu_mem_usage: true
+  seed: 42
+  sym: true
+  data_type: int_sym_xh
+  iters: 400
+  format: auto_gptq
+  quant_nontext_module: false
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: WeMMEmbedding
+    # 占位字段，导出时由 workflow 覆盖为真实模型目录
+    hf_model: null
+    model_name: wemm_embedding_9b
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    support_long_context_over_fp16_limit: true
+    use_cache: true
+    num_logits_to_keep: 0
+    linear_attention_mode: auto
+    linear_chunk_size: 64
+    split_conv_cache: true
+    normalize_force_fp32: false
+    use_manual_depthwise_conv1d: false
+    fuse_gdr_ops: true
+    fuse_gdr_block_recurrent_ops: true
+    quant_scheme:
+      quant_type: w4a8h0_ssfp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+    visual_config:
+      visual_input_mode: patches
+      image_token_gears: [96, 196, 384, 704, 1536]
+      image_token_capacity: 1536
+      spatial_merge_size: 2
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+        ops: {}
+    only_first_block: false
