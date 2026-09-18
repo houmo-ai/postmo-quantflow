@@ -27,14 +27,14 @@ def build_spec_draft_quant_scheme(
     """
     if head_weight_bits == 8:
         return dict(quant_type=DRAFT_BASE_QUANT_TYPE)
-    if head_weight_bits != 4:
-        raise ValueError(f"Unsupported spec draft head weight bits: {head_weight_bits}. Expected 4 or 8.")
+    if head_weight_bits not in (4, 5):
+        raise ValueError(f"Unsupported spec draft head weight bits: {head_weight_bits}. Expected 4, 5 or 8.")
     return dict(
         quant_type=DRAFT_BASE_QUANT_TYPE,
         nodes_cfg={
             head_node_name: dict(
                 w_schema=dict(
-                    bits=4,
+                    bits=head_weight_bits,
                     fp_mode="ssfp",
                     hidden_bit=False,
                 )
@@ -127,6 +127,7 @@ class XHQwen3_5_MTPConfig(HFModelConfig):  # noqa: N801
         self.use_cache = use_cache
         self.flash_attention = flash_attention
         self.draft_head_weight_bits = draft_head_weight_bits
+        self._mtp_quant_scheme_explicit = getattr(self, "quant_scheme", None) is not None
         if getattr(self, "quant_scheme", None) is None:
             self.quant_scheme = build_spec_draft_quant_scheme(draft_head_weight_bits)
 

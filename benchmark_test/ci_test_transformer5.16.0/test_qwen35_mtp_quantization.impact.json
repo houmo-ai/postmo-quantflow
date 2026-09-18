@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "qwen35-mtp-packed-consumption",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/qwen3_5/mtp_checkpoint.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/_mtp_model_impl.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_mtp_model.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/quant_adapter.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/workflow.py"
+    ]
+  }]
+}

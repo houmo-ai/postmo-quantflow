@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-decode-acep",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/dynamic_prune.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/qwen3_5_moe_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/xh_qwen3_5_moe_config.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe_dynamic_prune/**",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_dynamic_prune.yaml",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w4_decode_prune_256k_fa.yaml"
+      ]
+    }
+  ]
+}

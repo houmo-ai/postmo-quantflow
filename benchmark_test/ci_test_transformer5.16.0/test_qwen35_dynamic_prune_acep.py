@@ -71,28 +71,31 @@ def test_dynamic_prune_block_applies_default_coverage_and_expert_scalars(monkeyp
     torch.testing.assert_close(block.moeblock.s_scalar, torch.ones(4))
 
 
-def test_dynamic_prune_workflow_maps_default_coverage_to_model_override(monkeypatch):
-    from xhmodel_merak.xh_llm.models.qwen3_5.workflow import Qwen35Workflow
-    from xhmodel_merak.xh_llm.models.qwen3_5_moe_dynamic_prune.qwen3_5_moe_dynamic_prune_model import (
-        Qwen35DynamicPruneWorkflow,
+@pytest.mark.parametrize(
+    ("kwargs", "coverage", "scalar_path"),
+    [
+        ({}, 0.85, None),
+        ({"dynamic_prune_threshold": 0.9,
+          "dynamic_prune_s_scalar_path": "legacy.json"}, 0.9, "legacy.json"),
+        ({"dynamic_prune_threshold": 0.9,
+          "dynamic_prune_s_scalar_path": "legacy.json",
+          "dynamic_prune": {"threshold": 0.8, "s_scalar_path": "canonical.json"}},
+         0.8, "canonical.json"),
+    ],
+)
+def test_dynamic_prune_legacy_config_maps_to_canonical_decode_settings(
+    kwargs, coverage, scalar_path,
+):
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe_dynamic_prune.xh_qwen3_5_moe_dynamic_prune_config import (
+        XHQwen3_5MoeDynamicPruneModelConfig,
     )
 
-    class WorkflowConfig:
-        export = {"model": {}}
+    # Configuration now owns legacy translation; the workflow delegates to
+    # the shared export path without manufacturing flat override keys.
+    config = XHQwen3_5MoeDynamicPruneModelConfig(model_name="dynamic-prune-test", **kwargs)
 
-        def with_overrides(self, overrides):
-            assert overrides is None
-            return self
-
-    def capture_export(self, quant_result, output_dir, device, config_overrides=None):
-        return config_overrides
-
-    monkeypatch.setattr(Qwen35Workflow, "export", capture_export)
-    workflow = object.__new__(Qwen35DynamicPruneWorkflow)
-    workflow.workflow_config = WorkflowConfig()
-    workflow.model_dir = "unused"
-
-    overrides = workflow.export(object(), "unused", "cpu")
-
-    assert overrides["export.model.dynamic_prune_threshold"] == pytest.approx(0.85)
-    assert overrides["export.model.dynamic_prune_s_scalar_path"] is None
+    assert config.dynamic_prune["mode"] == "decode"
+    assert config.dynamic_prune["threshold"] == pytest.approx(coverage)
+    assert config.dynamic_prune["s_scalar_path"] == scalar_path
+    assert config.dynamic_prune_threshold == pytest.approx(coverage)
+    assert config.dynamic_prune_s_scalar_path == scalar_path

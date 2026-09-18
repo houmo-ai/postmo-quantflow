@@ -1,3 +1,4 @@
+import copy
 import gc
 import json
 from collections.abc import Mapping
@@ -31,11 +32,23 @@ def finalize_qwen35_merak_runtime_config(export_result: ExportResult) -> Path:
 
     ``export_hmonnx`` owns the graph and golden metadata while the workflow
     owns the release layout.  Keeping this finalization here ensures normal,
-    MTP, and DFlash exports all receive the same runtime entry point instead
-    of relying on a later manual copy.
+    MTP, DFlash, and LoRA adapter views all receive their own runtime entry
+    point instead of relying on a later manual copy.
     """
 
     meta_path = Path(BaseLLMWorkflow._find_golden_meta_file(export_result))
+    config_path = _write_qwen35_merak_runtime_config(meta_path)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    root_dir = meta_path.parent.resolve()
+    for adapter in meta.get("lora_adapters") or []:
+        adapter_meta = (root_dir / adapter["meta_file"]).resolve()
+        if not adapter_meta.is_relative_to(root_dir) or adapter_meta == meta_path.resolve():
+            raise ValueError("LoRA runtime metadata must refer to a child of the exported model")
+        _write_qwen35_merak_runtime_config(adapter_meta)
+    return config_path
+
+
+def _write_qwen35_merak_runtime_config(meta_path: Path) -> Path:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     if not isinstance(meta, dict):
         raise TypeError(f"Qwen3.5 golden metadata must be an object: {meta_path}")
@@ -155,13 +168,23 @@ class Qwen35Workflow(BaseLLMWorkflow):
         self._validate_export_model(config_overrides)
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         quant_result = self._prepare_export_head(quant_result, workflow_config, device)
-        export_result = super().export(
+        # Resolve checkpoint precision before creating the export directory,
+        # and persist the actual per-node scheme in the exported workflow YAML.
+        resolved = self._build_export_config(quant_result, workflow_config)
+        export_workflow = self
+        if resolved["model"].get("quant_scheme") != workflow_config.export["model"].get("quant_scheme"):
+            # Generated checkpoint nodes belong to the resolved configuration;
+            # user overrides still require keys present in the original YAML.
+            export_workflow = copy.copy(self)
+            export_workflow.workflow_config = copy.deepcopy(workflow_config)
+            export_workflow.workflow_config.data["export"]["model"]["quant_scheme"] = resolved["model"]["quant_scheme"]
+            config_overrides = None
+        export_result = super(Qwen35Workflow, export_workflow).export(
             quant_result=quant_result,
             output_dir=output_dir,
             device=device,
             config_overrides=config_overrides,
         )
-        workflow_config = self.workflow_config.with_overrides(config_overrides)
         model_type = str(workflow_config.export["model"].get("model_type", ""))
         # A visual-only export deliberately contains no language-model golden
         # metadata.  Its graph/manifest is later referenced by the full model,
@@ -170,6 +193,18 @@ class Qwen35Workflow(BaseLLMWorkflow):
         if not model_type.endswith("_visual"):
             finalize_qwen35_merak_runtime_config(export_result)
         return export_result
+
+    def _build_export_config(self, quant_result, workflow_config):
+        from .mixed_precision import apply_checkpoint_precision
+
+        export_cfg = super()._build_export_config(quant_result, workflow_config)
+        quant_cfg = workflow_config.quant
+        if quant_cfg is None:
+            quant_cfg = self.workflow_config.quant or {}
+        requested = quant_cfg.get("auto_mixed_precision")
+        required = requested is not None and requested is not False
+        return apply_checkpoint_precision(
+            export_cfg, self._resolve_export_model_dir(quant_result), required=required)
 
     def _prepare_export_head(self, quant_result, workflow_config, device):
         from .quant_adapter import _head_recipe_kwargs, prepare_head_checkpoint_api
@@ -181,7 +216,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         if quant_cfg is None:
             quant_cfg = self.workflow_config.quant or {}
         export_cfg = workflow_config.export["model"]
-        if not _head_recipe_kwargs(quant_cfg, export_cfg):
+        if not _head_recipe_kwargs(quant_cfg, export_cfg) and quant_cfg.get("mtp") is None:
             return quant_result
         result = prepare_head_checkpoint_api(
             raw_model_dir=self.model_dir,

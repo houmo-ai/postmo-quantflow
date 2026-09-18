@@ -84,6 +84,10 @@ def test_moe_source_selects_its_registered_block_export(filename, expects_layout
         layout = f"{SUITE_RELATIVE}/test_qwen35_visual_release_layout.py"
         expected.add(layout)
         assert f"rule:qwen35-visual-release-layout:{changed}" in selection.reasons[layout]
+    if filename in {"qwen3_5_moe_model.py", "xh_qwen3_5_moe_config.py"}:
+        decode_prune = f"{SUITE_RELATIVE}/test_qwen35_decode_prune.py"
+        expected.add(decode_prune)
+        assert f"rule:qwen35-decode-acep:{changed}" in selection.reasons[decode_prune]
     assert set(selection.tests) == expected
     assert f"rule:qwen35-moe-source:{changed}" in selection.reasons[target]
     assert selection.full_suite is False

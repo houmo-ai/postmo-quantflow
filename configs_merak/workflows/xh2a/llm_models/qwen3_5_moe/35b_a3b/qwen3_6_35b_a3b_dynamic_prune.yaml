@@ -35,6 +35,7 @@ export:
         quant_type: w8a8h1_sefp
         ops: {}
     dynamic_prune:
+      mode: decode
       # ACEP Top-P cumulative proxy-probability coverage.
       threshold: 0.85
       s_scalar_path: null

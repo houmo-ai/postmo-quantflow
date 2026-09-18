@@ -94,6 +94,45 @@ ModelZoo 将其与 packed 张量传给 xhquant，图精度按逻辑位宽选择�
 进行。该契约不引入官方 `gptq_p` 布局。用法见
 [Qwen MoE README](../../examples_merak/llm/qwen3_5_moe/README.md#qwen36-35b-a3b-head-w4--w5)。
 
+## Qwen MoE 自动混合精度
+
+`quant.auto_mixed_precision` 是可选的 recipe 输入。ModelZoo 仅做字段/数据路径映射，
+搜索、候选数值近似、整模 KL/NLL 评估、静态分配和最终量化由 GPTQModel 完成。
+搜索以 block 的 attention 主投影、shared expert 为组，W4/W5/W8 可选；非共享专家
+由 `quant.moe` 固定配置。搜索采用文本和可选图像回答的 RTN 筛选，加既有 AutoRound/GPTQ 最终校准，
+不把筛选阈值解释为最终模型或多模态任务精度承诺。
+
+图像 JSONL 解析、原生 processor/视觉编码/M-RoPE、回答位置掩码和缓存由 GPTQModel
+完成；ModelZoo 仅解析 `image_dataset` 等资源路径。文本和图像分别满足 KL/PPL 预算，
+不能合并平均值掩盖某一模态退化。视觉和 embedding 未参与搜索，可缓存原生语言模型的
+真实输入；缓存必须以未缓存的原生图像前向验证。最终校准数据仍单独配置。
+
+`auto_mixed_precision` 与 `head.bits` 属于同一份 quant 配置。一次 recipe 先搜索并锁定
+block 位宽，恢复浮点权重后执行主干 AutoRound/GPTQ，再用已量化主干的输出激活
+校准浮点 head。最终输出目录包含主干、head 和位宽表，内部临时主干由 recipe 清理；
+ModelZoo 不把它拆成多个配置或要求用户手工补量化。Head 默认继承主干算法。
+
+producer 在 checkpoint metadata 和 `auto_mixed_precision.json` 中记录逻辑位宽，
+head 补量化须保留分配。消费侧校验 producer 的位宽/packed 张量契约并为每个目标
+投影生成导出配置，W5 不得被默认 W8 覆盖；已有 checkpoint 不因跳过量化而跳过
+分配校验。原 YAML 不开启该字段时保持旧行为。用法见
+[Qwen MoE README](../../examples_merak/llm/qwen3_5_moe/README.md#自动-block-混合精度)。
+
+## Qwen MoE MTP 专家补量化
+
+`quant.mtp` 是显式启用项，旧 YAML 不变。GPTQModel recipe 负责从传入主模型
+（可包含已量化主干和 head）采集 post-norm hidden，与 next-token embedding
+对齐，再经过 MTP 融合 FC、attention 和 norm，校准非共享专家的三矩阵。
+算法默认沿用 head 补量化的 `inherit` 识别规则：AutoRound 主体使用 AutoRound
+联合重建，GPTQ 主体使用 true-sequential GPTQ。固定 W4/G64/int_sym_xh，
+不参与主干混合精度搜索。
+
+生产端以独立 `mtp_quantization` 元数据及 canonical GPTQ V2 专家载荷保存到
+新目录，主干和主 head 的张量与配置不变。已量化 MTP 按真实载荷校验后复用。
+ModelZoo 只读取该契约、保留整数码、绑定匹配的导出位宽；MTP 其余主干沿用
+RTN SEFP W8。已打包主 head 必须读取其实际载荷，不能对 untied head 回退到
+embedding。producer 的 teacher-forcing 验证与 runtime 接收率分别记录。
+
 ## 验证边界
 
 ModelZoo 的新增测试统一位于 [当前 CI](../../benchmark_test/ci_test_transformer5.16.0/README.md)，

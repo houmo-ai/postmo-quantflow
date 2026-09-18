@@ -19,6 +19,110 @@ Attention、shared expert 和 routed expert 的位宽看 YAML 的 `quant.moe`；
 W8、FA16 等对照配置不因默认 dtype 变化而改变。
 MTP 直接复用 Base 的量化目录，导出时加 `--export-from-quanted-model`。
 
+## 自动 block 混合精度
+
+Qwen3.5/Qwen3.6 MoE 可以在 `quant` 下添加 `auto_mixed_precision: true`。
+推荐使用 KL 0.03 + Head W5 的完整配置
+[qwen3_6_35b_a3b_full_head_w5_auto_mixed.yaml](../../../../configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w5_auto_mixed.yaml)。
+同一份配置、一次 workflow 会依次完成：
+
+1. 32 条文本 + 64 条 RealWorldQA 短答案做轻量 RTN 搜索，按 block 确定 attention 和共享专家的 W4/W5/W8；非共享专家固定 W4。
+2. 恢复浮点权重，按分配表用 AutoRound 校准主干（Pile 256 条、长度 2048、400 次迭代、batch size 8、seed 42）。
+3. 回放已量化主干，使用其输出激活校准浮点 Head 为 W5，保存完整 checkpoint 并继续导出。
+
+`quant.head.bits: 5` 和导出 `lm_head: w5a8h1_sefp` 已在同一 YAML 中配置，
+无需中间 Head W4 模型或手工执行 head 补量化。`--quant-output-dir` 是包含主干、
+Head W5 和分配表的最终目录，临时主干在流程结束后清理。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir weights/Qwen3.6-35B-A3B \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w5_auto_mixed.yaml \
+  --quant-output-dir work_dirs/Qwen3.6-35B-A3B_auto_mixed_head_w5 \
+  --export-output-dir work_dirs/Qwen3.6-35B-A3B_auto_mixed_head_w5_export
+```
+
+Head W4 配置仍可选
+[qwen3_6_35b_a3b_full_head_w4_auto_mixed.yaml](../../../../configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w4_auto_mixed.yaml)。
+未配置或设为 `false` 时沿用原量化流程。需要调节搜索时改为字典：
+
+```yaml
+quant:
+  method: autoround              # 也支持 gptq
+  head: {bits: 5}                # export 的 lm_head 同步使用 W5
+  auto_mixed_precision:
+    candidates: [4, 5, 8]
+    initial_bits: 5
+    max_kl: 0.03                 # RTN 搜索 KL，nats / 有效预测 token
+    max_ppl_increase: 0.02       # 搜索抽样 PPL 相对增幅，0.02 = 2%
+    nsamples: 32
+    seqlen: 512
+    positions_per_sample: 64
+    max_trials: 24
+    seed: 42
+    image_dataset: xh2modelzoo://data/calib_data/realworldqa_search_64.jsonl
+    image_nsamples: 64
+    image_seqlen: 2048
+    image_max_pixels: 393216
+  moe:
+    expert_bits: 4              # 非共享专家固定配置，不参加搜索
+    expert_down_bits: 4
+```
+
+每层有两个独立搜索组：attention 主投影与 shared expert 的 gate/up/down。
+Full attention 的 q/k/v/o 同位宽；linear attention 的 qkv/z/out 同位宽。
+router、shared_expert_gate、linear attention 的 a/b 小投影、卷积、norm、视觉及 head
+不参加搜索，继续使用各自配置。35B-A3B 有 40 层、80 个搜索组；层数由模型读取。
+W5 使用本地 8 bit 槽位、5 bit 数值范围，逻辑权重开销按 5 bit 计算。
+
+生产端先以原生浮点模型为参考采集文本输出和投影输入，用对称分组 RTN 生成候选。
+输入重建误差只用于排序；从全 W5 开始，每次实际运行整模，检查累计方案的输出 KL
+与抽样 NLL/PPL。超阈值则按排序分批回退 W8（批量由层数和试验预算计算，
+确保必要时能评估全 W8）。找到可行方案后，分批撤销不必要的 W8 回退，
+仅对拒绝的批次二分细查，最后继续尝试逐组下降到 W5/W4。已评估的相同方案复用指标。
+这是有预算的贪心搜索，不保证全局最优；预算用完仍无可行方案会报错，不继续量化。
+选定分配后恢复全部浮点权重，再调用所选 AutoRound/GPTQ 完成最终校准和保存。
+
+KL 使用相同输入历史上的 `KL(P_float || Q_candidate)`，全词表、温度 1、自然对数，
+按有效预测 token 平均；排除 padding 和没有下一 token 的位置。
+`positions_per_sample` 均匀抽取位置，报告的 PPL 是这些位置上的相对指标，不是全语料 PPL。
+配置 `image_dataset` 后，文本与图像回答的 KL/PPL **分别**检查同一组阈值，必须都通过。
+图像样本格式为 `{"image":"images/a.png","text":"问题","answer":"参考答案"}`，
+图片路径相对 JSONL，也可使用本地绝对路径。实际运行原生 processor、视觉编码和 M-RoPE；
+缓存不变的视觉输入后回放完整语言模型。只评分回答 token，不评分图像占位符与问题。
+支持 OCR、描述及问答，不要求选择题；可选 `options` 提供单 token 答案标签，
+用于额外记录正确数和选项一致率，问题中须自行包含选项文本。
+未设置 `image_dataset` 时仍可只搜索文本；显式提供后缺图片或格式错误会报错。
+`image_seqlen` 限制完整图文序列长度，超长报错，不截断图像 token。
+示例的 64 张 RealWorldQA 图片来自之前的候选筛选池，属于搜索数据，不能作为独立验收。
+图片准备说明见 [校准数据](../../../../data/calib_data/README.md)。
+
+报告的 `metrics.modalities` 保存两种模态各自的结果；顶层 KL/PPL 取较差的模态。
+文本已失败的候选会跳过图像回放并记录 `skipped_modalities`；接受的候选必须两者齐全。
+搜索前额外测一次全 W8 对照，不占 `max_trials` 候选预算。
+默认阈值是筛选起点，需要按业务验证调整；它们**不承诺最终 checkpoint 的任务精度**。
+搜索时未搜索的模块保持浮点；最终专家/head 的量化误差、A8、图片、长上下文和 decode
+仍须单独验证。图像回答评分参与搜索，不代表全量多模态任务验收通过。
+最终 AutoRound/GPTQ 校准仍由其独立的 `quant.calibration` 数据配置控制。
+
+搜索默认复用量化数据源，也可设置 `auto_mixed_precision.dataset` 指向独立 JSONL
+或 HF 文本数据集，`text_key` 默认 `text`；`dataset` 和 `image_dataset` 都支持 ModelZoo 资源 URI。
+建议独立保留最终验收集，避免用搜索样本报告任务精度。搜索当前把原生模型放到单卡，
+可用 `auto_mixed_precision.device: cuda:0` 指定；35B-A3B 建议使用 80 GB GPU。
+这与最终校准的 `runtime.device_map` / `low_gpu_mem_usage` 分开。
+首版不支持搜索已经打包的 checkpoint、rotation、磁盘 offload 或只量化部分层。
+
+成功的 checkpoint 内包含 `auto_mixed_precision.json`（样本摘要、阈值、每次试验与分配）
+和 `config.json -> quantization_config.meta.auto_mixed_precision`（静态逻辑位宽）。
+head 补校准会保留它们。导出自动读取并校验实际 packed 张量形状与位宽配置，把结果
+设置到每个投影的 Merak 量化配置；显式逐节点设置与产物冲突时直接报错。
+全局 W8 和 `lm_head` 配置不需要手工展开成 40 层。
+
+已有自动搜索产物可照常用 `--export-from-quanted-model`；不会再次搜索。
+开启此字段却传入没有分配表的旧产物会报错，应先从浮点模型运行新 recipe。
+失败或成功搜索的中间报告写到量化输出目录旁的
+`<output_dir>.auto_mixed_precision_search.json`，便于检查失败原因。
+
 ## Qwen3.6-35B-A3B head W4 / W5
 
 现有 Qwen3.5/Qwen3.6 YAML 和 W8 head 路径保持不变。只有导出 head 小于 8 bit

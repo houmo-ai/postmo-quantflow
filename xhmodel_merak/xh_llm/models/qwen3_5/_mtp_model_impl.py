@@ -491,6 +491,10 @@ class MTPModel(nn.Module):
         mtp_sd = {}
         lm_head_weight = None
         embed_weight = None
+        head_is_packed = False
+        mtp_quantized = bool(cfg.get("mtp_quantization"))
+        index_path = Path(target_model_dir) / "model.safetensors.index.json"
+        weight_map = json.loads(index_path.read_text())["weight_map"] if index_path.exists() else None
         packed_gate_proj_weight = None
         packed_up_proj_weight = None
         packed_down_proj_weight = None
@@ -511,7 +515,11 @@ class MTPModel(nn.Module):
         for sf_path in sorted(Path(target_model_dir).glob("*.safetensors")):
             with safe_open(str(sf_path), framework="pt") as f:
                 for key in f.keys():
+                    if weight_map is not None and weight_map.get(key) != sf_path.name:
+                        continue
                     if key.startswith("mtp."):
+                        if mtp_quantized and key.startswith("mtp.layers.0.mlp.experts."):
+                            continue
                         model_key = key[4:]
                         if model_key.startswith("layers.0."):
                             model_key = "layer." + model_key[len("layers.0.") :]
@@ -543,9 +551,22 @@ class MTPModel(nn.Module):
                         mtp_sd[model_key] = tensor
                     elif key == "lm_head.weight":
                         lm_head_weight = f.get_tensor(key).to(dtype)
+                    elif key == "lm_head.qweight":
+                        head_is_packed = True
                     elif "embed_tokens.weight" in key:
                         embed_weight = f.get_tensor(key).to(dtype)
 
+        expert_codes = None
+        if mtp_quantized:
+            if not is_moe:
+                raise ValueError("Packed MTP experts require a MoE model")
+            from .mtp_checkpoint import load_mtp_packed_experts
+
+            weights, expert_codes = load_mtp_packed_experts(target_model_dir)
+            packed_gate_proj_weight = weights["gate_proj"].to(dtype)
+            packed_up_proj_weight = weights["up_proj"].to(dtype)
+            packed_down_proj_weight = weights["down_proj"].to(dtype)
+            model._mtp_expert_bits = 4
         if is_moe:
             mtp_sd["layer.mlp.moeblock.expert_gate_proj_weight"] = packed_gate_proj_weight
             mtp_sd["layer.mlp.moeblock.expert_up_proj_weight"] = packed_up_proj_weight
@@ -569,13 +590,22 @@ class MTPModel(nn.Module):
             mtp_lm_head_tensor = torch.load(str(mtp_lm_head_path), map_location="cpu").to(dtype)
             model.lm_head.weight.data.copy_(mtp_lm_head_tensor)
             del mtp_lm_head_tensor
+        elif head_is_packed:
+            if lm_head_weight is not None:
+                raise ValueError("MTP source has both floating and packed main head weights")
+            from .mtp_checkpoint import load_mtp_shared_head
+
+            model.lm_head, model._mtp_head_bits = load_mtp_shared_head(target_model_dir)
         elif lm_head_weight is not None:
             model.lm_head.weight.data.copy_(lm_head_weight)
-        elif embed_weight is not None:
+        elif embed_weight is not None and (cfg.get("tie_word_embeddings") or text_cfg.get("tie_word_embeddings")):
             model.lm_head.weight.data.copy_(embed_weight)
         else:
             raise RuntimeError("Could not load lm_head.weight from target model")
 
+        if expert_codes is not None:
+            for proj, codes in expert_codes.items():
+                model.layer.mlp.moeblock.register_buffer(f"expert_{proj}_quant_weight", codes)
         model.to(dtype)
         return model
 

@@ -132,7 +132,27 @@ class XHQwen3_5MoeModel(XHQwen3_5Model):  # noqa: N801
             self._kvcache_mixin._linear_key_dim = linear_attn.key_dim
             self._kvcache_mixin._linear_value_dim = linear_attn.value_dim
 
+        if self.config.dynamic_prune["mode"] == "decode":
+            from .dynamic_prune import prepare_scalars
+
+            self._moe_prune_scalars, scalar_path = prepare_scalars(
+                language_model, self.config.dynamic_prune, self.hf_model_dir, self.work_dir
+            )
+            self.config.dynamic_prune["s_scalar_path"] = scalar_path
+
+    def _to_fronted(self, wrap_model):
+        frontend_model = super()._to_fronted(wrap_model)
+        if self.config.dynamic_prune["mode"] == "decode":
+            from .dynamic_prune import configure_decode_graph
+
+            configure_decode_graph(
+                frontend_model, self._moe_prune_scalars, self.config.dynamic_prune["threshold"]
+            )
+        return frontend_model
+
     def _get_big_language_placeholder_export_components(self):
+        if self.config.dynamic_prune["mode"] == "decode":
+            raise ValueError("Decode ACEP requires regular export (HUGE_MODEL_EXPORT_ENABLED=0)")
         # Import the real MoE wrappers before entering
         # ``traceable_module_placeholder_context``.  The context temporarily
         # replaces these registrations with lightweight placeholder wrappers;

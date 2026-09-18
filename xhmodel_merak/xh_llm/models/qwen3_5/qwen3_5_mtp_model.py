@@ -61,6 +61,14 @@ class XHQwen3_5MTPDraftModel(XHSubModel):
             use_cache=self.config.use_cache,
             flash_attention=self.config.flash_attention,
         )
+        from .mtp_checkpoint import configure_packed_mtp_scheme
+
+        actual_head_bits = getattr(model, "_mtp_head_bits", self.config.draft_head_weight_bits)
+        if actual_head_bits != self.config.draft_head_weight_bits:
+            raise ValueError(f"MTP draft head W{self.config.draft_head_weight_bits} conflicts with "
+                             f"packed shared main head W{actual_head_bits}")
+        self.config.quant_scheme = configure_packed_mtp_scheme(
+            self.config.quant_scheme, model, explicit=self.config._mtp_quant_scheme_explicit)
         self._wrap_model = model
 
     def _to_fronted(self, wrap_model):

@@ -152,6 +152,9 @@ def build_qwen35_autoround_kwargs(
         )
         kwargs["format"] = str(quant_cfg.get("format", quant_cfg.get("autoround_format", "auto_round:gptqmodel")))
     kwargs.update(_head_recipe_kwargs(quant_cfg, export_model_cfg))
+    if quant_cfg.get("mtp") is not None:
+        kwargs["mtp"] = dict(quant_cfg["mtp"])
+    kwargs.update(_auto_mixed_precision_kwargs(quant_cfg))
     return {key: value for key, value in kwargs.items() if value is not None}
 
 
@@ -229,7 +232,23 @@ def build_qwen35_gptqmodel_kwargs(
             }
         )
     kwargs.update(_head_recipe_kwargs(quant_cfg, export_model_cfg))
+    if quant_cfg.get("mtp") is not None:
+        kwargs["mtp"] = dict(quant_cfg["mtp"])
+    kwargs.update(_auto_mixed_precision_kwargs(quant_cfg))
     return {key: value for key, value in kwargs.items() if value is not None}
+
+
+def _auto_mixed_precision_kwargs(quant_cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve producer search resources identically for GPTQ and AutoRound."""
+    if "auto_mixed_precision" not in quant_cfg:
+        return {}
+    value = quant_cfg["auto_mixed_precision"]
+    if isinstance(value, Mapping):
+        value = dict(value)
+        for key in ("dataset", "image_dataset"):
+            if value.get(key):
+                value[key] = _resolve_autoround_dataset_value(value[key])
+    return {"auto_mixed_precision": value}
 
 
 def _head_recipe_kwargs(quant_cfg: Mapping[str, Any], export_model_cfg: Mapping[str, Any]) -> dict[str, Any]:
@@ -267,7 +286,8 @@ def prepare_head_checkpoint_api(*, model_dir, raw_model_dir, device, quant_cfg,
                                 export_model_cfg, workflow_seed) -> QuantResult:
     """Validate/reuse or complete a checkpoint through GPTQModel before export."""
     kwargs = _head_recipe_kwargs(quant_cfg, export_model_cfg)
-    if not kwargs:
+    mtp = quant_cfg.get("mtp")
+    if not kwargs and mtp is None:
         return QuantResult(raw_model_dir=raw_model_dir, quanted_model_dir=model_dir)
     calibration = _section(quant_cfg, "calibration")
     value = calibration.get("jsonl", calibration.get("dataset", DEFAULT_AUTOROUND_DATASET))
@@ -280,13 +300,19 @@ def prepare_head_checkpoint_api(*, model_dir, raw_model_dir, device, quant_cfg,
     else:
         text = _resolve_calibration_value(text)
     source_key = "calibration_jsonl" if _is_path_like_value(text) or Path(text).is_file() else "calibration_dataset"
-    recipe = _load_callable("gptqmodel.recipes.qwen35_head", "quantize_qwen35_head",
-                            "Low-bit Qwen head requires the GPTQModel qwen35_head recipe API.")
-    result = recipe(model_dir=model_dir, **kwargs, **{source_key: text}, device=device,
-                    nsamples=int(calibration.get("nsamples", 256)),
-                    seqlen=int(calibration.get("seqlen", 2048)),
-                    calibration_text_key=calibration.get("text_key", "text"),
-                    seed=int(quant_cfg.get("seed", workflow_seed)))
+    common = {source_key: text, "device": device, "nsamples": int(calibration.get("nsamples", 256)),
+              "seqlen": int(calibration.get("seqlen", 2048)),
+              "calibration_text_key": calibration.get("text_key", "text"),
+              "seed": int(quant_cfg.get("seed", workflow_seed))}
+    if kwargs:
+        recipe = _load_callable("gptqmodel.recipes.qwen35_head", "quantize_qwen35_head",
+                                "Low-bit Qwen head requires the GPTQModel qwen35_head recipe API.")
+        result = recipe(model_dir=model_dir, **kwargs, **common)
+        model_dir = _result_output_dir(result, model_dir)
+    if mtp is not None:
+        recipe = _load_callable("gptqmodel.recipes.qwen35_mtp", "quantize_qwen35_mtp",
+                                "MTP expert calibration requires the GPTQModel qwen35_mtp recipe API.")
+        result = recipe(model_dir=model_dir, mtp=dict(mtp), **common)
     return QuantResult(raw_model_dir=raw_model_dir,
                        quanted_model_dir=_normalize_path(_result_output_dir(result, model_dir)),
                        meta=_result_provenance(result))

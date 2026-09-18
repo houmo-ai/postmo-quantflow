@@ -249,7 +249,13 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             )
 
         length_classes = tuple(
-            page_attn_m.capture_cache_length_class(effective_kv_length)
+            (
+                page_attn_m.capture_cache_length_class(
+                    effective_kv_length, query_length=slot_mapping.numel()
+                )
+                if not self._llm_prefill and slot_mapping.numel() > 1
+                else page_attn_m.capture_cache_length_class(effective_kv_length)
+            )
             for page_attn_m in page_attention_modules
             if callable(getattr(page_attn_m, "capture_cache_length_class", None))
         )

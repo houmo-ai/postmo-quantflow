@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "page-attention-verify-capture-context",
+    "patterns": ["xhmodel_merak/xh_llm/hmonnx/base_llm_hmonnx_model.py"]
+  }]
+}

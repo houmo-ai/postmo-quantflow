@@ -875,6 +875,14 @@ class HybridGatedDeltaNetMixin:
             self.in_proj_q.weight.data.copy_(q_weight)
             self.in_proj_k.weight.data.copy_(k_weight)
             self.in_proj_v.weight.data.copy_(v_weight)
+            if hasattr(self.in_proj_qkv, "quant_weight"):
+                quant_parts = _split_linear_qkv_tensor(
+                    self.in_proj_qkv.quant_weight.detach(), self.key_dim, self.value_dim, dim=0,
+                )
+                for projection, quant_weight in zip(
+                    (self.in_proj_q, self.in_proj_k, self.in_proj_v), quant_parts, strict=True,
+                ):
+                    projection.register_buffer("quant_weight", quant_weight.clone())
             if proj_has_bias:
                 q_bias, k_bias, v_bias = _split_linear_qkv_tensor(
                     self.in_proj_qkv.bias.detach().clone(),

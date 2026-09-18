@@ -461,8 +461,8 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path, child_has_emb
         (root_dir / visual_dir).mkdir(parents=True, exist_ok=True)
         _write_graph(root_dir / visual_dir / "visual.onnx", "visual_external_data")
         (root_dir / visual_dir / "step_0").mkdir()
-    (root_dir / "mtp_draft_prefill").mkdir()
-    (root_dir / "mtp_draft_prefill" / "mtp.onnx").write_bytes(b"mtp")
+    for phase in ("prefill", "decode"):
+        _write_graph(root_dir / f"mtp_draft_{phase}" / "mtp.onnx", "mtp_external_data")
     root_meta = VLLMModelMeta(
         hf_config="hf_config",
         quant_embedding="quant_embedding.pt",
@@ -480,7 +480,16 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path, child_has_emb
     )
     root_meta.mtp_prefill_config = VisualModelMeta()
     root_meta.mtp_prefill_config.hmonnx = "mtp_draft_prefill/mtp.onnx"
-    root_meta.spec_decode = {"mode": "mtp", "draft_prefill_onnx": "mtp_draft_prefill/mtp.onnx"}
+    root_meta.spec_decode = {
+        "mode": "mtp",
+        "draft": {
+            "prefill_hmonnx": "mtp_draft_prefill/mtp.onnx",
+            "decode_hmonnx": "mtp_draft_decode/mtp.onnx",
+        },
+    }
+    # The component metadata also remains available to ModelZoo consumers.
+    root_meta.mtp_decode_config = VisualModelMeta()
+    root_meta.mtp_decode_config.hmonnx = "mtp_draft_decode/mtp.onnx"
 
     graph_meta = VLLMModelMeta(
         prefill_hmonnx="prefill/adapter.onnx",
@@ -512,7 +521,7 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path, child_has_emb
     assert child_meta["hf_config"] == "hf_config"
     assert child_meta["visual_config"]["hmonnx"] == f"{visual_dirs[-1]}/visual.onnx"
     assert child_meta["mtp_prefill_config"]["hmonnx"] == "mtp_draft_prefill/mtp.onnx"
-    assert child_meta["spec_decode"]["draft_prefill_onnx"] == "mtp_draft_prefill/mtp.onnx"
+    assert child_meta["spec_decode"]["draft"] == root_meta.spec_decode["draft"]
     assert child_meta["active_lora"]["scale"] == 2.0
     assert (child_dir / "hf_config").is_dir()
     assert not (child_dir / "hf_config").is_symlink()
@@ -534,7 +543,10 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path, child_has_emb
     manifest = json.loads(manifest_path.read_text())
     assert manifest["gears"] == child_meta["visual_config"]["gears"]
     assert all((child_dir / gear["hmonnx"]).is_file() for gear in manifest["gears"])
-    assert (child_dir / "mtp_draft_prefill" / "mtp.onnx").read_bytes() == b"mtp"
+    for phase in ("prefill", "decode"):
+        for name in ("mtp.onnx", "mtp_external_data"):
+            relative_path = Path(f"mtp_draft_{phase}") / name
+            assert (child_dir / relative_path).read_bytes() == (root_dir / relative_path).read_bytes()
     assert not any(path.is_symlink() for path in child_dir.rglob("*"))
     assert root_meta.quant_embedding == "quant_embedding.pt"
     assert root_meta.lora_adapters[0]["meta_file"] == f"lora/{adapter.name}/golden_meta_info.json"
@@ -556,3 +568,21 @@ def test_lora_child_metadata_reuses_root_artifacts(tmp_path: Path, child_has_emb
         assert (relocated_child / visual_dir / "step_0" / "visual_external_data").is_file()
     manifest = json.loads((relocated_child / root_meta.visual_config.gear_manifest).read_text())
     assert all((relocated_child / gear["hmonnx"]).is_file() for gear in manifest["gears"])
+    shared_graphs = [gear["hmonnx"] for gear in manifest["gears"]]
+    shared_graphs += list(child_meta["spec_decode"]["draft"].values())
+    for relative_graph in shared_graphs:
+        graph_path = relocated_child / relative_graph
+        root_graph = relocated_root / relative_graph
+        # Match the runtime's canonical graph containment contract, including
+        # after relocating the complete bundle, with materialized weights.
+        assert graph_path.resolve().is_relative_to(relocated_child.resolve())
+        assert graph_path.read_bytes() == root_graph.read_bytes()
+        graph = onnx.load(graph_path, load_external_data=False)
+        external_name = next(item.value for item in graph.graph.initializer[0].external_data if item.key == "location")
+        weights = graph_path.parent / external_name
+        assert not weights.is_symlink()
+        assert weights.resolve().is_relative_to(relocated_child.resolve())
+        assert weights.read_bytes() == (root_graph.parent / external_name).read_bytes()
+        onnx.checker.check_model(str(graph_path))
+        loaded = onnx.load(graph_path)
+        np.testing.assert_array_equal(onnx.numpy_helper.to_array(loaded.graph.initializer[0]), [1.0])
