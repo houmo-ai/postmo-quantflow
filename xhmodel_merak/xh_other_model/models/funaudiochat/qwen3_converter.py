@@ -71,7 +71,9 @@ class Qwen3LegacyConverterXH2a(HFTransfromersConverter):
         target_device = config.quant_scheme.target_device
         context_length = config.context_length
         input_sequence_length = config.input_sequence_length
-        assert target_device == DeviceType.XH2a, f"Only support convert to XH2a, but got {target_device}"
+        assert target_device in (DeviceType.XH2a, DeviceType.YueHui), (
+            f"Only support convert to XH2a or YueHui, but got {target_device}"
+        )
         quant_type = config.quant_scheme.quant_type
         quant_config = ConfigDict(create_quant_config(config.quant_scheme))
 

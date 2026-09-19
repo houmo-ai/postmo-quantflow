@@ -49,6 +49,21 @@ from xhquant.api import (  # isort:skip
 from xhquant.core.cache_tensor import CacheTensor
 
 
+def to_device_type(target_device: str) -> DeviceType:
+    """Map a workflow target name to a supported xhquant device."""
+    device_types = {
+        "XH2a": DeviceType.XH2a,
+        "YueHui": DeviceType.YueHui,
+    }
+    try:
+        return device_types[target_device]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported FunAudioChat target_device {target_device!r}; "
+            "expected one of: XH2a, YueHui"
+        ) from exc
+
+
 def build_kv_caches(
     qwen_model, max_sequence_length: int, device: torch.device | str | None = None
 ) -> tuple[list[CacheTensor], list[CacheTensor]]:
@@ -524,12 +539,12 @@ def export_audio_encoder(model, processor, args, work_dir: Path, logger) -> Path
     ]
     output_names = ["audio_features"]
 
-    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=args.audio_quant_type)
+    quant_scheme = QuantScheme(target_device=args.target_device, quant_type=args.audio_quant_type)
     quant_config = ConfigDict(create_quant_config(quant_scheme))
     quanted_model = convert_fx_model_to_quanted_model(
         export_model,
         input_args,
-        DeviceType.XH2a,
+        args.target_device,
         quant_config=quant_config,
     )
 
@@ -571,12 +586,12 @@ def export_audio_tower(model, args, work_dir: Path, logger) -> Path:
     input_names = ["speech_ids"]
     output_names = ["audio_features"]
 
-    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=args.audio_quant_type)
+    quant_scheme = QuantScheme(target_device=args.target_device, quant_type=args.audio_quant_type)
     quant_config = ConfigDict(create_quant_config(quant_scheme))
     quanted_model = convert_fx_model_to_quanted_model(
         export_model,
         input_args,
-        DeviceType.XH2a,
+        args.target_device,
         quant_config=quant_config,
     )
 
@@ -603,7 +618,7 @@ def export_qwen3(model, args, work_dir: Path):
         batch_size=1,
         context_length=args.context_length,
         input_sequence_length=args.input_sequence_length,
-        quant_scheme=QuantScheme(target_device=DeviceType.XH2a, quant_type=args.llm_quant_type),
+        quant_scheme=QuantScheme(target_device=args.target_device, quant_type=args.llm_quant_type),
         quant_weight=None,
         mix_search=None,
         num_logits_to_keep=1,
@@ -720,13 +735,13 @@ def export_decoder(model, processor, args, work_dir: Path, logger) -> Path:
             prefill_past_value_caches,
         )
 
-    quant_scheme = QuantScheme(target_device=DeviceType.XH2a, quant_type=args.decoder_quant_type)
+    quant_scheme = QuantScheme(target_device=args.target_device, quant_type=args.decoder_quant_type)
     quant_config = ConfigDict(create_quant_config(quant_scheme))
 
     quanted_prefill_model = convert_fx_model_to_quanted_model(
         decoder_prefill_wrapper,
         prefill_input_args,
-        DeviceType.XH2a,
+        args.target_device,
         quant_config=quant_config,
     )
 

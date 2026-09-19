@@ -1,0 +1,181 @@
+schema_version: 2
+external:
+  model:
+    id: funaudiochat_8b
+    family: funaudiochat
+    display_name: Fun-Audio-Chat 8B
+  parameters:
+    total: 9451137024
+    active: null
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 256, 4096]
+    prefill: null
+    decode: null
+    unit: TFLOPs
+    status: missing
+    note: A20 性能尚未测试；静态导出使用 256-token 序列和最长 8 秒音频输入。
+  precision:
+    float_format: FP16
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: seed_tts_en_mean_utterance_wer_yuehui
+      dataset: Seed-TTS EN / first 500 samples
+      metric: Mean utterance WER (%)，HF FP16 vs YueHui
+      float: 3.297688
+      quant: 3.397052
+      delta: 0.099364
+      evidence: https://houmo.feishu.cn/wiki/Ps5OwKQMji8PsYkLjiJcmMtXnl6
+      status: verified
+    - name: seed_tts_en_corpus_wer_yuehui
+      dataset: Seed-TTS EN / first 500 samples
+      metric: Corpus WER (%)，HF FP16 vs YueHui
+      float: 3.222181
+      quant: 3.446984
+      delta: 0.224803
+      evidence: https://houmo.feishu.cn/wiki/Ps5OwKQMji8PsYkLjiJcmMtXnl6
+      status: verified
+    - name: covost2_en_zh_corpus_bleu_yuehui
+      dataset: CoVoST2 en-zh / first 500 samples
+      metric: Corpus BLEU，HF FP16 vs YueHui
+      float: 33.698236
+      quant: 33.749958
+      delta: 0.051721
+      evidence: https://houmo.feishu.cn/wiki/Ps5OwKQMji8PsYkLjiJcmMtXnl6
+      status: verified
+  owner: ye.li
+internal:
+  model:
+    type: other_models
+    modality:
+    - text
+    - audio
+    task:
+    - inference
+    tags:
+    - merak
+    - yuehui
+    - other
+    - a20
+  source:
+    provider: FunAudioLLM
+    name: Fun-Audio-Chat-8B
+    url: https://huggingface.co/FunAudioLLM/Fun-Audio-Chat-8B
+    license: Apache-2.0
+    raw_model_path: ssh://ye.li@10.30.0.16:10025/data01/nfs_shared/Fun-Audio-Chat-8B
+  components:
+  - id: model
+    display_name: Fun-Audio-Chat 8B
+    type: other_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input_ids
+      type: tensor
+      required: true
+      description: 文本提示经 tokenizer 处理后的 token IDs。
+    - name: input_features
+      type: tensor
+      required: true
+      description: 16 kHz 音频经 processor 提取的声学特征。
+    outputs:
+    - name: text_tokens
+      type: tensor
+      required: false
+      description: 自回归生成的文本 token IDs。
+    - name: audio_tokens
+      type: tensor
+      required: false
+      description: 自回归生成的离散音频 token IDs。
+  - id: audio_tower
+    display_name: audio_tower
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: audio_encoder
+    display_name: audio_encoder
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: qwen3
+    display_name: qwen3
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  - id: audio_decoder
+    display_name: audio_decoder
+    type: ''
+    precision: w8a8h1_sefp
+    inputs: []
+    outputs: []
+  io:
+    inputs:
+    - name: input_ids
+      type: tensor
+      required: true
+      description: 文本提示经 tokenizer 处理后的 token IDs。
+    - name: input_features
+      type: tensor
+      required: true
+      description: 16 kHz 音频经 processor 提取的声学特征。
+    outputs:
+    - name: text_tokens
+      type: tensor
+      required: false
+      description: 自回归生成的文本 token IDs。
+    - name: audio_tokens
+      type: tensor
+      required: false
+      description: 自回归生成的离散音频 token IDs。
+  workflow:
+    config_path: configs_merak/workflows/yuehui/other_models/funaudiochat/funaudiochat.yaml
+    model_dir: ssh://ye.li@10.30.0.16:10025/data01/nfs_shared/Fun-Audio-Chat-8B
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: other_models
+    target_device: YueHui
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        audio_tower: w8a8h1_sefp
+        audio_encoder: w8a8h1_sefp
+        qwen3: w8a8h1_sefp
+        audio_decoder: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 42
+    work_dir: work_dirs/merak_delivery/funaudiochat_8b_a20
+  release:
+    version_id: funaudiochat_8b_a20_w8a8h1_sefp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Fun-Audio-Chat 8B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: Fun-Audio-Chat 8B A20 Merak workflow 卡片。
+    demo:
+      kind: metadata_only
+    limitations:
+    - A20 性能尚未测试；静态 audio encoder 固定为 8 秒，超长音频会截断。
+    - 精度基于 Seed-TTS EN 和 CoVoST2 en-zh 各前 500 条，仅用于 HF 与芯片结果的回归对比。
+    - 所有组件均使用 W8A8H1-SEFP，与 XH2a workflow 的量化格式一致。
+    evidence:
+      examples:
+      - examples_merak/audio/funaudiochat
+      readme:
+      - examples_merak/audio/funaudiochat/README.md

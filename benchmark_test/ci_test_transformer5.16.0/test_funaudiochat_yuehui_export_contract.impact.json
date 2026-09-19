@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "funaudiochat-yuehui-export",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/funaudiochat/**",
+        "configs_merak/workflows/xh2a/other_models/funaudiochat/**",
+        "configs_merak/workflows/yuehui/other_models/funaudiochat/**",
+        "examples_merak/audio/funaudiochat/*.py"
+      ]
+    }
+  ]
+}

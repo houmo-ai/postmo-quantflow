@@ -12,7 +12,13 @@ from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoProcessor
 from xhmodel_merak.xh_other_model.workflows.base import BaseOtherModelWorkflow
 from xhmodel_merak.xh_other_model.workflows.result import ExportResult, QuantResult
 
-from ._export_utils import export_audio_encoder, export_audio_tower, export_decoder, export_qwen3
+from ._export_utils import (
+    export_audio_encoder,
+    export_audio_tower,
+    export_decoder,
+    export_qwen3,
+    to_device_type,
+)
 from ._model import register_wrap_modules
 from .register import register_funaudiochat
 
@@ -46,8 +52,6 @@ class FunAudioChatWorkflow(BaseOtherModelWorkflow):
         model_dir = self._resolve_export_model_dir(quant_result)
         export_cfg = workflow_config.build_export_dict()
         target_device = str(export_cfg.get("target_device", "XH2a"))
-        if target_device.lower() != "xh2a":
-            raise ValueError(f"FunAudioChat only supports XH2a export, got {target_device!r}")
 
         components = _enabled_components(export_cfg.get("components"))
         unsupported = sorted(set(components) - self.SUPPORTED_COMPONENTS)
@@ -176,6 +180,7 @@ def _build_export_args(export_cfg: Mapping[str, Any], runtime_cfg: Mapping[str, 
         return str(cfg.get("quant_type", "w8a8h1_sefp")) if isinstance(cfg, Mapping) else "w8a8h1_sefp"
 
     return SimpleNamespace(
+        target_device=to_device_type(str(export_cfg.get("target_device", "XH2a"))),
         audio=str(runtime_cfg.get("audio") or ""),
         system_prompt=str(runtime_cfg.get("system_prompt") or ""),
         context_length=int(export_cfg.get("context_length", 256)),

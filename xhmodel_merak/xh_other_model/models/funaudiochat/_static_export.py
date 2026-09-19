@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import List, Optional
 
 import torch
@@ -54,7 +55,7 @@ class FunAudioChatStaticEncoderWarp(nn.Module):
         self.speech_maxlen = int(speech_maxlen)
         self.group_size = int(model.config.audio_config.group_size)
         self.max_audio_tokens = len(pooled_lengths)
-        self.avg_pool2d = nn.AvgPool2d(kernel_size=(2, 1), stride=(2, 1))
+        self.avg_pool2d = nn.AvgPool2d(kernel_size=(2, 1), stride=(2, 1), padding=(0, 0))
 
         self.register_buffer("feature_lens", feature_lens.to(torch.int32), persistent=False)
         self.register_buffer("aftercnn_lens", aftercnn_lens.to(torch.int32), persistent=False)
@@ -190,7 +191,7 @@ class FunAudioChatStaticAudioTowerWarp(nn.Module):
     def __init__(self, model: nn.Module):
         super().__init__()
         self.model = model
-        self.audio_tower = model.audio_tower
+        self.audio_tower = copy.deepcopy(model.audio_tower)
 
     def forward(self, speech_ids: torch.LongTensor):
         audio_features = self.audio_tower(speech_ids)[0]

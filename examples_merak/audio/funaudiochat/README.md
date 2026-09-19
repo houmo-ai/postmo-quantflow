@@ -21,6 +21,21 @@ python examples_merak/audio/funaudiochat/funaudiochat_workflow.py \
 
 导出根目录会生成 `export_meta_info.json`，各组件目录保留自己的 `meta.json` 和 HMONNX 文件。
 
+### YueHui 导出
+
+月辉与 XH2a 配置保持一致：
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
+python examples_merak/audio/funaudiochat/funaudiochat_workflow.py \
+  --model-dir /path/to/Fun-Audio-Chat-8B \
+  --audio <reference.wav> \
+  --config-path configs_merak/workflows/yuehui/other_models/funaudiochat/funaudiochat.yaml \
+  --output-dir work_dirs/funaudiochat_merak/export_yuehui_w8a8h1 \
+  --device cuda:0 \
+  --overwrite
+```
+
 ## 浮点推理
 
 ```bash
@@ -54,4 +69,4 @@ components:
     quant_type: w8a8h1_sefp
 ```
 
-当前导出目标仅支持 `XH2a`。`mix_search` 未迁移到该 workflow，传入非空配置会明确报错。
+当前导出目标支持 `XH2a` 和 `YueHui`。`mix_search` 未迁移到该 workflow，传入非空配置会明确报错。
