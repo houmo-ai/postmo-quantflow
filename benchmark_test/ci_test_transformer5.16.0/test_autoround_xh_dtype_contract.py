@@ -66,7 +66,12 @@ def test_family_yaml_dtype_is_autoround_only(path):
     if quant is None:
         return
     if quant.get("method") == "autoround":
-        assert quant["data_type"] == "int_sym_xh"
+        expected_dtype = (
+            "int_sym_xh_hessian"
+            if path == CONFIG_ROOT / "qwen3_5/27b/qwen3_8_27b_full_xh_hessian.yaml"
+            else "int_sym_xh"
+        )
+        assert quant["data_type"] == expected_dtype
         assert quant["sym"] is True
         assert quant["calibration"]["nsamples"] == 256
         assert quant["iters"] == 400

@@ -100,6 +100,11 @@ def build_qwen35_autoround_kwargs(
     moe_cfg = _section(quant_cfg, "moe")
     if _rotation_value(quant_cfg):
         raise ValueError("Qwen3.5 AutoRound mode1 is no-rotation; set quant.rotation=false")
+    if "optimization_mode" in quant_cfg or "xh_hessian_config" in quant_cfg:
+        raise ValueError(
+            "Use quant.data_type=int_sym_xh_hessian to select the Hessian solver; "
+            "optimization_mode and xh_hessian_config are backend options, not workflow fields"
+        )
 
     default_batch_size = 8
     default_device_map = "0" if topology == "moe" else None
