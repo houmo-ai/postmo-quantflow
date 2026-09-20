@@ -1,0 +1,42 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: XHMossTranscribeDiarizeModel
+    model_name: moss_transcribe_diarize_09b
+    hf_model: null
+    context_max_length: 2048
+    prefill_chunk_length: 512
+    max_pe_length: 262144
+    convert_hmonnx: true
+    quant_type: w8a8_sefp
+    wrap_cfg:
+      use_cache: true
+      num_logits_to_keep: 1
+      kv_cache:
+        cache_axis: 2
+    flash_attention:
+      enable: false
+      q_bits: 16
+      k_bits: 16
+      v_bits: 16
+      s_bits: 16
+      p_bits: 16
+    frontend_type: TorchFX
+    export_cfg:
+      input_names:
+        - inputs_embeds
+        - past_seq_length
+        - current_input_length
+        - past_key_cache
+        - past_value_cache
+      output_names:
+        - last_hidden_state
+        - present_key_cache
+        - present_value_cache
+    encode_config:
+      enabled: true
+      quant_type: w8a8_sefp
+      convert_hmonnx: true
+      max_audio_length: 3000

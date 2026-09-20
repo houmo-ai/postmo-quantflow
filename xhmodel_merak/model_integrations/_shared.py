@@ -13,6 +13,8 @@ GEMMA4_INFERENCE = "gemma4.inference"
 LING_INFERENCE = "ling.inference"
 PI05_INFERENCE = "pi05.inference"
 KOKORO_INFERENCE = "kokoro.inference"
+MOSS_TRANSCRIBE_DIARIZE_BUILD = "moss_transcribe_diarize.build"
+MOSS_TRANSCRIBE_DIARIZE_INFERENCE = "moss_transcribe_diarize.inference"
 
 GPTQ_REQUIREMENTS = ("gptqmodel>=5.8,<5.9",)
 AUTOROUND_REQUIREMENTS = ("auto-round>=0.12.0.dev0,<0.13.0", *GPTQ_REQUIREMENTS)
@@ -112,6 +114,8 @@ __all__ = [
     "KOKORO_BUILD",
     "KOKORO_INFERENCE",
     "LING_INFERENCE",
+    "MOSS_TRANSCRIBE_DIARIZE_BUILD",
+    "MOSS_TRANSCRIBE_DIARIZE_INFERENCE",
     "PI05_BUILD",
     "PI05_INFERENCE",
     "PILE10K_RESOURCE",

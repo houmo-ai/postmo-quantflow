@@ -11,6 +11,7 @@
         "xhmodel_merak/model_catalog/**",
         "xhmodel_merak/model_integrations/qwen/plugin.py",
         "xhmodel_merak/model_integrations/kokoro/plugin.py",
+        "xhmodel_merak/model_integrations/moss_transcribe_diarize/plugin.py",
         "xhmodel_merak/model_inference/api.py",
         "xhmodel_merak/model_inference/inputs.py",
         "xhmodel_merak/model_artifact/validation.py"

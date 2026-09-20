@@ -1,4 +1,5 @@
 import importlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,10 +29,64 @@ from xhmodel_merak.xh_other_model.models.pi05 import compact_runtime
         ("paddleocr-vl.inference", "xhmodel_merak.model_integrations.paddleocr_vl.inference"),
         ("pi05.inference", "xhmodel_merak.model_integrations.pi05.inference"),
         ("kokoro.inference", "xhmodel_merak.model_integrations.kokoro.inference"),
+        (
+            "moss_transcribe_diarize.inference",
+            "xhmodel_merak.model_integrations.moss_transcribe_diarize.inference",
+        ),
     ),
 )
 def test_registered_inference_adapter_loads_family_implementation(name: str, canonical: str) -> None:
     assert load_adapter("inference", name) is importlib.import_module(canonical).adapter
+
+
+def test_moss_adapter_rejects_hmonnx_path_outside_artifact(tmp_path: Path) -> None:
+    from xhmodel_merak.model_integrations.moss_transcribe_diarize import inference as moss
+
+    geometry = {
+        "prefill_length": 512,
+        "cache_length": 4096,
+        "rope_max_positions": 4096,
+        "rope_mode": "fp32_table_integer_index",
+        "onnx_file": "graph.onnx",
+        "hmonnx_file": "graph.onnx",
+    }
+    for name in (
+        "graph.onnx",
+        "weights.pt",
+        "config.json",
+        "generation_config.json",
+        "tokenizer.json",
+        "vocab.json",
+        "merges.txt",
+        "tokenizer_config.json",
+        "preprocessor_config.json",
+        "configuration_moss_transcribe_diarize.py",
+        "modeling_moss_transcribe_diarize.py",
+        "processing_moss_transcribe_diarize.py",
+    ):
+        (tmp_path / name).write_text("fixture", encoding="utf-8")
+    meta = tmp_path / "meta.json"
+    meta.write_text(
+        json.dumps(
+            {
+                "quant_type": "w8a8_sefp",
+                "weights_file": "weights.pt",
+                "lm_head_file": "weights.pt",
+                "components": {
+                    "encode": {"onnx_file": "graph.onnx", "hmonnx_file": "../outside.onnx"},
+                    "prefill_decode": {"prefill": geometry, "decode": geometry},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ModelError, match="inside the Artifact root"):
+        moss.adapter.validate_artifact(
+            recipe=get_recipe("moss-transcribe-diarize-0.9b"),
+            root=tmp_path,
+            manifest={},
+            meta_file=meta,
+        )
 
 
 def test_autoregressive_runtime_has_one_canonical_implementation() -> None:

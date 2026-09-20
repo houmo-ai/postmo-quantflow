@@ -28,6 +28,10 @@ def test_removed_build_facades_are_not_importable(module):
         ("autoregressive.build", "xhmodel_merak.model_integrations.autoregressive.build"),
         ("pi05.build", "xhmodel_merak.model_integrations.pi05.build"),
         ("kokoro.build", "xhmodel_merak.model_integrations.kokoro.build"),
+        (
+            "moss_transcribe_diarize.build",
+            "xhmodel_merak.model_integrations.moss_transcribe_diarize.build",
+        ),
     ),
 )
 def test_registered_build_adapter_loads_family_implementation(name: str, canonical: str) -> None:

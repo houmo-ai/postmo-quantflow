@@ -93,6 +93,29 @@ python -m examples_merak.unified_api.synthesize \
 路径读 `export_meta_info.json`。旧 Kokoro 包要重新构建。
 `build_model` 不生成 Golden；全档串联 Golden 仍使用 Kokoro workflow 的独立入口。
 
+## MOSS-Transcribe-Diarize 会议转写
+
+音频必须是本地 16 kHz 单声道 16-bit PCM WAV/FLAC。30 分钟会用 64k 图，并显式传 `prefill_chunk_length=4096`：
+
+```bash
+python -m examples_merak.unified_api.catalog moss-transcribe-diarize-0.9b --full
+
+python -m examples_merak.unified_api.build \
+  --model-id moss-transcribe-diarize-0.9b \
+  --model-dir data/models/MOSS-Transcribe-Diarize \
+  --output-dir ./work_dirs/moss_transcribe_diarize_64k_api \
+  --device cuda:0 \
+  --context-length 65536 \
+  --prefill-chunk-length 4096
+
+python -m examples_merak.unified_api.transcribe \
+  --artifact-dir ./work_dirs/moss_transcribe_diarize_64k_api \
+  --audio work_dirs/moss_llm_migrate_clip30s.wav \
+  --device cuda:0
+```
+
+`transcribe.py` 只调用 `inference_model()`。workflow 直出没有统一 manifest，逐步打开三张图并打耗时用 [HMONNX infer 示例](../asr/moss_transcribe_diarize/README.md)。
+
 ## 产物长什么样
 
 Qwen3.5 完整包的主要文件如下，具体文件清单以 `model_build_manifest.json` 为准：

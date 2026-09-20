@@ -10,6 +10,7 @@
         "xhmodel_merak/model_integrations/_shared.py",
         "xhmodel_merak/model_inference/**",
         "xhmodel_merak/model_integrations/*/inference.py",
+        "xhmodel_merak/model_integrations/*/artifact.py",
         "xhmodel_merak/xh_other_model/models/pi05/compact_runtime.py",
         "xhmodel_merak/xh_llm/models/gemma4_series/gemma4_unified_processor.py",
         "xhmodel_merak/_requirements.py",

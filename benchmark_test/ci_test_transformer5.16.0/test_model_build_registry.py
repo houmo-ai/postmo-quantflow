@@ -35,6 +35,7 @@ EXPECTED_VARIANTS = {
     "paddleocr-vl-1.6": ["full"],
     "pi0.5-libero": ["lerobot-h50"],
     "kokoro-82m-v1.1-zh": ["full"],
+    "moss-transcribe-diarize-0.9b": ["full"],
 }
 
 
@@ -50,7 +51,7 @@ def test_distributed_catalog_preserves_the_full_public_description_snapshot():
     # First-release API: one public model_id; export naming stays internal.
     payload = json.dumps(descriptions, sort_keys=True, separators=(",", ":")).encode()
 
-    assert hashlib.sha256(payload).hexdigest() == "c45f9efeb20b07af5d1e886ab862f081bcfa2b2ec87f55e6316a88cbf1c318d7"
+    assert hashlib.sha256(payload).hexdigest() == "ba6189a7b3874181266ffb82f9a828672cbf46da53d00465feb813b49c9c242f"
 
 
 @pytest.mark.parametrize("model_id", EXPECTED_VARIANTS)
@@ -308,14 +309,133 @@ def test_all_public_workflow_configs_exist_and_match_registered_quantization():
 def test_registry_covers_each_public_artifact_kind():
     recipes = list_recipes()
 
-    assert {recipe.artifact_format for recipe in recipes} == {"autoregressive", "vla", "tts"}
+    assert {recipe.artifact_format for recipe in recipes} == {"autoregressive", "asr", "tts", "vla"}
     assert {recipe.task for recipe in recipes} >= {
         "text-generation",
         "vision-language-generation",
         "action-prediction",
         "text-to-speech",
+        "speech-transcription",
     }
     assert all(recipe.build_adapter and recipe.inference_adapter for recipe in recipes)
+
+
+def test_moss_transcribe_diarize_public_io_is_audio_prompt_text():
+    description = describe_model("moss-transcribe-diarize-0.9b", full=True)
+
+    assert description["task"] == "speech-transcription"
+    assert description["vision"] is None
+    assert description["input_schema"]["required"] == ["audio"]
+    assert "prompt" in description["input_schema"]["properties"]
+    generation_limit = description["input_schema"]["properties"]["max_new_tokens"]
+    assert "default" not in generation_limit
+    assert generation_limit["maximum"] == 65536
+    assert description["output_schema"]["required"] == ["output_text"]
+    parameters = describe_model("moss-transcribe-diarize-0.9b")
+    assert parameters["context_length"]["default"] == 2048
+    assert parameters["context_length"]["maximum"] == 262144
+    assert parameters["prefill_chunk_length"]["default"] == 512
+
+
+def _write_moss_bundle(model_dir):
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        '{"model_type":"moss_transcribe_diarize","text_config":{"model_type":"qwen3"},'
+        '"audio_config":{"model_type":"whisper"},"audio_merge_size":4,"adaptor_input_dim":4096}'
+    )
+    (model_dir / "processor_config.json").write_text(
+        '{"audio_tokens_per_second":12.5,"audio_merge_size":4,'
+        '"time_marker_every_seconds":5,"enable_time_marker":true}'
+    )
+    (model_dir / "preprocessor_config.json").write_text(
+        '{"sampling_rate":16000,"feature_size":80,"hop_length":160,"n_fft":400,'
+        '"n_samples":480000,"nb_max_frames":3000}'
+    )
+    (model_dir / "generation_config.json").write_text(
+        '{"max_new_tokens":5120,"eos_token_id":151645}'
+    )
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        (model_dir / name).write_text("{}")
+    for name in (
+        "configuration_moss_transcribe_diarize.py",
+        "modeling_moss_transcribe_diarize.py",
+        "processing_moss_transcribe_diarize.py",
+    ):
+        (model_dir / name).write_text("# remote-code fixture\n")
+    (model_dir / "model.safetensors.index.json").write_text('{"weight_map":{"model":"model.safetensors"}}')
+    (model_dir / "model.safetensors").write_bytes(b"fixture")
+
+
+@pytest.mark.parametrize(
+    ("context_length", "artifact_name", "prefill", "max_pe", "workflow_suffix"),
+    [
+        (2048, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_2k_mpe256k", 512, 262144, "moss_transcribe_diarize.yaml"),
+        (4096, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_4k_mpe256k", 512, 262144, "moss_transcribe_diarize.yaml"),
+        (8192, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_8k_mpe256k", 512, 262144, "moss_transcribe_diarize_16k.yaml"),
+        (16384, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_16k_mpe256k", 512, 262144, "moss_transcribe_diarize_16k.yaml"),
+        (65536, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_64k_mpe256k", 512, 262144, "moss_transcribe_diarize_64k.yaml"),
+        (131072, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_128k_mpe256k", 512, 262144, "moss_transcribe_diarize_128k.yaml"),
+    ],
+)
+def test_moss_transcribe_diarize_has_a_stable_artifact_name_contract(
+    tmp_path, context_length, artifact_name, prefill, max_pe, workflow_suffix
+):
+    model_dir = tmp_path / "model"
+    _write_moss_bundle(model_dir)
+
+    from xhmodel_merak.model_build.resolver import resolve_build_plan
+
+    plan = resolve_build_plan(
+        model_id="moss-transcribe-diarize-0.9b",
+        model_dir=str(model_dir),
+        output_dir=str(tmp_path / "artifact"),
+        device="cpu",
+        context_length=context_length,
+    )
+
+    assert plan.artifact_name == artifact_name
+    assert plan.context_length == context_length
+    assert plan.config_overrides["export.model.context_max_length"] == context_length
+    assert plan.config_overrides["export.model.prefill_chunk_length"] == prefill
+    assert plan.config_replacements["export.model.max_pe_length"] == max_pe
+    assert plan.workflow_config.endswith(workflow_suffix)
+
+
+def test_moss_transcribe_diarize_keeps_explicit_short_prefill_on_16k(tmp_path):
+    model_dir = tmp_path / "model"
+    _write_moss_bundle(model_dir)
+    from xhmodel_merak.model_build.resolver import resolve_build_plan
+
+    plan = resolve_build_plan(
+        model_id="moss-transcribe-diarize-0.9b",
+        model_dir=str(model_dir),
+        output_dir=str(tmp_path / "artifact"),
+        device="cpu",
+        context_length=16384,
+        prefill_chunk_length=256,
+    )
+
+    assert plan.config_overrides["export.model.prefill_chunk_length"] == 256
+    assert plan.artifact_name == "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_256_16k_mpe256k"
+
+
+def test_moss_transcribe_diarize_thirty_minute_build_passes_explicit_prefill(tmp_path):
+    model_dir = tmp_path / "model"
+    _write_moss_bundle(model_dir)
+    from xhmodel_merak.model_build.resolver import resolve_build_plan
+
+    plan = resolve_build_plan(
+        model_id="moss-transcribe-diarize-0.9b",
+        model_dir=str(model_dir),
+        output_dir=str(tmp_path / "artifact"),
+        device="cpu",
+        context_length=65536,
+        prefill_chunk_length=4096,
+    )
+
+    assert plan.config_overrides["export.model.prefill_chunk_length"] == 4096
+    assert plan.workflow_config.endswith("moss_transcribe_diarize_64k.yaml")
+    assert plan.artifact_name == "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_4k_64k_mpe256k"
 
 
 def test_qwen3_next_public_variants_use_the_pinned_gptq_recipe():

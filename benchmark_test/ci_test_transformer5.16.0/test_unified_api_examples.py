@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from examples_merak.unified_api import build, catalog, generate, synthesize
+from examples_merak.unified_api import build, catalog, generate, synthesize, transcribe
 from xhmodel_merak.errors import ModelError
 from xhmodel_merak.model_build import describe_model, list_models
 from xhmodel_merak.model_catalog import get_recipe
@@ -65,7 +65,7 @@ def test_synthesize_forwards_public_inputs_and_writes_pcm_wav(monkeypatch, tmp_p
     assert summary["output_wav"] == str(path) and summary["sample_rate"] == 24000
 
 
-@pytest.mark.parametrize("name", ["catalog", "build", "generate", "synthesize"])
+@pytest.mark.parametrize("name", ["catalog", "build", "generate", "synthesize", "transcribe"])
 def test_examples_help_runs_from_repo_root_without_worker_imports(name):
     code = (
         "import runpy, sys\n"
@@ -108,7 +108,9 @@ def test_catalog_prints_real_public_result(args, capsys):
         (build, []),
         (generate, []),
         (synthesize, []),
+        (transcribe, []),
         (generate, ["--artifact-dir", "artifact", "--prompt", "hello", "--golden"]),
+        (transcribe, ["--artifact-dir", "artifact", "--audio", "clip.wav", "--golden"]),
     ],
 )
 def test_invalid_cli_arguments_exit_before_execution(module, args):
@@ -234,3 +236,48 @@ def test_build_rejects_missing_model_with_real_api(tmp_path):
 def test_generate_rejects_missing_artifact_with_real_api(tmp_path):
     with pytest.raises(ModelError):
         generate.main(["--artifact-dir", str(tmp_path / "missing-artifact"), "--prompt", "hello"])
+
+
+def test_transcribe_forwards_public_inputs(monkeypatch, capsys, tmp_path):
+    signature = inspect.signature(transcribe.inference_model)
+    calls = []
+    audio = str(tmp_path / "clip.wav")
+
+    def execute(**kwargs):
+        signature.bind(**kwargs)
+        assert validate_inputs(get_recipe("moss-transcribe-diarize-0.9b"), kwargs["inputs"]) == kwargs["inputs"]
+        calls.append(kwargs)
+        return SimpleNamespace(to_dict=lambda: {"output_text": "[S01] hello", "model_id": kwargs["expected_model_id"]})
+
+    monkeypatch.setattr(transcribe, "inference_model", execute)
+    transcribe.main(
+        [
+            "--artifact-dir",
+            "artifact",
+            "--audio",
+            audio,
+            "--prompt",
+            "转写",
+            "--max-new-tokens",
+            "128",
+            "--device",
+            "cuda:0",
+            "--golden",
+            "encode",
+            "prefill",
+            "decode",
+        ]
+    )
+    assert calls == [
+        {
+            "artifact_dir": "artifact",
+            "expected_model_id": "moss-transcribe-diarize-0.9b",
+            "inputs": {"audio": audio, "prompt": "转写", "max_new_tokens": 128},
+            "device": "cuda:0",
+            "golden": ["encode", "prefill", "decode"],
+        }
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "output_text": "[S01] hello",
+        "model_id": "moss-transcribe-diarize-0.9b",
+    }
