@@ -4,16 +4,31 @@ This project references, or depends on the following
 third-party software, models, datasets, or tools.
 Each component is licensed under its own respective license.
 
-This declaration only addresses third-party components that 
-require special attention, are not runtime dependencies, and 
-are not included in the project, and advises users to strictly 
-adhere to the terms of the license agreements specified for 
-those third-party dependencies.
+This declaration records selected third-party components, including
+bundled dataset assets, and advises users to adhere to the license
+terms specified for each component.
 
 DISCLAIMER
 The authors and contributors of this project make no representation
 or warranty regarding third-party software, models, or datasets.
 Use of such components is at the user's own risk.
+
+RealWorldQA image search samples (dataset assets)
+----------------------------------------------------------------------
+Source: https://huggingface.co/datasets/xai-org/RealworldQA
+Publisher: xAI
+Dataset card revision: 17e7f75e092e47169732462ea3cdfebe911105dd
+License: Creative Commons Attribution-NoDerivatives 4.0 International
+License text: licenses/RealWorldQA/LICENSE
+License URL: https://creativecommons.org/licenses/by-nd/4.0/
+Files: data/calib_data/realworldqa_search_64.jsonl
+The 64 selected images are Base64 encodings of the unchanged image file
+bytes from the existing RealWorldQA.tsv search pool. Each record retains
+its source index, original filename and SHA256. Images are not resized or
+recompressed. Local prompt/answer fields format the dataset questions for
+the search interface. These dataset assets retain their upstream license;
+the repository's software license does not relicense them. No endorsement
+by xAI is implied. These samples are search inputs, not a held-out test set.
 
 Ling-3.0-flash checkpoint-side code (CI fixture only)
 ----------------------------------------------------------------------

@@ -88,7 +88,11 @@ KL 使用相同输入历史上的 `KL(P_float || Q_candidate)`，全词表、温
 `positions_per_sample` 均匀抽取位置，报告的 PPL 是这些位置上的相对指标，不是全语料 PPL。
 配置 `image_dataset` 后，文本与图像回答的 KL/PPL **分别**检查同一组阈值，必须都通过。
 图像样本格式为 `{"image":"images/a.png","text":"问题","answer":"参考答案"}`，
-图片路径相对 JSONL，也可使用本地绝对路径。实际运行原生 processor、视觉编码和 M-RoPE；
+图片路径相对 JSONL，也可使用本地绝对路径。也支持将 `image` 替换为 `image_base64`，
+值为原图片文件字节的 Base64（不带 data URI 前缀）；两者只能提供一个。
+可选 `image_sha256` 校验原始文件字节。默认 64 条 JSONL 已内嵌全部图片，拉取仓库即可使用，
+不依赖旁边的图片目录或下载流程；需配套支持 `image_base64` 的 GPTQModel。
+实际运行原生 processor、视觉编码和 M-RoPE；
 缓存不变的视觉输入后回放完整语言模型。只评分回答 token，不评分图像占位符与问题。
 支持 OCR、描述及问答，不要求选择题；可选 `options` 提供单 token 答案标签，
 用于额外记录正确数和选项一致率，问题中须自行包含选项文本。

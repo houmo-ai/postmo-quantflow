@@ -1,6 +1,9 @@
 """YAML -> real recipes and producer plan -> real Merak precision schema."""
 
+import base64
 import copy
+import hashlib
+import io
 import json
 from pathlib import Path
 
@@ -13,6 +16,26 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG = (
     ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w4_auto_mixed.yaml"
 )
+
+
+def test_default_image_dataset_is_self_contained_and_intact(tmp_path):
+    from PIL import Image
+
+    source = ROOT / "data/calib_data/realworldqa_search_64.jsonl"
+    moved = tmp_path / source.name
+    moved.write_bytes(source.read_bytes())
+    rows = [json.loads(line) for line in moved.read_text().splitlines()]
+    assert len(rows) == 64
+    assert len({row["id"] for row in rows}) == 64
+    assert list(tmp_path.iterdir()) == [moved]
+    for row in rows:
+        assert "image" not in row
+        assert row["text"] and row["answer"]
+        payload = base64.b64decode(row["image_base64"], validate=True)
+        assert hashlib.sha256(payload).hexdigest() == row["image_sha256"]
+        with Image.open(io.BytesIO(payload)) as image:
+            image.load()
+            assert image.width > 0 and image.height > 0
 
 
 @pytest.mark.parametrize("backend", ["autoround", "gptqmodel"])

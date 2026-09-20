@@ -3,6 +3,7 @@
   "rules": [{
     "id": "qwen35-automatic-block-precision",
     "patterns": [
+      "data/calib_data/realworldqa_search_64.jsonl",
       "xhmodel_merak/xh_llm/models/qwen3_5/mixed_precision.py",
       "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py",
       "xhmodel_merak/xh_llm/models/qwen3_5_moe/_moe_model.py",
