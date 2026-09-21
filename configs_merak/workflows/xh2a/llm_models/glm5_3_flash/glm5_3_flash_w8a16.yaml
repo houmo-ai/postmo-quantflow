@@ -1,0 +1,22 @@
+export:
+  model:
+    model_type: Glm5NextForConditionalGeneration
+    model_name: glm5_3_flash
+    chip_arch: XH2a
+    dtype: float16
+    hf_model: null
+    batch_size: 1
+    context_max_length: 4096
+    prefill_chunk_length: 256
+    linear_chunk_size: 64
+    num_logits_to_keep: 1
+    max_layers: null
+    placeholder_export_workers: 4
+    export_vision: true
+    vision_max_patches: 1024
+    use_cache: true
+    quant_scheme:
+      quant_type: w8a16h0_sefp
+      nodes: {}
+      ops: {}
+quant: null

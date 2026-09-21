@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "glm53-shared-external-weights",
+    "patterns": [
+      "xhmodel_merak/model_integrations/glm53/shared_weights.py",
+      "xhmodel_merak/model_integrations/glm53/build.py",
+      "xhmodel_merak/model_build/packaging.py",
+      "xhmodel_merak/model_artifact/files.py"
+    ]
+  }]
+}

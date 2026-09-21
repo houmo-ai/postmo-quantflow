@@ -1,4 +1,4 @@
-"""加载统一构建接口的产物，进行文本或单张图片问答。"""
+"""加载统一构建接口的产物，进行文本、图片或视频问答。"""
 
 import argparse
 import json
@@ -11,6 +11,7 @@ def main(argv=None):
     parser.add_argument("--artifact-dir", required=True, help="build_model 返回的 output_dir")
     parser.add_argument("--prompt", required=True, help="问题或提示词")
     parser.add_argument("--image", help="本地图片路径；需要模型支持图片输入")
+    parser.add_argument("--video", help="本地视频路径；需要模型支持视频输入")
     parser.add_argument("--max-new-tokens", type=int, default=64, help="最多生成多少个 token，默认 64")
     parser.add_argument("--device", help="推理设备，例如 cuda:0")
     parser.add_argument("--golden", nargs="+", help="额外生成指定组件的 golden，例如 visual prefill decode")
@@ -19,6 +20,8 @@ def main(argv=None):
     inputs = {"prompt": args.prompt, "max_new_tokens": args.max_new_tokens}
     if args.image is not None:
         inputs["image"] = args.image
+    if args.video is not None:
+        inputs["video"] = args.video
     result = inference_model(
         artifact_dir=args.artifact_dir,
         inputs=inputs,

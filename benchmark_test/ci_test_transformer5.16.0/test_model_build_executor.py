@@ -1581,6 +1581,17 @@ def test_quant_inspection_rejects_wrong_embedding_and_norm_shapes(source_and_qua
     }
 
 
+def test_quant_inspection_accepts_attention_internal_norm_dimensions(source_and_quant):
+    source, quant = source_and_quant
+    tensors = _checkpoint_tensors(32)
+    tensors["model.layers.7.self_attn.q_a_layernorm.weight"] = torch.ones((64,), dtype=torch.float16)
+    tensors["model.layers.7.self_attn.indexer.k_norm.weight"] = torch.ones((128,), dtype=torch.float16)
+    save_safetensors(tensors, quant / "model.safetensors")
+
+    result = inspect_quant_artifact(str(quant), _plan(source, quant, quant.parent / "unused"))
+    assert result["verification"] == "checkpoint_verified"
+
+
 def test_quant_inspection_requires_attention_mlp_and_norm_groups_in_every_layer(source_and_quant):
     source, quant = source_and_quant
     tensors = _checkpoint_tensors(32)

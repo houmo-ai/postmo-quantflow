@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "glm53-packed-public-build",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/glm5_3_flash/**",
+        "xhmodel_merak/model_integrations/glm53/**",
+        "configs_merak/workflows/xh2a/llm_models/glm5_3_flash/**",
+        "examples_merak/llm/glm5_3_flash/**",
+        "examples_merak/unified_api/generate.py",
+        "benchmark_test/ci_test_transformer5.16.0/_glm53_packed_fixture.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_glm53_multimodal.py",
+        "xhmodel_merak/xh_llm/_dequant_converter.py",
+        "xhmodel_merak/model_build/checkpoint.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/moe.py",
+        "xhmodel_merak/model_integrations/autoregressive/build.py",
+        "xhmodel_merak/model_integrations/autoregressive/export_info.py",
+        "xhmodel_merak/model_artifact/export_info.py"
+      ]
+    }
+  ]
+}

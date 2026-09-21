@@ -176,6 +176,8 @@ def kda_chunk_scan_reference(
     mask_incl: Tensor,
     cumulative_decay: Tensor,
     initial_state: Tensor,
+    *,
+    num_chunks: int | None = None,
 ) -> tuple[Tensor, Tensor]:
     """KDA chunk-state scan over precomputed per-chunk intermediates.
 
@@ -186,7 +188,7 @@ def kda_chunk_scan_reference(
 
     state = initial_state
     outputs = []
-    for chunk_idx in range(query.shape[2]):
+    for chunk_idx in range(query.shape[2] if num_chunks is None else num_chunks):
         q_i = query[:, :, chunk_idx]
         k_i = key[:, :, chunk_idx]
         v_i = value[:, :, chunk_idx]
@@ -222,6 +224,7 @@ def chunk_kda(
     value_dim: int | None = None,
     causal_pair_mask: Tensor | None = None,
     strict_pair_mask: Tensor | None = None,
+    normalize_qk: bool = True,
 ) -> tuple[Tensor, Tensor]:
     """Vectorized KDA prefill using the shared GDR triangular inverse.
 
@@ -236,8 +239,9 @@ def chunk_kda(
             f"KDA prefill length {query.shape[1]} must be divisible by chunk_size={chunk_size}"
         )
     input_dtype = value.dtype
-    query = _l2_normalize(query)
-    key = _l2_normalize(key)
+    if normalize_qk:
+        query = _l2_normalize(query)
+        key = _l2_normalize(key)
     if scale is None:
         scale = query.shape[-1] ** -0.5
     query = query * scale
@@ -347,6 +351,7 @@ def chunk_kda(
             inclusive,
             decay_c,
             state,
+            num_chunks=num_chunks,
         )
     else:
         if state_is_cache and not isinstance(state, (CacheTensor, Proxy)):

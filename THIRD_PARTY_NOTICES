@@ -869,6 +869,22 @@ License File:   licenses/transformers/LICENSE
 --------------------------------------------------------------------------------
 
 --------------------------------------------------------------------------------
+Component Name: transformers (GLM-5.3-Flash static graph adaptation)
+Version:        5.16.1
+Source File:    src/transformers/models/glm5_next/modeling_glm5_next.py
+Source SHA-256: 2092bbb4efa2a8087b74f4a4da37635c503fe1df9ae73f1e6e8342af8b4b8e8b
+Upstream URL:   https://github.com/huggingface/transformers
+Copyright Statement: Copyright 2026 the HuggingFace Team. All rights reserved.
+License:        Apache-2.0
+License File:   licenses/transformers/LICENSE
+Modified files: xhmodel_merak/xh_llm/models/glm5_3_flash/modeling.py
+                xhmodel_merak/xh_llm/models/glm5_3_flash/vision.py
+Modifications:  Fixed KDA/learned C4 DSA state transitions, mHC/MLA graph
+                expression, deployment MoE integration, and frame-local
+                vision graphs / multimodal embedding fusion by HOUMO AI.
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
 Component Name: transformers.v4
 Version:        4.33.2-0.20250129194509-7547f55e5d93
 Upstream URL:   https://proxy.golang.org/gopkg.in/huggingface/transformers.v4/@v/v4.33.2-0.20250129194509-7547f55e5d93.zip

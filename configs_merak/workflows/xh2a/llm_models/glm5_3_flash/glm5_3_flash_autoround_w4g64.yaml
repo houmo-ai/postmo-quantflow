@@ -1,0 +1,52 @@
+# AutoRound: routed/non-shared experts W4 G64; other projections W8 A16.
+# GPTQModel is the packed checkpoint format, not the optimization algorithm.
+# The model keeps KDA forget_gate f_a/f_b and beta b_proj at W16 A16.
+# DSA K/V factors remain separate and use W8 A16 constant-RHS MatMul.
+export:
+  model:
+    model_type: Glm5NextForConditionalGeneration
+    model_name: glm5_3_flash_w4g64
+    chip_arch: XH2a
+    dtype: float16
+    hf_model: null
+    batch_size: 1
+    context_max_length: 4096
+    prefill_chunk_length: 256
+    linear_chunk_size: 64
+    num_logits_to_keep: 1
+    max_layers: null
+    placeholder_export_workers: 1
+    export_vision: true
+    vision_max_patches: 1024
+    use_cache: true
+    quant_scheme:
+      quant_type: w8a16h0_sefp
+      nodes: {}
+      ops: {}
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  iters: 200
+  artifact_format: gptqmodel_hf
+  bits: 8
+  group_size: 64
+  sym: true
+  seed: 42
+  prepared_model_dir: null
+  num_layers: null
+  calibration:
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    text_key: text
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    device: cuda:0
+    batch_size: 1
+    preparation_devices: [cuda:0]
+    device_map: "0"
+    gradient_accumulate_steps: 2
+  moe:
+    expert_bits: 4
+    attention_bits: 8
+    dense_mlp_bits: 8
+    shared_expert_bits: 8

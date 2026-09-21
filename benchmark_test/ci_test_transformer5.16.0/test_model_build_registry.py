@@ -33,6 +33,7 @@ EXPECTED_VARIANTS = {
     "gemma4-26b-a4b": ["full"],
     "ling-3.0-flash": ["full"],
     "paddleocr-vl-1.6": ["full"],
+    "glm-5.3-flash": ["full"],
     "pi0.5-libero": ["lerobot-h50"],
     "kokoro-82m-v1.1-zh": ["full"],
     "moss-transcribe-diarize-0.9b": ["full"],
@@ -54,7 +55,7 @@ def test_distributed_catalog_preserves_the_full_public_description_snapshot():
     # First-release API: one public model_id; export naming stays internal.
     payload = json.dumps(descriptions, sort_keys=True, separators=(",", ":")).encode()
 
-    assert hashlib.sha256(payload).hexdigest() == "12dd7cb8c46f8d5b4ef91029fc86fe1e72651915e5f19aa413a94db861be4d93"
+    assert hashlib.sha256(payload).hexdigest() == "62b6f5cbe1c6b099d3a9337542e09f5714c6684fbee54d4a00e7c81aad89d4dc"
 
 
 @pytest.mark.parametrize("model_id", EXPECTED_VARIANTS)
@@ -318,7 +319,7 @@ def test_all_public_workflow_configs_exist_and_match_registered_quantization():
 def test_registry_covers_each_public_artifact_kind():
     recipes = list_recipes()
 
-    assert {recipe.artifact_format for recipe in recipes} == {"autoregressive", "asr", "tts", "vla"}
+    assert {recipe.artifact_format for recipe in recipes} == {"autoregressive", "asr", "tts", "vla", "glm53"}
     assert {recipe.task for recipe in recipes} >= {
         "text-generation",
         "vision-language-generation",
