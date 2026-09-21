@@ -171,6 +171,9 @@ internal:
     summary: Qwen3 ASR 1.7B A20 Merak workflow 卡片。
     demo:
       kind: metadata_only
+      experiment_commits:
+        xh2modelzoo: a46c0c38d591c61571033405ca5c3a809cd60ad3
+        xhquanttool: de51ff453de5ca8e3653ee1af100f608200fe012
     limitations:
     - A20 导出口径的 FLOPs 需要补充；精度已在 LibriSpeech test-clean、AIShell-1 和 FLEURS 简体中文完整测试集上验证。
     evidence:
