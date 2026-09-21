@@ -194,11 +194,30 @@ def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
     _validate_tokenizer_snapshot(stage_path / "runtime/tokenizer", max_length, plan)
     return {
         "metadata_file": meta_path.name,
+        "export_entries": describe_export(meta, nested_components),
         "runtime_kind": "pi05_compact_hmonnx",
         "components": list(plan.components),
         "requires_source": False,
         "loadable": True,
     }
+
+
+def describe_export(meta: Mapping[str, Any], nested: Mapping[str, Any]) -> dict[str, Any]:
+    components = meta["components"]
+    result = {
+        "visual": {"path": _component_path(components["vision"], "hmonnx_file"), "type": "hmonnx"},
+        "tokenizer": {"path": meta["runtime"]["tokenizer"], "type": "tokenizer"},
+        "quant_embedding": {"path": meta["runtime"]["token_embedding"], "type": "embedding"},
+    }
+    for name in ("gemma", "expert"):
+        for phase in ("prefill", "decode"):
+            result[f"{name}_{phase}"] = {
+                "path": _component_path(components[name], f"{phase}_onnx_file", graph=nested[name]),
+                "type": phase,
+            }
+    for graph in components["other"]["graphs"]:
+        result[graph["name"]] = {"path": _component_path(components["other"], "hmonnx_file", graph=graph), "type": "hmonnx"}
+    return result
 
 
 def _component_path(component: Mapping[str, Any], key: str, *, graph: Mapping[str, Any] | None = None) -> str:

@@ -455,6 +455,18 @@ def validate_format_artifact(
     manifest: Mapping[str, Any],
     meta_file: Path,
 ) -> None:
+    from .export_info import EXPORT_INFO_NAME, validate_export_info
+
+    export_info = manifest.get("artifact", {}).get("export_meta_info")
+    if export_info is not None:
+        if export_info != EXPORT_INFO_NAME:
+            raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "Unexpected export inventory filename")
+        path = artifact_file(root, manifest, export_info, "artifact.export_meta_info")
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "Invalid export inventory JSON") from error
+        validate_export_info(root, info, inventoried={entry["path"] for entry in manifest["artifact"]["files"]})
     format_spec = get_artifact_format_spec(recipe.artifact_format)
     if format_spec.validator is None:
         return

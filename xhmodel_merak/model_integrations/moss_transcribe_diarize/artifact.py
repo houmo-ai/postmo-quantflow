@@ -89,4 +89,4 @@ def validate_runtime_contract(meta: Mapping[str, Any], *, resolve_file: FileReso
         if hmonnx:
             resolve_file(hmonnx, "hmonnx_file")
     for name in REQUIRED_RUNTIME_FILES:
-        resolve_file(name, "runtime_resource")
+        resolve_file((Path(meta.get("hf_config", "")) / name).as_posix(), "runtime_resource")

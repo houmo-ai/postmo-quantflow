@@ -3,6 +3,12 @@
 接入模型或修改公共机制前阅读 [架构与扩展边界](../docs/architecture/merak.md)。
 具体算子、结构、目标设备的约束从 [建模知识](../docs/modeling/README.md) 按需查阅。
 
+- 发布目录、encode/decode/visual 命名及 `export_meta_info.json` 遵循
+  [统一产物约定](../docs/architecture/artifact-layout.md)，适用于 ASR/audio/TTS/AIGC/VLA。
+  family 根据真实运行 metadata 提供 `export_entries`；公共发布器校验、写入清单并收录 Manifest。
+  已有内部同名 metadata 改由 Manifest 指向 `runtime_meta_info.json`，加载端不得硬编码公开清单为运行契约。
+  随包 JSON 必须以 `type: json` 逐项登记；LoRA 专属 JSON 按 family 声明的 checkpoint 资源根分组。
+
 - 预置模型对外使用 `model_build` 的 `list_models`、`describe_model`、`build_model`
   和 `model_inference.inference_model`；接入方式见 [接口开发约定](model_integrations/README.md)。
   底层 workflow 使用 `xhmodel_merak.workflows.AutoWorkflow`，具体行为由 family 承担。

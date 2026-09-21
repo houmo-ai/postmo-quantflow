@@ -31,7 +31,8 @@ class PI05CompactRuntime:
         self.device = torch.device(device)
         self.manifest = dict(manifest or {})
         self.CacheTensor = CacheTensor
-        self.meta = _load_json(_confined_file(self.root, "export_meta_info.json", self.manifest))
+        metadata_file = self.manifest.get("artifact", {}).get("metadata_file", "export_meta_info.json")
+        self.meta = _load_json(_confined_file(self.root, metadata_file, self.manifest))
         policy_config_path = _confined_file(self.root, "runtime/policy/config.json", self.manifest)
         self.policy_config = _load_json(policy_config_path)
         self.contract = dict(self.meta["compact_prefix"])

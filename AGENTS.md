@@ -2,6 +2,12 @@
 
 ## 仓库约定
 
+- 发布产物遵循 [统一产物布局与集成清单](docs/architecture/artifact-layout.md)：ASR 用 `encode`，
+  解码用 `decode`，视觉用 `visual`；组件按角色与实际档位平铺。统一 build 必须生成
+  根目录 `export_meta_info.json`（组件/资源的包内相对路径与 type，LoRA 按 checkpoint 分组），
+  随包运行 metadata、档位和 HF 配置等 JSON 以 `type: json` 描述路径，不内嵌内容；
+  改布局须同步维护加载端及当前 CI。
+
 - 当前实现、配置、示例分别在 `xhmodel_merak/`、`configs_merak/`、`examples_merak/`。
   历史根目录由 [CI policy](benchmark_test/ci_test_transformer5.16.0/impact_policy.json) 冻结。
 - 修改 Merak 的入口、分层或模型接入时，先读 [Merak 架构](docs/architecture/merak.md)。

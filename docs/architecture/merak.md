@@ -106,6 +106,9 @@ kernel 与 lowering 留在工具链。不同模型共用同一能力时才抽取
 
 ## 非 LLM 的发布产物
 
+统一 API 的全模态目录命名及集成商清单见 [发布产物约定](artifact-layout.md)。
+`export_meta_info.json` 专用于 `{path, type}` 索引，内部运行契约由 Manifest 单独指向。
+
 新增非 LLM 发布沿用 [HM 模型版本发布命名规则](https://houmo.feishu.cn/wiki/WbX8wq9tpihXeHkzAy7caqMZnUh)
 的组织原则：小写 `hmquant_<平台>_<上游模型名>_<精度>_<尺寸>_<日期>` 前缀，
 子模型按“角色＋实际输入档位”平铺，模型、权重与 `step_0` 同属一个组件目录。

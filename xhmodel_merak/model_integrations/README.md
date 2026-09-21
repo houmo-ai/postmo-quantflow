@@ -176,6 +176,14 @@ python benchmark_test/ci_test_transformer5.16.0/select_tests.py --format report
 
 ## 构建与产物
 
+目录和对外交付索引统一遵循 [产物布局与 export_meta_info 契约](../../docs/architecture/artifact-layout.md)。
+`validate_artifact` 除运行信息外返回 `export_entries`，公共发布流程校验并写入根目录
+`export_meta_info.json`，随后纳入 Manifest；不能按文件后缀推断 HMONNX/ONNX。
+内部运行元数据原先占用该文件名时，发布器将其迁到 `runtime_meta_info.json`，
+加载端从 Manifest 的 `artifact.metadata_file` 取路径。LoRA 每个 checkpoint 单独描述实际图和资源。
+公共发布器同时收集随包运行/配置 JSON，以 `type: json` 登记。LoRA family 返回
+`export_json_roots={checkpoint: 包内相对目录}` 指定 JSON 归属；该构建期字段不写入 Manifest。
+
 指定 `output_dir` 就直接交付到该目录，不在里面再套一层发布名。省略或传 `None` 时，
 在当前工作目录创建 `<发布名>_<YYYYMMDD>`，实际路径由 `BuildResult.output_dir` 返回。
 目标必须尚不存在，父目录必须存在；自动命名重名也报错，不覆盖、不偷偷追加随机后缀。
@@ -202,7 +210,7 @@ Manifest 文件清单；权重 external_data 的引用也必须完整。
 `normalize_export` 返回旧名称时，公共发布器会统一改名；如果模型已按发布规则命名且
 要求保持图与 external_data 原样，返回 `None`。Kokoro 就属于后者：只提平外层
 release 目录，内部日期前缀、文件名和 ONNX location 保持不动。实际发布前缀读
-`export_meta_info.json.release_prefix`，不能拿目录名或 recipe 的固定标识去拼文件。
+运行 metadata 的 `release_prefix`（统一发布后为 `runtime_meta_info.json`），不能拿目录名或 recipe 的固定标识去拼文件。
 
 `build_model` 不顺便生成 Golden，也不声称精度验证通过。转换失败或校验失败必须
 终止发布；不能把失败的可选图、残留权重或日志包装成可用模型。

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from xhmodel_merak.errors import ErrorCode, ModelError
+from xhmodel_merak.model_artifact.files import confined_file
 from xhmodel_merak.model_build.artifacts import flatten_single_export_root
 from xhmodel_merak.model_build.contracts import BuildPlan
 from xhmodel_merak.model_build.packaging import validate_onnx_external_locations
@@ -19,6 +20,7 @@ from xhmodel_merak.model_build.runtime_assets import behavior_config_mismatches,
 from xhmodel_merak.model_catalog import get_recipe
 
 from .vision import validate_dynamic_vision
+from .export_info import describe_export
 
 
 def normalize_export(stage_path: Path, export_result: Any, plan: BuildPlan) -> str | None:
@@ -161,21 +163,26 @@ def _retain_runtime_files(stage_path: Path, metadata: Mapping[str, Any]) -> None
     root = stage_path.resolve()
     keep = {root / name for name in ("golden_meta_info.json", "merak_config.json", "effective_workflow.yaml")}
 
-    def visit(value: Any, field: str = "") -> None:
+    def visit(value: Any, field: str = "", base: Path = root) -> None:
         if isinstance(value, Mapping):
             for key, item in value.items():
-                visit(item, str(key))
+                visit(item, str(key), base)
         elif isinstance(value, list):
             for item in value:
-                visit(item, field)
+                visit(item, field, base)
         elif isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts:
-            candidate = root / value
+            candidate = base / value
             if candidate.is_file():
                 keep.add(candidate.resolve())
             elif candidate.is_dir() and (field == "hf_config" or field.endswith("_hf_config")):
                 keep.update(asset.resolve() for asset in quant_runtime_asset_paths(candidate))
 
     visit(metadata)
+    for adapter in metadata.get("lora_adapters", ()):
+        child = confined_file(root, adapter["meta_file"], "lora.meta_file")
+        child_metadata = json.loads(child.read_text(encoding="utf-8"))
+        child_metadata.pop("lora_adapters", None)
+        visit(child_metadata, base=child.parent)
     graphs = sorted(path for path in keep if path.suffix.lower() in {".onnx", ".hmonnx"})
     keep.update(validate_onnx_external_locations(root, graphs=graphs))
     for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
@@ -221,6 +228,11 @@ def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
     golden_artifacts = _collect_golden_artifacts(stage_path, plan)
     return {
         "metadata_file": meta_path.name,
+        "export_entries": describe_export(stage_path, meta),
+        "export_json_roots": {
+            adapter["name"]: Path(adapter["meta_file"]).parent.as_posix()
+            for adapter in meta.get("lora_adapters", ())
+        },
         "golden_meta_info": meta_path.name,
         "merak_config": merak_path.name,
         "components": list(plan.components),

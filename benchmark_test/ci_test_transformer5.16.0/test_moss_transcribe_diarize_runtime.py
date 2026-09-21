@@ -1066,6 +1066,7 @@ def test_build_and_load_both_reject_pre_lookup_artifacts(tmp_path):
     recipe = get_recipe("moss-transcribe-diarize-0.9b")
     metadata = tmp_path / "export_meta_info.json"
     meta = _rotary_artifact_meta()
+    _package_fixture_resources(tmp_path, meta)
     metadata.write_text(json.dumps(meta))
     validators = (
         lambda: build.validate_artifact(tmp_path, types.SimpleNamespace(
@@ -1113,6 +1114,7 @@ def test_flash_attention_artifact_accepts_inplace_hmonnx_without_onnx(tmp_path):
         ),
     )
     metadata = tmp_path / "export_meta_info.json"
+    _package_fixture_resources(tmp_path, meta)
     metadata.write_text(json.dumps(meta))
     recipe = get_recipe("moss-transcribe-diarize-0.9b")
     plan = types.SimpleNamespace(model_id=recipe.model_id, components=recipe.components)
@@ -1120,3 +1122,13 @@ def test_flash_attention_artifact_accepts_inplace_hmonnx_without_onnx(tmp_path):
     inference.adapter.validate_artifact(
         recipe=recipe, root=tmp_path, manifest={}, meta_file=metadata,
     )
+
+
+def _package_fixture_resources(root, meta):
+    from xhmodel_merak.model_integrations.moss_transcribe_diarize.artifact import REQUIRED_RUNTIME_FILES
+
+    destination = root / "hf_config"
+    destination.mkdir()
+    for name in REQUIRED_RUNTIME_FILES:
+        (root / name).rename(destination / name)
+    meta["hf_config"] = "hf_config"

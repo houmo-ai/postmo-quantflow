@@ -17,6 +17,7 @@
         "configs_merak/workflows/xh2a/other_models/kokoro/**",
         "xhmodel_merak/model_integrations/*/build.py",
         "xhmodel_merak/model_integrations/autoregressive/vision.py",
+        "xhmodel_merak/model_integrations/autoregressive/export_info.py",
         "xhmodel_merak/xh_llm/workflows/result.py",
         "data/calib_data/**",
         "xhmodel_merak/_requirements.py",

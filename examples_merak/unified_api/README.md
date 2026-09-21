@@ -90,7 +90,7 @@ python -m examples_merak.unified_api.synthesize \
 
 包内有 `hf_config`、voice.npy 和 16 个组件目录（三张 NPU 图、一张 CPU 相位图，各四档），
 外加统一 manifest 和 `effective_workflow.yaml`。图的原始发布名称和 external_data 不改，
-路径读 `export_meta_info.json`。旧 Kokoro 包要重新构建。
+集成组件路径读 `export_meta_info.json`；运行契约读 Manifest 指向的 `runtime_meta_info.json`。旧 Kokoro 包要重新构建。
 `build_model` 不生成 Golden；全档串联 Golden 仍使用 Kokoro workflow 的独立入口。
 
 ## MOSS-Transcribe-Diarize 会议转写
@@ -123,6 +123,7 @@ Qwen3.5 完整包的主要文件如下，具体文件清单以 `model_build_mani
 ```text
 qwen35_4b_api/
 ├── model_build_manifest.json
+├── export_meta_info.json
 ├── effective_workflow.yaml
 ├── golden_meta_info.json
 ├── hf_config/
@@ -138,6 +139,9 @@ qwen35_4b_api/
 ```
 
 各组件目录里是图和相关权重。ViT 五档平铺在根目录，`visual_gears.json` 记录每档图的位置。
+集成商读取 `export_meta_info.json` 的 `{path, type}`，路径相对发布根目录；图指向文件，
+tokenizer 指向目录，LoRA 位于 `lora.<checkpoint>` 下。完整规则见
+[产物布局约定](../../docs/architecture/artifact-layout.md)。
 搬运时复制整个产物目录，不要只拿一个 ONNX 文件。旧 workflow 直接导出的目录没有统一 manifest，不能直接交给这个推理接口。
 
 构建交付时不包含临时子图、逐层导出工作文件、日志、评测报告和摘要缓存。

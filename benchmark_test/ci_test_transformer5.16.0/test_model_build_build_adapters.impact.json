@@ -10,6 +10,7 @@
         "xhmodel_merak/model_integrations/_shared.py",
         "xhmodel_merak/model_build/**",
         "xhmodel_merak/model_integrations/*/build.py",
+        "xhmodel_merak/model_integrations/autoregressive/export_info.py",
         "xhmodel_merak/model_integrations/qwen/planning.py",
         "xhmodel_merak/xh_other_model/models/pi05/**",
         "xhmodel_merak/xh_other_model/models/kokoro/**",

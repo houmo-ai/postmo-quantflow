@@ -9,6 +9,7 @@ from xhmodel_merak._environment import scoped_environment as _scoped_environment
 from xhmodel_merak._requirements import validate_worker_capabilities, validate_worker_requirements
 from xhmodel_merak.errors import ErrorCode, ModelError
 from xhmodel_merak.model_artifact import EFFECTIVE_WORKFLOW_NAME, MANIFEST_NAME
+from xhmodel_merak.model_artifact.export_info import publish_export_info
 
 from . import checkpoint, embeddings, fingerprints, manifest, packaging, workflow, workspace
 from .contracts import BuildPlan, BuildResult
@@ -86,6 +87,7 @@ def execute_build(plan: BuildPlan) -> BuildResult:
 
         embedding_metadata = embeddings.write_embedding_bins(stage_path, plan)
         artifact_metadata = adapter.validate_artifact(stage_path, plan)
+        publish_export_info(stage_path, artifact_metadata, embedding_metadata=embedding_metadata)
         final_quant_metadata = checkpoint.inspect_quant_artifact(quant_inspection_path, plan)
         if quant_metadata is not None and final_quant_metadata != quant_metadata:
             raise ModelError(

@@ -44,6 +44,7 @@ def transcribe_artifact(
     generation_budget = audio_generation_budget(len(waveform) / SAMPLING_RATE, max_new_tokens)
     owns_runtime = runtime is None
     hmonnx = runtime or MossHMONNXRuntime(root, meta, device)
+    resource_root = root / meta.get("hf_config", "")
     try:
         if selected_golden:
             if not hmonnx.available() or str(device).lower().startswith("cpu"):
@@ -63,11 +64,11 @@ def transcribe_artifact(
         lm_head = MossLMHead(hidden_size=lm_weight.shape[1], vocab_size=lm_weight.shape[0])
         lm_head.load_state_dict(lm_state)
         tokenizer = AutoTokenizer.from_pretrained(
-            root, local_files_only=True, trust_remote_code=True, extra_special_tokens={},
+            resource_root, local_files_only=True, trust_remote_code=True, extra_special_tokens={},
         )
 
         try:
-            processor = load_official_processor(root)
+            processor = load_official_processor(resource_root)
         except Exception as error:
             raise ModelError(
                 ErrorCode.INFERENCE_FAILED,
@@ -83,13 +84,13 @@ def transcribe_artifact(
             waveform,
             prompt,
             tokenizer=processor,
-            encode_audio=lambda window: encode_audio_hmonnx(window, root, hmonnx),
+            encode_audio=lambda window: encode_audio_hmonnx(window, resource_root, hmonnx),
             embed_tokens=lambda ids: embed_tokens(ids, lm_head),
             generate=lambda fused, mask: generate_hmonnx(
-                fused, mask, hmonnx, lm_head, tokenizer, root, max_new_tokens=generation_budget,
+                fused, mask, hmonnx, lm_head, tokenizer, resource_root, max_new_tokens=generation_budget,
             ),
             validate_prompt=lambda length: validate_prompt_budget(
-                root, length, hmonnx.input_shape("prefill", "inputs_embeds")[1],
+                resource_root, length, hmonnx.input_shape("prefill", "inputs_embeds")[1],
                 hmonnx.decoder_cache_length(), generation_budget,
             ),
         )
@@ -381,4 +382,3 @@ def generation_limit(
             prompt_length=prompt_length, requested_tokens=requested, available_tokens=available,
         )
     return requested
-

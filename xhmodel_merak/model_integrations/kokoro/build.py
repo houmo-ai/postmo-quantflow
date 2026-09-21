@@ -58,12 +58,23 @@ def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
         raise _invalid(plan, str(error)) from error
     return {
         "metadata_file": meta_path.name,
+        "export_entries": describe_export(meta),
         "runtime_kind": "kokoro_bucketed_cpu_phase",
         "release_prefix": meta["release_prefix"],
         "components": list(plan.components),
         "requires_source": False,
         "loadable": True,
     }
+
+
+def describe_export(meta: dict[str, Any]) -> dict[str, Any]:
+    entries = {}
+    for role, component in meta["components"].items():
+        for gear, bucket in component["buckets"].items():
+            kind = "onnx" if role == "phase_core" else "hmonnx"
+            entries[f"{role}_{gear}"] = {"path": bucket[f"{kind}_file"], "type": kind}
+    entries["tokenizer"] = {"path": str(Path(meta["runtime_assets"]["config_file"]).parent), "type": "tokenizer"}
+    return entries
 
 
 def _invalid(plan: BuildPlan, message: str) -> ModelError:

@@ -455,6 +455,9 @@ def test_executor_materializes_dynamic_vit_flattens_legacy_root_and_writes_manif
     assert embedding.dtype == torch.float16
     assert embedding.is_contiguous()
     assert (output / "quant_embedding.bin").read_bytes() == embedding.numpy().astype("<f2").tobytes()
+    export_info = json.loads((output / "export_meta_info.json").read_text(encoding="utf-8"))
+    assert export_info["quant_embedding"] == {"path": "quant_embedding.pt", "type": "embedding"}
+    assert export_info["quant_embedding_bin"] == {"path": "quant_embedding.bin", "type": "embedding"}
     assert "model_build_manifest.json" not in {item["path"] for item in manifest["artifact"]["files"]}
     published_text = "\n".join(
         path.read_text(encoding="utf-8")
