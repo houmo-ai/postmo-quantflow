@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minimax-h3-transformer-export-abi-contract",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/minimax_h3/components_hmonnx.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/minimax_h3_converter.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/transformer_minimax_h3.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/transformer_wrapper.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/__init__.py",
+        "configs_merak/workflows/xh2a/other_models/minimax_h3/**",
+        "examples_merak/aigc/minimaxh3/**"
+      ]
+    }
+  ]
+}

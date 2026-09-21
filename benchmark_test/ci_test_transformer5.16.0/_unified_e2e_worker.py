@@ -23,38 +23,66 @@ def prepare(case, root, monkeypatch):
     recipe = catalog._recipes[case.model_id]
     source = root / "source"
     calibration, image = write_calibration(root)
-    kwargs = {"model_id": case.model_id, "model_dir": str(source),
-              "output_dir": str(root / "artifact"), "device": "cuda:0"}
+    kwargs = {
+        "model_id": case.model_id,
+        "model_dir": str(source),
+        "output_dir": str(root / "artifact"),
+        "device": "cuda:0",
+    }
     inputs = {"prompt": "hello world", "max_new_tokens": 2}
     replacements = dict(recipe.config_replacements)
     family = case.fixture
     if family == "pi05":
         from _pi05_small_fixture import write_pi05
+
         tokenizer = root / "tokenizer"
         write_pi05(source, tokenizer, monkeypatch)
-        monkeypatch.setitem(catalog._recipes, recipe.model_id, replace(
-            recipe, config_replacements=(*recipe.config_replacements, ("export.other.hidden_size", 64)),
-        ))
+        monkeypatch.setitem(
+            catalog._recipes,
+            recipe.model_id,
+            replace(
+                recipe,
+                config_replacements=(*recipe.config_replacements, ("export.other.hidden_size", 64)),
+            ),
+        )
         kwargs["resources"] = {"tokenizer": str(tokenizer)}
-        inputs = {"task": "pick up the object", "observation.images.image": str(image),
-                  "observation.images.image2": str(image), "observation.state": [0.] * 8, "seed": 1}
+        inputs = {
+            "task": "pick up the object",
+            "observation.images.image": str(image),
+            "observation.images.image2": str(image),
+            "observation.state": [0.0] * 8,
+            "seed": 1,
+        }
+        return kwargs, inputs
+    if family == "minimax":
+        # Packaging-only unified case: stub the heavy converter, keep public
+        # build/relocate/validation, and assert unsupported unified inference.
+        source.mkdir()
+        from _unified_special_fixtures import configure_minimax_packaging_stub
+
+        configure_minimax_packaging_stub(source, monkeypatch)
+        inputs = {"prompt": "a clay fox walks across wet sand", "image": str(image), "workflow": "fl2va"}
         return kwargs, inputs
     if family in ("kokoro", "moss"):
         # Release assets remain explicit and pinned; no model-hub downloads.
         if family == "kokoro":
             from _unified_assets import kokoro_source
+
             source = kokoro_source()
         else:
             from _unified_assets import moss_source
+
             source = moss_source()
         kwargs["model_dir"] = str(source)
         if family == "kokoro":
             from _unified_special_fixtures import configure_kokoro_minimal
+
             configure_kokoro_minimal(catalog, recipe, monkeypatch)
             inputs = {"text": "你好"}
         else:
             import numpy as np
             import soundfile as sf
+
             audio = root / "audio.wav"
             sf.write(audio, 0.03 * np.sin(np.arange(16000) * 2 * np.pi * 220 / 16000), 16000)
             inputs = {"audio": str(audio), "max_new_tokens": 64}
@@ -63,26 +91,34 @@ def prepare(case, root, monkeypatch):
 
     if family == "glm":
         from _glm53_packed_fixture import write_native_glm53
+
         write_native_glm53(source)
         kwargs["quant_output_dir"] = str(root / "quant")
         config = json.loads((source / "config.json").read_text())
-        calibration.write_text("".join(
-            json.dumps({"text": " ".join(f"t{2 + (i + row) % 40}" for i in range(128))}) + "\n"
-            for row in range(2)
-        ))
+        calibration.write_text(
+            "".join(
+                json.dumps({"text": " ".join(f"t{2 + (i + row) % 40}" for i in range(128))}) + "\n" for row in range(2)
+            )
+        )
         inputs["prompt"] = "t2 t3 t4"
-        replacements.update({"export.model.linear_chunk_size": 8,
-                             "export.model.placeholder_export_workers": 1,
-                             "export.model.vision_max_patches": 32})
+        replacements.update(
+            {
+                "export.model.linear_chunk_size": 8,
+                "export.model.placeholder_export_workers": 1,
+                "export.model.vision_max_patches": 32,
+            }
+        )
     elif family == "ling":
         from _unified_special_fixtures import write_ling
+
         config = write_ling(source)
         # Match the tiny numeric vocabulary; natural language would become
         # repeated UNK tokens and be rejected by AutoRound's sample filter.
-        calibration.write_text("".join(
-            json.dumps({"text": " ".join(str(4 + (i + row) % 6) for i in range(128))}) + "\n"
-            for row in range(2)
-        ))
+        calibration.write_text(
+            "".join(
+                json.dumps({"text": " ".join(str(4 + (i + row) % 6) for i in range(128))}) + "\n" for row in range(2)
+            )
+        )
         inputs["prompt"] = "4 5 6"
     else:
         config = write_native_checkpoint(source, "qwen_moe" if family == "macaron" else family)
@@ -102,18 +138,21 @@ def prepare(case, root, monkeypatch):
         kwargs["speculative"] = {"mode": "mtp"}
         if gemma:
             from _unified_special_fixtures import write_gemma_assistant
+
             assistant = root / "assistant"
             replacements.update(write_gemma_assistant(assistant, config, ordered=family in ("gemma_e2b", "gemma_e4b")))
             kwargs["sources"] = {"mtp": str(assistant)}
         else:
             write_auxiliary(source, family + "_mtp")
-            replacements.update({
-                "export.model.mtp_config.hidden_size": 64,
-                "export.model.mtp_config.num_key_value_heads": 2,
-                "export.model.mtp_config.head_dim": 32,
-                "export.model.mtp_config.input_sequence_length": 8,
-                "export.model.mtp_config.max_pe_length": 128,
-            })
+            replacements.update(
+                {
+                    "export.model.mtp_config.hidden_size": 64,
+                    "export.model.mtp_config.num_key_value_heads": 2,
+                    "export.model.mtp_config.head_dim": 32,
+                    "export.model.mtp_config.input_sequence_length": 8,
+                    "export.model.mtp_config.max_pe_length": 128,
+                }
+            )
     if case.variant in {"dflash", "dflash2"}:
         draft = root / "draft"
         write_auxiliary(draft, case.variant, target_config=config)
@@ -124,15 +163,22 @@ def prepare(case, root, monkeypatch):
         kwargs["lora"] = {"paths": [str(adapter)]}
     if family == "macaron" and case.variant == "lora":
         from _unified_special_fixtures import write_macaron_loras
+
         write_macaron_loras(source)
         kwargs["lora"] = {"paths": [str(source / "loras" / f"L{i}") for i in range(3)]}
     constraints = (("model_type", config["model_type"]),)
     if family in ("minicpm", "ling"):
         constraints = (("architectures.0", config["architectures"][0]),)
-    monkeypatch.setitem(catalog._recipes, case.model_id, replace(
-        recipe, source_constraints=constraints, max_pe_length=512 if gemma else max(128, context),
-        config_replacements=tuple(replacements.items()),
-    ))
+    monkeypatch.setitem(
+        catalog._recipes,
+        case.model_id,
+        replace(
+            recipe,
+            source_constraints=constraints,
+            max_pe_length=512 if gemma else max(128, context),
+            config_replacements=tuple(replacements.items()),
+        ),
+    )
     configure_calibration(case, calibration, monkeypatch)
     return kwargs, inputs
 
@@ -159,8 +205,12 @@ def configure_calibration(case, calibration, monkeypatch):
         plan = original(**kwargs)
         replacements = copy.deepcopy(plan.config_replacements)
         quant = replacements.get("quant")
-        fields = {"calibration.dataset": str(calibration), "calibration.nsamples": 2,
-                  "calibration.seqlen": 64, "runtime.batch_size": 1}
+        fields = {
+            "calibration.dataset": str(calibration),
+            "calibration.nsamples": 2,
+            "calibration.seqlen": 64,
+            "runtime.batch_size": 1,
+        }
         if case.fixture in ("qwen_next", "glm", "ling"):
             fields["calibration.jsonl"] = fields.pop("calibration.dataset")
         if case.fixture == "qwen_next" and plan.quant_method == "gptq":
@@ -270,64 +320,101 @@ def run(case, root, *, low_memory=None):
             artifact.rename(moved)
             # Generated checkpoints disappear before inference: no accidental
             # dependence on the build machine's source or quantization cache.
-            for name in ("source", "checkpoint", "quant", "assistant", "draft", "base_quant", "base_artifact", "lora", "tokenizer"):
+            for name in (
+                "source",
+                "checkpoint",
+                "quant",
+                "assistant",
+                "draft",
+                "base_quant",
+                "base_artifact",
+                "lora",
+                "tokenizer",
+            ):
                 path = root / name
                 if path.is_dir():
                     shutil.rmtree(path)
             record["stage"] = "inference"
-            output = inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
-            assert output.model_id == case.model_id
-            value = output.to_dict()
-            json.dumps(value, allow_nan=False)
-            if case.fixture == "moss":
-                # ASR's public adapter does not expose a token count. Its
-                # structured transcript is validated inside inference_model.
-                assert isinstance(output.output_text, str) and output.output_text.strip()
-            elif hasattr(output, "output_tokens"):
-                assert output.output_tokens > 0
-            if case.variant in ("mtp", "lora_mtp", "dflash", "dflash2"):
-                assert output.spec_decode_mode == (case.variant if case.variant in {"dflash", "dflash2"} else "mtp")
-            if hasattr(output, "actions"):
-                assert (output.horizon, output.action_dim) == (50, 7)
-                assert len(output.actions) == 50
-            if hasattr(output, "num_samples"):
-                assert output.num_samples > 0
-            if case.fixture == "kokoro":
-                meta = json.loads(Path(output.meta_file).read_text())
-                routes = meta["bucket_presets"]["routes"]
-                assert [(r["token_max_length"], r["frame_max_length"]) for r in routes] == [(32, 160)]
-                assert all(len(c["buckets"]) == 1 for c in meta["components"].values())
-                assert output.segments[0]["route"] == "t0032_f0160"
-                record["tested_routes"] = ["t0032_f0160"]
-            if case.variant in ("lora", "lora_mtp"):
-                # The public API runs the root model. Exercise the exported
-                # adapter too, through the same runtime used by that API.
-                from xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation import quick_test_hmonnx
-                from xhmodel_merak.model_inference.inputs import scoped_environment
+            if case.fixture == "minimax":
+                from xhmodel_merak.errors import ErrorCode, ModelError
 
-                meta = Path(output.meta_file)
-                adapters = json.loads(meta.read_text())["lora_adapters"]
-                assert len(adapters) == (3 if case.fixture == "macaron" else 1)
-                if case.fixture == "macaron":
-                    record["expert_lora_fingerprints"] = validate_expert_lora_artifacts(meta, adapters)
-                record["lora_inference_tokens"] = {}
-                for adapter in adapters:
-                    with scoped_environment({"ENABLE_HMINFERENCE_V2": "1"}):
-                        child = quick_test_hmonnx(
-                            str(meta.parent / adapter["meta_file"]), prompt="hello world",
-                            device="cuda:0", max_new_tokens=2, stream_output=False,
-                        )
-                    assert child.output_tokens > 0
-                    if case.variant == "lora_mtp":
-                        assert child.spec_decode_mode == "mtp"
-                    record["lora_inference_tokens"][adapter["name"]] = child.output_tokens
-            record.update(passed=True, stage="complete", inference=value)
+                with pytest.raises(ModelError) as exc_info:
+                    inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
+                error = exc_info.value
+                values = error.details.get("values", {})
+                assert error.code == ErrorCode.UNSUPPORTED_COMBINATION
+                assert values.get("workflow") == "fl2va"
+                assert values.get("image") == inputs["image"]
+                record.update(
+                    passed=True,
+                    stage="complete",
+                    inference={
+                        "status": "unsupported_combination",
+                        "code": error.code.value,
+                        "workflow": values.get("workflow"),
+                        "prompt": values.get("prompt"),
+                        "image": values.get("image"),
+                    },
+                )
+            else:
+                output = inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
+                assert output.model_id == case.model_id
+                value = output.to_dict()
+                json.dumps(value, allow_nan=False)
+                if case.fixture == "moss":
+                    # ASR's public adapter does not expose a token count. Its
+                    # structured transcript is validated inside inference_model.
+                    assert isinstance(output.output_text, str) and output.output_text.strip()
+                elif hasattr(output, "output_tokens"):
+                    assert output.output_tokens > 0
+                if case.variant in ("mtp", "lora_mtp", "dflash", "dflash2"):
+                    assert output.spec_decode_mode == (case.variant if case.variant in {"dflash", "dflash2"} else "mtp")
+                if hasattr(output, "actions"):
+                    assert (output.horizon, output.action_dim) == (50, 7)
+                    assert len(output.actions) == 50
+                if hasattr(output, "num_samples"):
+                    assert output.num_samples > 0
+                if case.fixture == "kokoro":
+                    meta = json.loads(Path(output.meta_file).read_text())
+                    routes = meta["bucket_presets"]["routes"]
+                    assert [(r["token_max_length"], r["frame_max_length"]) for r in routes] == [(32, 160)]
+                    assert all(len(c["buckets"]) == 1 for c in meta["components"].values())
+                    assert output.segments[0]["route"] == "t0032_f0160"
+                    record["tested_routes"] = ["t0032_f0160"]
+                if case.variant in ("lora", "lora_mtp"):
+                    # The public API runs the root model. Exercise the exported
+                    # adapter too, through the same runtime used by that API.
+                    from xhmodel_merak.xh_llm.models.qwen3_5.hmonnx_validation import quick_test_hmonnx
+                    from xhmodel_merak.model_inference.inputs import scoped_environment
+
+                    meta = Path(output.meta_file)
+                    adapters = json.loads(meta.read_text())["lora_adapters"]
+                    assert len(adapters) == (3 if case.fixture == "macaron" else 1)
+                    if case.fixture == "macaron":
+                        record["expert_lora_fingerprints"] = validate_expert_lora_artifacts(meta, adapters)
+                    record["lora_inference_tokens"] = {}
+                    for adapter in adapters:
+                        with scoped_environment({"ENABLE_HMINFERENCE_V2": "1"}):
+                            child = quick_test_hmonnx(
+                                str(meta.parent / adapter["meta_file"]),
+                                prompt="hello world",
+                                device="cuda:0",
+                                max_new_tokens=2,
+                                stream_output=False,
+                            )
+                        assert child.output_tokens > 0
+                        if case.variant == "lora_mtp":
+                            assert child.spec_decode_mode == "mtp"
+                        record["lora_inference_tokens"][adapter["name"]] = child.output_tokens
+                record.update(passed=True, stage="complete", inference=value)
     except BaseException as exc:
         from _unified_reporting import record_error
+
         record_error(record, exc)
         raise
     finally:
         from _unified_reporting import write_report
+
         write_report(root, record, started)
 
 

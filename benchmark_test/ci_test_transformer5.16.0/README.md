@@ -46,7 +46,7 @@ Checkpoint loading retains its no-initialization optimization inside a test;
 restoration runs on both success and failure. This isolates tests, not production
 calls. A test that constructs a native model after loading a checkpoint must
 request the `restore_model_initialization_state` fixture and scope that load
-with `with restore_model_initialization_state():`, or use a separate worker. The 45 unified flows already use independent workers.
+with `with restore_model_initialization_state():`, or use a separate worker. The 46 unified flows already use independent workers.
 Module/session fixtures and collection must not load checkpoints in the shared
 pytest process: the function-scoped guard does not bracket those operations.
 
@@ -311,8 +311,8 @@ this is not a full MiniCPM vision/export/runtime correctness suite.
 
 ## Unified model and variant regressions
 
-`test_unified_small_models.py` explicitly enumerates all 26 registered models
-and 45 variants. `test_unified_small_model_coverage.py` fails if the catalog and
+`test_unified_small_models.py` explicitly enumerates all 27 registered models
+and 46 variants. `test_unified_small_model_coverage.py` fails if the catalog and
 this list diverge, or their dependency profiles cannot share Transformers
 5.16.1. Each selected case runs `build_model`, moves the artifact, removes its
 generated source/checkpoint directories, and runs `inference_model` in a fresh
@@ -400,7 +400,7 @@ its process group before the GPU is reused. Its `.impact.json` selects parameter
 nodes for model-private source/adapter changes, and all variants of the specific
 model for its workflow configurations. Shared Qwen source also selects its MoE,
 Qwen3-Next, Macaron and WeMM consumers. Public unified build/inference/catalog
-and shared fixture changes select the entire 45-case matrix. Multiple changes
+and shared fixture changes select the entire 46-case matrix. Multiple changes
 are combined; `--format report` shows the exact pytest nodes and reasons.
 `test_unified_small_model_coverage.py` checks registered workflow routing, shared
 consumers and the actual pytest collection of every declared node. Global policy

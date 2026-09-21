@@ -139,6 +139,16 @@
       ]
     },
     {
+      "id": "unified-minimax",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/minimax_h3/**",
+        "xhmodel_merak/model_integrations/minimax_h3/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[minimax-h3-fl2va/full]"
+      ]
+    },
+    {
       "id": "unified-paddleocr",
       "patterns": [
         "xhmodel_merak/xh_llm/models/paddleocr_vl/**",
@@ -296,6 +306,15 @@
       ],
       "nodes": [
         "test_public_build_relocate_and_inference[minicpm5-2.6b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-minimax-h3-fl2va",
+      "patterns": [
+        "configs_merak/workflows/xh2a/other_models/minimax_h3/minimax_h3*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[minimax-h3-fl2va/full]"
       ]
     },
     {

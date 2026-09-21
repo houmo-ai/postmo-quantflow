@@ -34,6 +34,7 @@ EXPECTED_VARIANTS = {
     "ling-3.0-flash": ["full"],
     "paddleocr-vl-1.6": ["full"],
     "glm-5.3-flash": ["full"],
+    "minimax-h3-fl2va": ["full"],
     "pi0.5-libero": ["lerobot-h50"],
     "kokoro-82m-v1.1-zh": ["full"],
     "moss-transcribe-diarize-0.9b": ["full"],
@@ -322,13 +323,21 @@ def test_all_public_workflow_configs_exist_and_match_registered_quantization():
 def test_registry_covers_each_public_artifact_kind():
     recipes = list_recipes()
 
-    assert {recipe.artifact_format for recipe in recipes} == {"autoregressive", "asr", "tts", "vla", "glm53"}
+    assert {recipe.artifact_format for recipe in recipes} == {
+        "aigc",
+        "autoregressive",
+        "asr",
+        "tts",
+        "vla",
+        "glm53",
+    }
     assert {recipe.task for recipe in recipes} >= {
         "text-generation",
         "vision-language-generation",
         "action-prediction",
         "text-to-speech",
         "speech-transcription",
+        "image-to-video",
     }
     assert all(recipe.build_adapter and recipe.inference_adapter for recipe in recipes)
 
@@ -357,16 +366,12 @@ def _write_moss_bundle(model_dir):
         '"audio_config":{"model_type":"whisper"},"audio_merge_size":4,"adaptor_input_dim":4096}'
     )
     (model_dir / "processor_config.json").write_text(
-        '{"audio_tokens_per_second":12.5,"audio_merge_size":4,'
-        '"time_marker_every_seconds":5,"enable_time_marker":true}'
+        '{"audio_tokens_per_second":12.5,"audio_merge_size":4,"time_marker_every_seconds":5,"enable_time_marker":true}'
     )
     (model_dir / "preprocessor_config.json").write_text(
-        '{"sampling_rate":16000,"feature_size":80,"hop_length":160,"n_fft":400,'
-        '"n_samples":480000,"nb_max_frames":3000}'
+        '{"sampling_rate":16000,"feature_size":80,"hop_length":160,"n_fft":400,"n_samples":480000,"nb_max_frames":3000}'
     )
-    (model_dir / "generation_config.json").write_text(
-        '{"max_new_tokens":5120,"eos_token_id":151645}'
-    )
+    (model_dir / "generation_config.json").write_text('{"max_new_tokens":5120,"eos_token_id":151645}')
     for name in ("tokenizer.json", "tokenizer_config.json"):
         (model_dir / name).write_text("{}")
     for name in (
@@ -382,12 +387,48 @@ def _write_moss_bundle(model_dir):
 @pytest.mark.parametrize(
     ("context_length", "artifact_name", "prefill", "max_pe", "workflow_suffix"),
     [
-        (2048, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_2k_mpe256k", 512, 262144, "moss_transcribe_diarize.yaml"),
-        (4096, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_4k_mpe256k", 512, 262144, "moss_transcribe_diarize.yaml"),
-        (8192, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_8k_mpe256k", 512, 262144, "moss_transcribe_diarize_16k.yaml"),
-        (16384, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_16k_mpe256k", 512, 262144, "moss_transcribe_diarize_16k.yaml"),
-        (65536, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_64k_mpe256k", 512, 262144, "moss_transcribe_diarize_64k.yaml"),
-        (131072, "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_128k_mpe256k", 512, 262144, "moss_transcribe_diarize_128k.yaml"),
+        (
+            2048,
+            "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_2k_mpe256k",
+            512,
+            262144,
+            "moss_transcribe_diarize.yaml",
+        ),
+        (
+            4096,
+            "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_4k_mpe256k",
+            512,
+            262144,
+            "moss_transcribe_diarize.yaml",
+        ),
+        (
+            8192,
+            "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_8k_mpe256k",
+            512,
+            262144,
+            "moss_transcribe_diarize_16k.yaml",
+        ),
+        (
+            16384,
+            "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_16k_mpe256k",
+            512,
+            262144,
+            "moss_transcribe_diarize_16k.yaml",
+        ),
+        (
+            65536,
+            "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_64k_mpe256k",
+            512,
+            262144,
+            "moss_transcribe_diarize_64k.yaml",
+        ),
+        (
+            131072,
+            "hmquant_xh2_moss_transcribe_diarize_09b_w8a8_512_128k_mpe256k",
+            512,
+            262144,
+            "moss_transcribe_diarize_128k.yaml",
+        ),
     ],
 )
 def test_moss_transcribe_diarize_has_a_stable_artifact_name_contract(
@@ -505,7 +546,9 @@ def test_registry_exposes_executable_worker_dependency_profiles(monkeypatch):
     ]
     assert "misaki[en,zh]==0.9.4" in profile("kokoro-82m-v1.1-zh")["inference"]["pip"]
     assert describe_model("pi0.5-libero", full=True)["required_resources"] == ["tokenizer"]
-    assert {"xhquanttool==0.9.2", "transformers==5.16.1", "lerobot==0.6.0"} <= set(profile("pi0.5-libero")["inference"]["pip"])
+    assert {"xhquanttool==0.9.2", "transformers==5.16.1", "lerobot==0.6.0"} <= set(
+        profile("pi0.5-libero")["inference"]["pip"]
+    )
     assert describe_model("qwen3.5-4b", full=True)["worker_capabilities"] == []
     assert describe_model("gemma4-e2b", full=True)["worker_capabilities"] == []
     assert describe_model("ling-3.0-flash", full=True)["worker_capabilities"] == []

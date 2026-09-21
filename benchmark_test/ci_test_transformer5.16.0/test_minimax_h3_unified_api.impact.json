@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minimax-h3-unified-api-contract",
+      "patterns": [
+        "xhmodel_merak/model_integrations/minimax_h3/**",
+        "xhmodel_merak/model_integrations/_shared.py",
+        "xhmodel_merak/model_integrations/_dependencies.py",
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_build/**",
+        "xhmodel_merak/model_artifact/**",
+        "xhmodel_merak/model_inference/**",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/**",
+        "configs_merak/workflows/**/minimax_h3/**",
+        "benchmark_test/ci_test_transformer5.16.0/test_minimax_h3_unified_api.py"
+      ]
+    }
+  ]
+}

@@ -9,11 +9,13 @@ from xhmodel_merak.model_catalog.dependencies import DependencySpec
 AUTOREGRESSIVE_BUILD = "autoregressive.build"
 PI05_BUILD = "pi05.build"
 KOKORO_BUILD = "kokoro.build"
+MINIMAX_H3_BUILD = "minimax_h3.build"
 QWEN_INFERENCE = "qwen.inference"
 GEMMA4_INFERENCE = "gemma4.inference"
 LING_INFERENCE = "ling.inference"
 PI05_INFERENCE = "pi05.inference"
 KOKORO_INFERENCE = "kokoro.inference"
+MINIMAX_H3_INFERENCE = "minimax_h3.inference"
 MOSS_TRANSCRIBE_DIARIZE_BUILD = "moss_transcribe_diarize.build"
 MOSS_TRANSCRIBE_DIARIZE_INFERENCE = "moss_transcribe_diarize.inference"
 
@@ -113,6 +115,8 @@ __all__ = [
     "KOKORO_BUILD",
     "KOKORO_INFERENCE",
     "LING_INFERENCE",
+    "MINIMAX_H3_BUILD",
+    "MINIMAX_H3_INFERENCE",
     "MOSS_TRANSCRIBE_DIARIZE_BUILD",
     "MOSS_TRANSCRIBE_DIARIZE_INFERENCE",
     "PI05_BUILD",

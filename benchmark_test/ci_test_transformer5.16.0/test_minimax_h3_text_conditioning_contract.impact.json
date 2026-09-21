@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minimax-h3-text-conditioning-contract",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/minimax_h3/text_conditioning.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/components_hmonnx.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/__init__.py",
+        "configs_merak/workflows/xh2a/other_models/minimax_h3/**"
+      ]
+    }
+  ]
+}

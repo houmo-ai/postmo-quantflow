@@ -29,6 +29,7 @@ from xhmodel_merak.xh_other_model.models.pi05 import compact_runtime
         ("paddleocr-vl.inference", "xhmodel_merak.model_integrations.paddleocr_vl.inference"),
         ("pi05.inference", "xhmodel_merak.model_integrations.pi05.inference"),
         ("kokoro.inference", "xhmodel_merak.model_integrations.kokoro.inference"),
+        ("minimax_h3.inference", "xhmodel_merak.model_integrations.minimax_h3.inference"),
         (
             "moss_transcribe_diarize.inference",
             "xhmodel_merak.model_integrations.moss_transcribe_diarize.inference",
@@ -162,9 +163,7 @@ def test_paddleocr_vl_adapter_requires_image_and_returns_text(monkeypatch, tmp_p
     assert captured["enable_golden"] is False
 
     with pytest.raises(ModelError) as caught:
-        paddleocr_vl.adapter.run(
-            **_adapter_kwargs(tmp_path, "paddleocr-vl-1.6", {"prompt": "OCR:"})
-        )
+        paddleocr_vl.adapter.run(**_adapter_kwargs(tmp_path, "paddleocr-vl-1.6", {"prompt": "OCR:"}))
     assert caught.value.code == ErrorCode.INVALID_PARAMETER
 
 

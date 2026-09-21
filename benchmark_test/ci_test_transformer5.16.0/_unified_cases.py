@@ -27,6 +27,7 @@ MODELS = {
     "ling-3.0-flash": ("ling", ("full",)),
     "macaron-v1-tall": ("macaron", ("full", "lora")),
     "minicpm5-2.6b": ("minicpm", ("full",)),
+    "minimax-h3-fl2va": ("minimax", ("full",)),
     "moss-transcribe-diarize-0.9b": ("moss", ("full",)),
     "ornith-1.0-35b-a3b": ("qwen_moe", ("full",)),
     "paddleocr-vl-1.6": ("paddleocr", ("full",)),
@@ -44,5 +45,4 @@ MODELS = {
     "wemm-embedding-4b": ("qwen_dense", ("full",)),
     "wemm-embedding-9b": ("qwen_dense", ("full",)),
 }
-CASES = tuple(UnifiedCase(mid, variant, fixture)
-              for mid, (fixture, variants) in MODELS.items() for variant in variants)
+CASES = tuple(UnifiedCase(mid, variant, fixture) for mid, (fixture, variants) in MODELS.items() for variant in variants)

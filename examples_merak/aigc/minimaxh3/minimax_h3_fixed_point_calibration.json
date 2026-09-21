@@ -1,0 +1,1668 @@
+{
+  "format": "minimax_h3_fixed_point_calibration_v3",
+  "points": [
+    "attention_residual",
+    "ffn_residual"
+  ],
+  "config_order": [
+    "lhs",
+    "rhs",
+    "accumulator",
+    "bias",
+    "output_shift"
+  ],
+  "safety_margin": 2,
+  "amax_scale": 4.0,
+  "layers": [
+    {
+      "layer": 0,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 1.546875,
+            "rhs": 74.0,
+            "bias": 100.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 8,
+            "accumulator": 16,
+            "bias": 22,
+            "output_shift": 16
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.25,
+            "rhs": 246.0,
+            "bias": 1160.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 10,
+            "bias": 18,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 1,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 2.515625,
+            "rhs": 85.5,
+            "bias": 96768.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 12,
+            "bias": 12,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.0625,
+            "rhs": 430.0,
+            "bias": 95744.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 9,
+            "bias": 12,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 2,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 3.75,
+            "rhs": 89.0,
+            "bias": 313344.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.3125,
+            "rhs": 21.0,
+            "bias": 313344.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 3,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 3.828125,
+            "rhs": 54.75,
+            "bias": 315392.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.15625,
+            "rhs": 23.0,
+            "bias": 315392.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 4,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 3.859375,
+            "rhs": 63.75,
+            "bias": 317440.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.21875,
+            "rhs": 157.0,
+            "bias": 317440.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 9,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 5,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 4.0625,
+            "rhs": 224.0,
+            "bias": 327680.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.171875,
+            "rhs": 35.0,
+            "bias": 329728.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 6,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 4.71875,
+            "rhs": 79.0,
+            "bias": 331776.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.40625,
+            "rhs": 100.0,
+            "bias": 331776.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 5,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 7,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 3.515625,
+            "rhs": 90.5,
+            "bias": 346112.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.0625,
+            "rhs": 532.0,
+            "bias": 346112.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 8,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 8,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 3.046875,
+            "rhs": 48.0,
+            "bias": 397312.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 2.96875,
+            "rhs": 41.0,
+            "bias": 397312.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 9,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 2.9375,
+            "rhs": 46.25,
+            "bias": 399360.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.078125,
+            "rhs": 21.375,
+            "bias": 399360.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 10,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 2.234375,
+            "rhs": 82.0,
+            "bias": 401408.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 2.84375,
+            "rhs": 56.0,
+            "bias": 401408.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 11,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 2.890625,
+            "rhs": 60.25,
+            "bias": 401408.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 2.78125,
+            "rhs": 468.0,
+            "bias": 401408.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 8,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 12,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 3.796875,
+            "rhs": 96.5,
+            "bias": 468992.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.1875,
+            "rhs": 165.0,
+            "bias": 471040.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 9,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 13,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 2.640625,
+            "rhs": 101.0,
+            "bias": 475136.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 10,
+            "bias": 10,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.0,
+            "rhs": 11712.0,
+            "bias": 475136.0
+          },
+          "fixed_point": {
+            "lhs": 2,
+            "rhs": 2,
+            "accumulator": 4,
+            "bias": 10,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 14,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 2.390625,
+            "rhs": 80.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 2.890625,
+            "rhs": 14.8125,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 15,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 4.3125,
+            "rhs": 57.5,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 2.734375,
+            "rhs": 16.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 16,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 2.71875,
+            "rhs": 39.75,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 8,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.296875,
+            "rhs": 14.8125,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 17,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 3.390625,
+            "rhs": 67.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 8,
+            "rhs": 7,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.234375,
+            "rhs": 81.5,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 18,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 4.21875,
+            "rhs": 151.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.40625,
+            "rhs": 680.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 19,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 4.375,
+            "rhs": 104.5,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 7,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.9375,
+            "rhs": 41.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 20,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 4.09375,
+            "rhs": 218.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 5.0625,
+            "rhs": 26.5,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 21,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 4.5625,
+            "rhs": 166.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 7,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 5.8125,
+            "rhs": 31.375,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 22,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 5.09375,
+            "rhs": 284.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 6.3125,
+            "rhs": 28.125,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 23,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 5.75,
+            "rhs": 422.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 6.0625,
+            "rhs": 32.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 24,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 6.0,
+            "rhs": 242.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 5.9375,
+            "rhs": 64.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 25,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 6.375,
+            "rhs": 238.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 7.21875,
+            "rhs": 31.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 6,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 26,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 6.9375,
+            "rhs": 324.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 8.25,
+            "rhs": 72.0,
+            "bias": 6193152.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 27,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 7.125,
+            "rhs": 460.0,
+            "bias": 6160384.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 6.03125,
+            "rhs": 292.0,
+            "bias": 6160384.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 28,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 7.375,
+            "rhs": 576.0,
+            "bias": 6127616.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.6875,
+            "rhs": 80.0,
+            "bias": 6127616.0
+          },
+          "fixed_point": {
+            "lhs": 6,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 29,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 7.375,
+            "rhs": 720.0,
+            "bias": 6094848.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.5625,
+            "rhs": 119.0,
+            "bias": 6094848.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 30,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 7.21875,
+            "rhs": 720.0,
+            "bias": 6094848.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 7.53125,
+            "rhs": 800.0,
+            "bias": 6094848.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 3,
+            "accumulator": 5,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 31,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 7.125,
+            "rhs": 792.0,
+            "bias": 6062080.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 5.125,
+            "rhs": 177.0,
+            "bias": 6062080.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 32,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 7.71875,
+            "rhs": 1016.0,
+            "bias": 6029312.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 5.0625,
+            "rhs": 197.0,
+            "bias": 6029312.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 5,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 33,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 8.5,
+            "rhs": 1032.0,
+            "bias": 5996544.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.53125,
+            "rhs": 354.0,
+            "bias": 5996544.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 34,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 9.875,
+            "rhs": 1152.0,
+            "bias": 5963776.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.859375,
+            "rhs": 376.0,
+            "bias": 5963776.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 35,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 10.0,
+            "rhs": 1496.0,
+            "bias": 5931008.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.0625,
+            "rhs": 496.0,
+            "bias": 5931008.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 36,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 10.3125,
+            "rhs": 1328.0,
+            "bias": 5865472.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 7.1875,
+            "rhs": 3040.0,
+            "bias": 5865472.0
+          },
+          "fixed_point": {
+            "lhs": 3,
+            "rhs": 2,
+            "accumulator": 4,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 37,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 10.875,
+            "rhs": 1304.0,
+            "bias": 5799936.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.375,
+            "rhs": 386.0,
+            "bias": 5799936.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 38,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 12.6875,
+            "rhs": 1096.0,
+            "bias": 5767168.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.875,
+            "rhs": 304.0,
+            "bias": 5767168.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 39,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 13.3125,
+            "rhs": 1136.0,
+            "bias": 5734400.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.90625,
+            "rhs": 12352.0,
+            "bias": 5734400.0
+          },
+          "fixed_point": {
+            "lhs": 2,
+            "rhs": 2,
+            "accumulator": 4,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 40,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 15.0,
+            "rhs": 1392.0,
+            "bias": 6520832.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.59375,
+            "rhs": 492.0,
+            "bias": 6520832.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 41,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 14.375,
+            "rhs": 1520.0,
+            "bias": 6488064.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.90625,
+            "rhs": 480.0,
+            "bias": 6488064.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 42,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 15.5625,
+            "rhs": 1768.0,
+            "bias": 6455296.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.640625,
+            "rhs": 608.0,
+            "bias": 6488064.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 43,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 12.75,
+            "rhs": 1552.0,
+            "bias": 6455296.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 6.75,
+            "rhs": 4016.0,
+            "bias": 6455296.0
+          },
+          "fixed_point": {
+            "lhs": 3,
+            "rhs": 2,
+            "accumulator": 4,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 44,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 13.5,
+            "rhs": 5216.0,
+            "bias": 6455296.0
+          },
+          "fixed_point": {
+            "lhs": 3,
+            "rhs": 3,
+            "accumulator": 5,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.546875,
+            "rhs": 2224.0,
+            "bias": 6455296.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 3,
+            "accumulator": 5,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 45,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 12.4375,
+            "rhs": 1632.0,
+            "bias": 6455296.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 6,
+            "bias": 6,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 2.875,
+            "rhs": 24704.0,
+            "bias": 6455296.0
+          },
+          "fixed_point": {
+            "lhs": 2,
+            "rhs": 1,
+            "accumulator": 3,
+            "bias": 6,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 46,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 14.3125,
+            "rhs": 1344.0,
+            "bias": 8454144.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 5,
+            "bias": 5,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 4.21875,
+            "rhs": 284.0,
+            "bias": 8454144.0
+          },
+          "fixed_point": {
+            "lhs": 5,
+            "rhs": 4,
+            "accumulator": 5,
+            "bias": 5,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 47,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 14.1875,
+            "rhs": 1288.0,
+            "bias": 8454144.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 5,
+            "bias": 5,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.234375,
+            "rhs": 1512.0,
+            "bias": 8454144.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 3,
+            "accumulator": 5,
+            "bias": 5,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 48,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 13.5,
+            "rhs": 2352.0,
+            "bias": 8454144.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 4,
+            "accumulator": 5,
+            "bias": 5,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 5.78125,
+            "rhs": 1272.0,
+            "bias": 8388608.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 3,
+            "accumulator": 5,
+            "bias": 5,
+            "output_shift": 15
+          }
+        }
+      }
+    },
+    {
+      "layer": 49,
+      "points": {
+        "attention_residual": {
+          "amax": {
+            "lhs": 16.5,
+            "rhs": 2256.0,
+            "bias": 8454144.0
+          },
+          "fixed_point": {
+            "lhs": 4,
+            "rhs": 3,
+            "accumulator": 5,
+            "bias": 5,
+            "output_shift": 15
+          }
+        },
+        "ffn_residual": {
+          "amax": {
+            "lhs": 3.078125,
+            "rhs": 5344.0,
+            "bias": 8454144.0
+          },
+          "fixed_point": {
+            "lhs": 3,
+            "rhs": 2,
+            "accumulator": 4,
+            "bias": 5,
+            "output_shift": 15
+          }
+        }
+      }
+    }
+  ]
+}

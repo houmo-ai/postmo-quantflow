@@ -27,7 +27,7 @@ def test_all_registered_variants_have_explicit_dependency_profiles():
             assert set(profile["quantization"]) == set(recipe.quant_methods)
             count += 1
         assert "dependencies" not in describe_model(recipe.model_id)
-    assert count == 45
+    assert count == 46
 
 
 def test_dependencies_are_the_only_recipe_version_declaration():
@@ -72,25 +72,30 @@ def test_variant_requirements_merge_without_mutating_recipe():
     assert not recipe.default_variant.dependencies.build
 
 
-@pytest.mark.parametrize("requirements", [
-    ("torch==2.8.0", "torch>=2.9"),
-    ("some-pkg==1", "some_pkg==2"),
-    ("thing @ file:///tmp/thing.whl",),
-    ("thing @ https://user:password@example.com/thing.whl",),
-    ("thing @ git+https://example.com/thing.git@main",),
-])
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        ("torch==2.8.0", "torch>=2.9"),
+        ("some-pkg==1", "some_pkg==2"),
+        ("thing @ file:///tmp/thing.whl",),
+        ("thing @ https://user:password@example.com/thing.whl",),
+        ("thing @ git+https://example.com/thing.git@main",),
+    ],
+)
 def test_invalid_or_conflicting_requirements_fail(requirements):
     with pytest.raises(ValueError):
         merge_requirements(requirements)
 
 
 def test_markers_extras_and_remote_sources_are_preserved():
-    values = merge_requirements((
-        'thing==1; python_version < "3.12"',
-        'thing==2; python_version >= "3.12"',
-        "misaki[en,zh]==0.9.4",
-        "other @ https://example.com/other.whl",
-    ))
+    values = merge_requirements(
+        (
+            'thing==1; python_version < "3.12"',
+            'thing==2; python_version >= "3.12"',
+            "misaki[en,zh]==0.9.4",
+            "other @ https://example.com/other.whl",
+        )
+    )
     assert len(values) == 4
     assert "misaki[en,zh]==0.9.4" in values
 
@@ -123,8 +128,12 @@ def test_registered_dependencies_pin_tested_versions():
         for variant in recipe.variants:
             profile = dependency_profile(recipe, variant)
             assert profile["python"] == "==3.12.13"
-            for phase in (profile["build"], profile["inference"],
-                          profile["checkpoint_build"], *profile["quantization"].values()):
+            for phase in (
+                profile["build"],
+                profile["inference"],
+                profile["checkpoint_build"],
+                *profile["quantization"].values(),
+            ):
                 assert "transformers==5.16.1" in phase["pip"]
                 for requirement in phase["pip"]:
                     parsed = Requirement(requirement)
@@ -135,18 +144,24 @@ def test_registered_dependencies_pin_tested_versions():
 
 def test_variant_quantization_and_checkpoint_dependencies_are_merged():
     recipe = get_recipe("qwen3.5-0.8b")
-    variant = replace(recipe.default_variant, dependencies=DependencySpec(
-        quantization=(("autoround", ("quant-helper==1.0",)),),
-        checkpoint_build=("checkpoint-helper==2.0",),
-    ))
+    variant = replace(
+        recipe.default_variant,
+        dependencies=DependencySpec(
+            quantization=(("autoround", ("quant-helper==1.0",)),),
+            checkpoint_build=("checkpoint-helper==2.0",),
+        ),
+    )
     profile = dependency_profile(recipe, variant)
     assert "quant-helper==1.0" in profile["quantization"]["autoround"]["pip"]
     assert "checkpoint-helper==2.0" in profile["checkpoint_build"]["pip"]
     for phase in ("build", "inference"):
         assert "quant-helper==1.0" not in profile[phase]["pip"]
         assert "checkpoint-helper==2.0" not in profile[phase]["pip"]
-    conflicting = replace(variant, dependencies=DependencySpec(
-        quantization=(("autoround", ("gptqmodel==0.0.1",)),),
-    ))
+    conflicting = replace(
+        variant,
+        dependencies=DependencySpec(
+            quantization=(("autoround", ("gptqmodel==0.0.1",)),),
+        ),
+    )
     with pytest.raises(ValueError, match="Conflicting dependency versions"):
         dependency_profile(recipe, conflicting)
