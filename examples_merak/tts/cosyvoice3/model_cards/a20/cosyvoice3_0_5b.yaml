@@ -189,6 +189,9 @@ internal:
     summary: 自动发现的 CosyVoice3 0.5B A20 Merak workflow 卡片。
     demo:
       kind: metadata_only
+      experiment_commits:
+        xh2modelzoo: 05ed6432ae725adc6c1a29e4df4d2d05582c0cb9
+        xhquanttool: bb81b0bce76abdc887717a0f0cf55e3870ff8c56
     limitations:
     - A20 性能尚未测试；精度已在 CV3-EVAL 中文 zero-shot 500 条数据集上验证; 部分业务 IO 需要人工确认。
     evidence:
