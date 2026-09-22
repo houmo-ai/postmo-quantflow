@@ -305,13 +305,15 @@ def _recipes() -> tuple[ModelRecipe, ...]:
             "qwen3_6_35b_a3b",
             (
                 variant("full", f"{_QWEN35_MOE}/35b_a3b/qwen3_6_35b_a3b_full.yaml"),
-                variant("mtp", f"{_QWEN35_MOE}/35b_a3b/qwen3_6_35b_a3b_full_mtp.yaml", speculative_mode="mtp"),
+                variant("mtp", f"{_QWEN35_MOE}/35b_a3b/qwen3_6_35b_a3b_full_head_w5_mtp.yaml", speculative_mode="mtp"),
                 variant(
                     "dflash",
                     f"{_QWEN35_MOE}/35b_a3b/qwen3_6_35b_a3b_full_dflash.yaml",
                     speculative_mode="dflash",
                 ),
                 variant("lora", f"{_QWEN35_MOE}/35b_a3b/qwen3_6_35b_a3b_lora.yaml", requires_lora=True),
+                variant("lora_mtp", f"{_QWEN35_MOE}/35b_a3b/qwen3_6_35b_a3b_full_head_w5_auto_mixed_mtp.yaml",
+                        speculative_mode="mtp", requires_lora=True),
             ),
             hidden_size=2048,
             num_hidden_layers=40,
@@ -384,6 +386,10 @@ def register(catalog: ModelCatalog) -> None:
         provider=PROVIDER_ID,
     )
     for recipe in _recipes():
+        if recipe.model_id.startswith(("qwen3.5-", "qwen3.6-", "qwen3.8-")):
+            recipe = replace(recipe, recipe_version="3")
+        if recipe.model_id == "qwen3.6-35b-a3b":
+            recipe = replace(recipe, supported_precisions=(*recipe.supported_precisions, ("wmix", "a8")))
         catalog.register_recipe(recipe, provider=PROVIDER_ID)
 
 

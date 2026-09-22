@@ -44,6 +44,7 @@ from xhquant.api import CacheTensor, get_xhquant_logger
 from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import _DMRegistryCls
 
+from ...shared_head import SharedHeadMixin, quantized_head, resolve_shared_head_bits
 from ...builder import register_llm_model
 from ...hmonnx.deterministic_export import canonicalize_hmonnx_artifact
 from ...kv_cache_mixin import KVCacheWithLinearMixin
@@ -102,12 +103,10 @@ def build_qwen35_spec_decode_contract(
     draft_config = config.mtp_config if mode == "mtp" else config.dflash_config
     if draft_config is None:
         raise ValueError(f"Qwen3.5 {mode} export is missing its draft config")
-    draft_head_weight_bits = int(
-        getattr(
-            draft_config,
-            "draft_head_weight_bits",
-            getattr(config, "spec_draft_head_weight_bits", 4),
-        )
+    draft_head_weight_bits = resolve_shared_head_bits(
+        getattr(config, "quant_scheme", None),
+        getattr(config, "spec_draft_head_weight_bits", None),
+        draft_config,
     )
     hidden_output_name = "target_hidden" if mode == "dflash" else "post_norm_hidden"
     contract: dict[str, Any] = {
@@ -118,6 +117,7 @@ def build_qwen35_spec_decode_contract(
         "num_draft_tokens": num_draft_tokens,
         "verify_length": num_draft_tokens + 1,
         "draft_head_weight_bits": draft_head_weight_bits,
+        "shared_head": {"version": 1, "owner": "target", "logical_bits": draft_head_weight_bits},
         "hidden_output_name": hidden_output_name,
         "target": {
             "hidden_output_name": hidden_output_name,
@@ -708,7 +708,7 @@ def _populate_qwen_export_kv_cache_config(
 
 
 @register_llm_model("Qwen3_5ForConditionalGeneration")
-class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
+class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
     HF_MODEL_CLS = XHQwen3_5ForConditionalGeneration
     HF_AUTO_MODEL_CLS = AutoModelForImageTextToText
     META_CLS = Qwen3_5_ModelMeta
@@ -975,7 +975,14 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             spec_seq_len = self.config.num_draft_tokens + 1
             self.set_input_sequence_length(spec_seq_len)
 
-        decode_quanted_model = super()._to_quanted(decode_fronted_model, state)
+        share_head = spec_decode_mode in ("mtp", "dflash") and state != LLMModelState.QUANTED_DISABLE
+        if share_head:
+            self.bind_target_head(quantized_head(prefill_quanted_model))
+        try:
+            decode_quanted_model = super()._to_quanted(decode_fronted_model, state)
+        finally:
+            if share_head:
+                del self._shared_target_head
         if spec_decode_mode in ("mtp", "dflash"):
             self._restore_prefill_wrap_cfg()
         self.set_prefill()
@@ -1730,6 +1737,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
         spec_decode_mode = self.config.spec_decode_mode
         self._configure_spec_decode_target_export()
 
+        shared_head = quantized_head(self._quanted_model.decode) if spec_decode_mode in {"mtp", "dflash"} else None
         self._export_hmonnx(exported_info)
 
         exported_lora_adapters: list[tuple[LoRAAdapterSpec, ExportData]] = []
@@ -1755,6 +1763,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             mtp_prefill_cfg.input_sequence_length = self.config.prefill_chunk_length
             mtp_prefill_cfg.work_dir = str(Path(exported_info.exported_dir) / "mtp_draft_prefill")
             mtp_prefill_model = XHQwen3_5MTPDraftModel(mtp_prefill_cfg)
+            mtp_prefill_model.bind_target_head(shared_head)
             mtp_prefill_model.to_quanted_aligned()
             mtp_prefill_meta = mtp_prefill_model.export_hmonnx(mtp_prefill_cfg.work_dir)
             mtp_prefill_meta.hmonnx = str(
@@ -1766,6 +1775,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             mtp_decode_cfg.input_sequence_length = 1
             mtp_decode_cfg.work_dir = str(Path(exported_info.exported_dir) / "mtp_draft_decode")
             mtp_decode_model = XHQwen3_5MTPDraftModel(mtp_decode_cfg)
+            mtp_decode_model.bind_target_head(shared_head)
             mtp_decode_model.to_quanted_aligned()
             mtp_decode_meta = mtp_decode_model.export_hmonnx(mtp_decode_cfg.work_dir)
             mtp_decode_meta.hmonnx = str(
@@ -1810,6 +1820,7 @@ class XHQwen3_5Model(VisionLLMModel):  # noqa: N801
             dec_cfg.input_sequence_length = dflash_verify_seq_len
             dec_cfg.work_dir = str(Path(exported_info.exported_dir) / "dflash_draft_decode")
             dec_model = XHQwen3_5DFlashDraftModel(dec_cfg)
+            dec_model.bind_target_head(shared_head)
             dec_model.to_quanted_aligned()
             dec_meta = dec_model.export_hmonnx(dec_cfg.work_dir)
             dec_meta.hmonnx = str(Path(dec_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())

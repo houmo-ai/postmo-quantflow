@@ -133,6 +133,29 @@ ModelZoo 只读取该契约、保留整数码、绑定匹配的导出位宽；MT
 RTN SEFP W8。已打包主 head 必须读取其实际载荷，不能对 untied head 回退到
 embedding。producer 的 teacher-forcing 验证与 runtime 接收率分别记录。
 
+## Qwen target-owned head
+
+Qwen3.5 dense/MoE（包括同架构的 Qwen3.6/3.8）和 Qwen3-Next 共用
+`xh_llm/shared_head.py` 的配置及 checkpoint 消费规则。主模型 export 的
+`lm_head` 是唯一位宽来源；低于 W8 时仍须匹配 `quant.head.bits`。
+MTP、DFlash、DFlash2 继承该值；显式旧 draft 位宽或 head 节点覆盖不一致则报错。
+Qwen3-Next 当前仅有 MTP 接入，这条共享规则不意味着新增 DFlash 架构支持。
+
+导出时先完成主模型 head 的量化，draft 在 PTQ 前绑定其固定量化算子，复用完整
+整数码、scale/指数、对称零点语义及权重格式。W8 也不再对 draft head 独立 RTN。
+不同图保留独立算子元数据，共享载荷；非共享专家、attention 的量化规则不由 head 改写。
+低位宽 GPTQ head 读取实际 packed 载荷，只有 tied 浮点模型允许 embedding 回退。
+裁剪词表导致 head 形状不一致时拒绝共享，不隐式替换为另一份 head。
+
+新产物携带 `spec_decode.shared_head` v1（owner=target、logical_bits）。V2 验证入口
+及 vLLM Merak 插件检查主图/draft 的格式和张量一致后绑定同一存储，并在执行前检查
+地址，不能以数值相等替代共享。没有该字段的旧产物保持原加载语义。
+
+标准 W5＋MTP 及混合精度＋W5＋量化 MTP 入口见
+[Qwen MoE README](../../examples_merak/llm/qwen3_5_moe/README.md#共享-head-与-mtp-标准入口)。
+Qwen 与 Gemma4 的权重共享范围不同，见
+[推测解码权重所有权](speculative-weight-ownership.md)。
+
 ## 验证边界
 
 ModelZoo 的新增测试统一位于 [当前 CI](../../benchmark_test/ci_test_transformer5.16.0/README.md)，

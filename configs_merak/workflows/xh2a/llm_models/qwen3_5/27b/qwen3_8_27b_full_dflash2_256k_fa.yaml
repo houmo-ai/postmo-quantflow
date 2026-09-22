@@ -64,7 +64,6 @@ export:
     only_first_block: false
     spec_decode_mode: dflash
     num_draft_tokens: 7
-    spec_draft_head_weight_bits: 4
     dflash_config:
       hf_model: weights/Qwen3.8-27B-DFlash2
       # The assistant checkpoint is BF16-trained; FP16 overflows in its

@@ -18,6 +18,8 @@ def resolve_config(
     model_dir: Path,
     sources: Mapping[str, SourceRef],
     workflow: Mapping[str, Any],
+    quant_checkpoint: str | None = None,
+    precision=None,
 ) -> dict[str, Any]:
     """Reject drift from the visual ABI exported by PaddleOCR-VL."""
     del variant, model_dir, sources

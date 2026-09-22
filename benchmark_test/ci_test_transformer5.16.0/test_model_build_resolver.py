@@ -727,6 +727,7 @@ def test_quant_output_dir_must_be_unused_disjoint_and_applicable(model_dir, tmp_
         )
     assert checkpoint_error.value.code == ErrorCode.UNSUPPORTED_COMBINATION
 
+    (checkpoint / "config.json").write_text((model_dir / "config.json").read_text())
     checkpoint_plan = resolve_build_plan(
         model_id="qwen3.5-9b",
         model_dir=str(model_dir),

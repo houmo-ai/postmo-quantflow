@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen-unified-quantization",
+      "patterns": [
+        "xhmodel_merak/model_integrations/qwen/quantization.py",
+        "xhmodel_merak/model_integrations/qwen/planning.py",
+        "xhmodel_merak/model_integrations/qwen/plugin.py",
+        "xhmodel_merak/model_integrations/autoregressive/build.py",
+        "xhmodel_merak/model_build/resolver.py",
+        "xhmodel_merak/model_build/recipe_config.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/workflow.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/quant_adapter.py",
+        "xhmodel_merak/model_build/manifest.py",
+        "xhmodel_merak/model_build/executor.py",
+        "xhmodel_merak/model_build/checkpoint.py"
+      ]
+    }
+  ]
+}

@@ -15,15 +15,15 @@ DRAFT_BASE_QUANT_TYPE = "w8a8h1_sefp"
 
 
 def build_spec_draft_quant_scheme(
-    head_weight_bits: int = 4,
+    head_weight_bits: int = 8,
     *,
     head_node_name: str = "lm_head",
 ) -> dict:
     """Build the default MTP/DFlash draft quant scheme.
 
     Draft graphs use the regular W8A8 base quantization, but the large logits
-    head is configurable.  Keep the default at W4 for spec-decode draft heads
-    unless callers provide an explicit per-draft ``quant_scheme``.
+    head inherits the target precision in integrated workflows. Standalone
+    draft construction defaults to W8 until a target is bound.
     """
     if head_weight_bits == 8:
         return dict(quant_type=DRAFT_BASE_QUANT_TYPE)
@@ -113,7 +113,7 @@ class XHQwen3_5_MTPConfig(HFModelConfig):  # noqa: N801
         max_pe_length: int = 262144,
         use_cache: bool = True,
         flash_attention: Mapping | None = None,
-        draft_head_weight_bits: int = 4,
+        draft_head_weight_bits: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -126,6 +126,9 @@ class XHQwen3_5_MTPConfig(HFModelConfig):  # noqa: N801
         self.max_pe_length = max_pe_length
         self.use_cache = use_cache
         self.flash_attention = flash_attention
+        self._head_bits_explicit = draft_head_weight_bits is not None
+        self._head_scheme_explicit = getattr(self, "quant_scheme", None) is not None
+        draft_head_weight_bits = 8 if draft_head_weight_bits is None else draft_head_weight_bits
         self.draft_head_weight_bits = draft_head_weight_bits
         self._mtp_quant_scheme_explicit = getattr(self, "quant_scheme", None) is not None
         if getattr(self, "quant_scheme", None) is None:
@@ -154,7 +157,7 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         max_pe_length: int = 262144,
         max_sequence_length: int = 256,
         flash_attention: Mapping | None = None,
-        draft_head_weight_bits: int = 4,
+        draft_head_weight_bits: int | None = None,
         noise_token_id: int | None = None,
         activation_residual_scale: float | None = None,
         **kwargs,
@@ -269,6 +272,9 @@ class XHQwen3_5_DFlashConfig(HFModelConfig):  # noqa: N801
         self.max_pe_length = max_pe_length
         self.max_sequence_length = max_sequence_length
         self.flash_attention = flash_attention
+        self._head_bits_explicit = draft_head_weight_bits is not None
+        self._head_scheme_explicit = getattr(self, "quant_scheme", None) is not None
+        draft_head_weight_bits = 8 if draft_head_weight_bits is None else draft_head_weight_bits
         self.draft_head_weight_bits = draft_head_weight_bits
         self.is_causal = bool(assistant_config.get("is_causal", False))
         self.sliding_window = assistant_config.get("sliding_window")
@@ -381,7 +387,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         mtp_config: dict | XHQwen3_5_MTPConfig | None = None,
         dflash_config: dict | XHQwen3_5_DFlashConfig | None = None,
         num_draft_tokens: int | None = None,
-        spec_draft_head_weight_bits: int = 4,
+        spec_draft_head_weight_bits: int | None = None,
         mtp_head_k: int | None = None,
         reranked_repo_dir: str | None = None,
         force_rerank: bool = False,
@@ -443,6 +449,13 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         if int(num_draft_tokens) <= 0:
             raise ValueError("Qwen3.5 num_draft_tokens must be positive")
         self.num_draft_tokens = int(num_draft_tokens)
+        if spec_decode_mode in {"mtp", "dflash"} or mtp_config is not None or dflash_config is not None:
+            from ...shared_head import inherit_head_config, resolve_shared_head_bits
+
+            spec_draft_head_weight_bits = resolve_shared_head_bits(
+                self.quant_scheme, spec_draft_head_weight_bits, mtp_config, dflash_config)
+            mtp_config = inherit_head_config(mtp_config, spec_draft_head_weight_bits)
+            dflash_config = inherit_head_config(dflash_config, spec_draft_head_weight_bits, "core_lm_head")
         self.spec_draft_head_weight_bits = spec_draft_head_weight_bits
         self.mtp_head_k = mtp_head_k
         self.reranked_repo_dir = reranked_repo_dir
@@ -458,8 +471,6 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             # cache capacity.
             mtp_config["hf_model"] = hf_model
             mtp_config["context_max_length"] = context_max_length
-            if "draft_head_weight_bits" not in mtp_config:
-                mtp_config["draft_head_weight_bits"] = spec_draft_head_weight_bits
             mtp_config["flash_attention"] = flash_attention
             mtp_config = XHQwen3_5_MTPConfig(**mtp_config)
         elif mtp_config is not None:
@@ -481,8 +492,6 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             dflash_config["max_pe_length"] = context_max_length
             dflash_config["batch_size"] = batch_size
             dflash_config["input_sequence_length"] = prefill_chunk_length
-            if "draft_head_weight_bits" not in dflash_config:
-                dflash_config["draft_head_weight_bits"] = spec_draft_head_weight_bits
             # The unified workflow flag applies to the target and the DFlash
             # decoder. A second hidden switch can silently produce mixed graph
             # contracts.

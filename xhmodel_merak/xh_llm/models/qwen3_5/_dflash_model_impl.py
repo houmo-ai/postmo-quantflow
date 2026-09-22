@@ -997,25 +997,8 @@ class DFlashModel(nn.Module):
         if missing:
             raise RuntimeError(f"Missing DFlash keys: {missing}")
 
-        lm_head_loaded = False
-        for sf_path in sorted(Path(target_model_dir).glob("*.safetensors")):
-            with safe_open(str(sf_path), framework="pt") as f:
-                if "lm_head.weight" in f.keys():
-                    model.lm_head.weight.data.copy_(f.get_tensor("lm_head.weight").to(dtype))
-                    lm_head_loaded = True
-                    break
-        if not lm_head_loaded:
-            for sf_path in sorted(Path(target_model_dir).glob("*.safetensors")):
-                with safe_open(str(sf_path), framework="pt") as f:
-                    for key in f.keys():
-                        if "embed_tokens.weight" in key:
-                            model.lm_head.weight.data.copy_(f.get_tensor(key).to(dtype))
-                            lm_head_loaded = True
-                            break
-                if lm_head_loaded:
-                    break
-        if not lm_head_loaded:
-            raise RuntimeError("Could not load lm_head.weight from target model")
+        from ...shared_head import load_checkpoint_head
+        model.lm_head, model._shared_head_bits = load_checkpoint_head(target_model_dir, dtype=dtype)
 
         model.to(dtype)
         return model

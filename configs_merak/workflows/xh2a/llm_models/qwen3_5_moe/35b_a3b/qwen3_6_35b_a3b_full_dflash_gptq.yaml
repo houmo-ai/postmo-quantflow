@@ -74,7 +74,6 @@ export:
     only_first_block: false
     spec_decode_mode: dflash
     num_draft_tokens: 9
-    spec_draft_head_weight_bits: 4
     dflash_config:
       hf_model: weights/Qwen3.6-35B-A3B-DFlash
       # target_layer_ids come from this checkpoint config; do not duplicate them.

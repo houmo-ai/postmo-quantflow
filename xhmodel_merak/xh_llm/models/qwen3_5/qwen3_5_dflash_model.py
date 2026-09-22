@@ -15,6 +15,7 @@ import torch.nn as nn
 from xhquant.api import FrontendType, get_xhquant_logger, to_frontend_graph
 
 from ...base_model import XHSubModel
+from ...shared_head import SharedHeadMixin
 from ...builder import register_llm_model
 from ...kv_cache_mixin import EmptyKVCacheMixin
 from ...types import LLMModelState, ModelMeta
@@ -106,7 +107,7 @@ class _DFlashDataProcessor:
 
 
 @register_llm_model("Qwen3_5_DFlash_Draft", master=False)
-class XHQwen3_5DFlashDraftModel(XHSubModel):  # noqa: N801
+class XHQwen3_5DFlashDraftModel(SharedHeadMixin, XHSubModel):  # noqa: N801
     HF_MODEL_CLS = None
     HF_AUTO_MODEL_CLS = None
     META_CLS = ModelMeta
@@ -180,22 +181,17 @@ class XHQwen3_5DFlashDraftModel(XHSubModel):  # noqa: N801
         return frontend_model
 
     def _validate_draft_head_quant_contract(self, frontend_model) -> None:
-        if self.config.mode != "decode" or self.config.draft_head_weight_bits != 4:
+        if self.config.mode != "decode":
             return
+        from ...shared_head import target_head_bits
+
         head_node_name = "core_lm_head"
         node_names = {node.name for node in frontend_model.graph.nodes}
         if head_node_name not in node_names:
-            raise RuntimeError(
-                f"DFlash W4 draft head node is missing from the decode frontend graph: expected={head_node_name!r}"
-            )
-        quant_cfg = self.get_quant_cfg()
-        head_cfg = quant_cfg.get("nodes_cfg", {}).get(head_node_name, {})
-        weight_cfg = head_cfg.get("w_schema", {})
-        if weight_cfg.get("bits") != 4:
-            raise RuntimeError(
-                "DFlash metadata requests a W4 draft head, but its quant "
-                f"override does not select FX node {head_node_name!r}"
-            )
+            raise RuntimeError(f"DFlash shared head node is missing: {head_node_name}")
+        bits = target_head_bits(self.get_quant_cfg(), head_node_name)
+        if bits != self.config.draft_head_weight_bits:
+            raise ValueError("DFlash head precision conflicts with inherited target precision")
 
     def get_dummy_inputs(self) -> dict:
         bsz = self.config.batch_size

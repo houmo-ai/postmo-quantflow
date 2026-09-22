@@ -518,7 +518,8 @@ class MTPModel(nn.Module):
                     if weight_map is not None and weight_map.get(key) != sf_path.name:
                         continue
                     if key.startswith("mtp."):
-                        if mtp_quantized and key.startswith("mtp.layers.0.mlp.experts."):
+                        if mtp_quantized and (key.startswith("mtp.layers.0.mlp.experts.") or
+                                              (not is_moe and key.endswith((".qweight", ".qzeros", ".scales", ".g_idx")))):
                             continue
                         model_key = key[4:]
                         if model_key.startswith("layers.0."):
@@ -557,9 +558,7 @@ class MTPModel(nn.Module):
                         embed_weight = f.get_tensor(key).to(dtype)
 
         expert_codes = None
-        if mtp_quantized:
-            if not is_moe:
-                raise ValueError("Packed MTP experts require a MoE model")
+        if mtp_quantized and is_moe:
             from .mtp_checkpoint import load_mtp_packed_experts
 
             weights, expert_codes = load_mtp_packed_experts(target_model_dir)
@@ -572,6 +571,12 @@ class MTPModel(nn.Module):
             mtp_sd["layer.mlp.moeblock.expert_up_proj_weight"] = packed_up_proj_weight
             mtp_sd["layer.mlp.moeblock.expert_down_proj_weight"] = packed_down_proj_weight
 
+        dense_modules = {}
+        if mtp_quantized and not is_moe:
+            from .mtp_checkpoint import load_mtp_packed_dense
+            dense_modules, model._mtp_block_bits = load_mtp_packed_dense(target_model_dir)
+            for name, module in dense_modules.items():
+                mtp_sd[name + ".weight"] = module.weight.detach().to(dtype)
         missing, unexpected = model.load_state_dict(mtp_sd, strict=False)
         unexpected = [
             name for name in unexpected if not name.endswith("cos_cached") and not name.endswith("sin_cached")
@@ -603,6 +608,9 @@ class MTPModel(nn.Module):
         else:
             raise RuntimeError("Could not load lm_head.weight from target model")
 
+        for name, module in dense_modules.items():
+            destination = model.get_submodule(name)
+            destination.register_buffer("quant_weight", module.quant_weight)
         if expert_codes is not None:
             for proj, codes in expert_codes.items():
                 model.layer.mlp.moeblock.register_buffer(f"expert_{proj}_quant_weight", codes)

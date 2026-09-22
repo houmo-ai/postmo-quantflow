@@ -4,7 +4,6 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import os
-import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -261,11 +260,9 @@ def _head_recipe_kwargs(quant_cfg: Mapping[str, Any], export_model_cfg: Mapping[
         raise ValueError("quant.scope is not supported; use the existing --export-from-quanted-model option")
     if str(export_model_cfg.get("model_type", "")).endswith("_visual"):
         return {}
-    scheme = export_model_cfg.get("quant_scheme") or {}
-    head_scheme = (scheme.get("nodes") or {}).get("lm_head") or {}
-    quant_type = head_scheme.get("quant_type", scheme.get("quant_type", ""))
-    match = re.match(r"w(\d+)a", str(quant_type).lower())
-    export_bits = int(match.group(1)) if match else None
+    from ...shared_head import target_head_bits
+
+    export_bits = target_head_bits(export_model_cfg.get("quant_scheme"))
     head = _section(quant_cfg, "head")
     if not head:
         if export_bits is not None and export_bits < 8:
@@ -279,7 +276,7 @@ def _head_recipe_kwargs(quant_cfg: Mapping[str, Any], export_model_cfg: Mapping[
     if head.get("algorithm", "inherit") not in {"inherit", "gptq", "autoround"}:
         raise ValueError("quant.head.algorithm must be inherit, gptq or autoround")
     if export_bits != bits:
-        raise ValueError(f"quant.head.bits={bits} conflicts with export lm_head quant_type={quant_type!r}")
+        raise ValueError(f"quant.head.bits={bits} conflicts with export lm_head W{export_bits}")
     if bits >= 8:
         return {}
     if _rotation_value(quant_cfg):
@@ -576,3 +573,16 @@ __all__ = [
     "quantize_with_gptqmodel_api",
     "validate_rotation_mtp_compatibility",
 ]
+
+
+def validate_reused_checkpoint(model_dir, quant_cfg, export_model_cfg):
+    """Unified reuse is read-only: incomplete payloads must never trigger calibration."""
+    head = _head_recipe_kwargs(quant_cfg, export_model_cfg).get("head")
+    if head:
+        from gptqmodel.quantization.lm_head import HeadQuantizationConfig, inspect_checkpoint_head
+        if inspect_checkpoint_head(model_dir, HeadQuantizationConfig(**head)) is None:
+            raise ValueError("quant_checkpoint has no calibrated head; complete quantization before export")
+    if quant_cfg.get("mtp"):
+        from gptqmodel.quantization.qwen35_mtp import MTPQuantizationConfig, inspect_mtp_checkpoint
+        if inspect_mtp_checkpoint(model_dir, MTPQuantizationConfig(**quant_cfg["mtp"])) is None:
+            raise ValueError("quant_checkpoint has no calibrated MTP; complete quantization before export")

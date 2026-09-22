@@ -58,7 +58,7 @@ def variant(
     export_modes: tuple[str, ...] = ("standard",),
 ) -> VariantRecipe:
     required_sources = ("dflash",) if speculative_mode == "dflash" else ()
-    extra_components = (speculative_mode,) if speculative_mode else (("lora",) if requires_lora else ())
+    extra_components = ((speculative_mode,) if speculative_mode else ()) + (("lora",) if requires_lora else ())
     return VariantRecipe(
         name=name,
         workflow_config=config,

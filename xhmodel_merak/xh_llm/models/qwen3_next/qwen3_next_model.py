@@ -379,6 +379,9 @@ class XHQwen3NextModel(XHQwen3_5Model):
         # [B, 1, H] prefill hidden output and left the draft cache uninitialized.
         self._configure_spec_decode_target_export()
 
+        from ...shared_head import quantized_head
+        shared_head = quantized_head(self._quanted_model.decode) if self.config.spec_decode_mode else None
+
         self._export_hmonnx(exported_info)
         meta_info = cast(VLLMModelMeta, exported_info.meta)
 
@@ -397,6 +400,7 @@ class XHQwen3NextModel(XHQwen3_5Model):
                 draft_cfg.model_name = f"{exported_info.model_name}_{stage}"
                 draft_cfg.work_dir = str(Path(exported_info.exported_dir) / stage)
                 draft_model = XHQwen3NextMTPDraftModel(draft_cfg)
+                draft_model.bind_target_head(shared_head)
                 draft_model.to_quanted_aligned()
                 draft_meta = draft_model.export_hmonnx(draft_cfg.work_dir)
                 draft_meta.hmonnx = str(
@@ -409,7 +413,7 @@ class XHQwen3NextModel(XHQwen3_5Model):
                     meta_info.mtp_decode_config = draft_meta
 
             # Qwen3-Next shares the Qwen3.5 proposer ABI. Use the common
-            # manifest builder so verify length, W4 draft-head precision,
+            # manifest builder so verify length, inherited head precision,
             # private-cache binding, and graph aliases cannot drift between
             # the two model families.
             spec_decode_section = build_qwen35_spec_decode_contract(

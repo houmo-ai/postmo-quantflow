@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib
 from collections.abc import Mapping
@@ -37,6 +38,8 @@ def resolve_recipe_config(
     model_dir: Path,
     sources: Mapping[str, SourceRef],
     deployment_precision: Mapping[str, str] | None = None,
+    quant_checkpoint: str | None = None,
+    precision=None,
 ) -> ResolvedRecipeConfig:
     """Hash the exact bytes validated by the family before building a plan.
 
@@ -81,7 +84,8 @@ def resolve_recipe_config(
                 target=recipe.config_resolver,
             )
         replacements = resolver(
-            recipe=recipe, variant=variant, model_dir=model_dir, sources=dict(sources), workflow=workflow
+            recipe=recipe, variant=variant, model_dir=model_dir, sources=dict(sources), workflow=workflow,
+            quant_checkpoint=quant_checkpoint, precision=precision
         )
         if not isinstance(replacements, dict) or any(
             not isinstance(key, str) or not key or any(not part for part in key.split(".")) for key in replacements
@@ -92,8 +96,14 @@ def resolve_recipe_config(
                 model=recipe.model_id,
                 target=recipe.config_resolver,
             )
+    effective = copy.deepcopy(workflow)
+    for dotted, value in replacements.items():
+        cursor = effective
+        for part in dotted.split(".")[:-1]:
+            cursor = cursor.setdefault(part, {})
+        cursor[dotted.split(".")[-1]] = value
     try:
-        defaults = deployment_precision_from_workflow(recipe, workflow)
+        defaults = deployment_precision_from_workflow(recipe, effective)
     except ValueError as exc:
         raise ModelError(
             ErrorCode.ARTIFACT_VALIDATION_FAILED,
@@ -106,7 +116,7 @@ def resolve_recipe_config(
     except ValueError as exc:
         raise invalid_parameter(recipe.model_id, "deployment_precision", deployment_precision, str(exc)) from exc
     try:
-        replacements.update(deployment_precision_replacements(recipe, workflow, resolved))
+        replacements.update(deployment_precision_replacements(recipe, effective, resolved))
     except ValueError as exc:
         raise ModelError(
             ErrorCode.ARTIFACT_VALIDATION_FAILED,

@@ -226,3 +226,32 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
 本目录的生成、PPL、legacy meta 转换脚本继续保留。新产物直接使用
 `golden_meta_info.json`，一般不需要转换 meta；调用方式见
 [统一验证说明](../qwen3_5/readme.md#验证产物)。
+
+
+## 共享 head 与 MTP 标准入口
+
+主模型 `export.model.quant_scheme.nodes.lm_head` 决定主模型及 draft 的 head 位宽，
+并与 `quant.head.bits` 校验一致。MTP/DFlash/DFlash2 不再填写
+`spec_draft_head_weight_bits`；旧字段显式不同会报错。规则适用于 Qwen3.5 dense/MoE
+及同架构的 Qwen3.6/3.8；Qwen3-Next 的 MTP 也使用同一规则。
+既有 W8 标准配置仍继承 W8；使用 W5 时选择下面完整入口。
+
+| Workflow 配置（35b_a3b 目录） | 主体 | 共享 head | MTP 主干 |
+| --- | --- | --- | --- |
+| `qwen3_6_35b_a3b_full_head_w5_mtp.yaml` | 非共享专家 W4，其余 W8 | AutoRound W5 | 非共享专家 AutoRound W4，其余 W8 |
+| `qwen3_6_35b_a3b_full_head_w5_auto_mixed_mtp.yaml` | 非共享专家 W4，attention/shared expert 按 block 搜索 W4/W5/W8 | AutoRound W5 | 非共享专家 AutoRound W4，其余 W8 |
+
+一次 workflow 依次完成 bit 分配（混合入口）、主体校准、在量化主体上校准 Head W5、
+MTP 专家校准（启用 `quant.mtp` 时），再导出主图与 MTP 图。MTP head 直接复用
+主 head 的量化载荷，不单独校准或 RTN。
+
+```bash
+python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
+  --model-dir /path/to/Qwen3.6-35B-A3B \
+  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w5_auto_mixed_mtp.yaml \
+  --quant-output-dir work_dirs/Qwen3.6-35B-A3B_mix_head_w5_mtp_w4 \
+  --export-output-dir work_dirs/Qwen3.6-35B-A3B_mix_head_w5_mtp_w4_export
+```
+
+DFlash/DFlash2 保留各自 assistant 配置和导出 ABI，仅 head 继承目标模型。
+新产物的实际存储共享校验需要配套的 vLLM Merak shared-head 支持。

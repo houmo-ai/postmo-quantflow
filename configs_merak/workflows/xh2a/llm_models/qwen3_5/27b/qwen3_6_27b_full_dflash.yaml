@@ -67,7 +67,6 @@ export:
     # The checkpoint supports up to 15 proposals (block_size=16). Keep the
     # release default at 9; --num-draft-tokens can opt into a wider verify.
     num_draft_tokens: 9
-    spec_draft_head_weight_bits: 4
     dflash_config:
       hf_model: weights/Qwen3.6-27B-DFlash
       # target_layer_ids come from this checkpoint config; do not duplicate them.

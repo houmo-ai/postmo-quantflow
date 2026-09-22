@@ -218,6 +218,10 @@ class Qwen35Workflow(BaseLLMWorkflow):
         export_cfg = workflow_config.export["model"]
         if not _head_recipe_kwargs(quant_cfg, export_cfg) and quant_cfg.get("mtp") is None:
             return quant_result
+        if (quant_result.meta or {}).get("source") == "public_quant_checkpoint":
+            from .quant_adapter import validate_reused_checkpoint
+            validate_reused_checkpoint(self._resolve_export_model_dir(quant_result), quant_cfg, export_cfg)
+            return quant_result
         result = prepare_head_checkpoint_api(
             raw_model_dir=self.model_dir,
             model_dir=self._resolve_export_model_dir(quant_result),
@@ -244,7 +248,12 @@ class Qwen35Workflow(BaseLLMWorkflow):
                 "Qwen3.5 visual_config does not support LoRA; configure language-model adapters "
                 "under export.model.lora only"
             )
-        inspect_lora_adapters(lora_cfg)
+        adapters = inspect_lora_adapters(lora_cfg)
+        if model_cfg.get("spec_decode_mode") in {"mtp", "dflash"}:
+            for adapter in adapters:
+                for pair in adapter.pairs:
+                    if set(pair.module_path.split(".")) & {"lm_head", "embed_tokens", "mtp"}:
+                        raise ValueError("Speculative LoRA must only modify the target backbone; head/embedding/MTP adapters are unsupported")
 
     def dump_golden(
         self,

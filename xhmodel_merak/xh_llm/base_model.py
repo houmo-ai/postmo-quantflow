@@ -300,10 +300,14 @@ class XHBaseModel(DeviceMixin):
                 )
         return quant_cfg
 
+    def _prepare_quantized_graph(self, graph):
+        """Bind externally owned, already-quantized modules before PTQ."""
+        return graph
+
     def _to_quanted(self, frontend_model, state, auto_release_unused_parameters: bool = True, infer_shape: bool = True):
         target_device = self.config.chip_arch
         quant_cfg = self.get_quant_cfg()
-        quanted_model = to_quant_graph(frontend_model, target_device, quant_cfg)
+        quanted_model = self._prepare_quantized_graph(to_quant_graph(frontend_model, target_device, quant_cfg))
         if state in [LLMModelState.QUANTED_FAST, LLMModelState.QUANTED_ALIGNED]:
             with self.get_kvcache_mixin().kv_cache_scope(device="meta"):
                 data_processor = self.get_data_preprocessor()

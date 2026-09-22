@@ -32,6 +32,8 @@ def resolve_config(
     model_dir: Path,
     sources: Mapping[str, SourceRef],
     workflow: Mapping[str, Any],
+    quant_checkpoint: str | None = None,
+    precision=None,
 ) -> dict[str, Any]:
     del variant, sources
     root = model_dir.resolve()

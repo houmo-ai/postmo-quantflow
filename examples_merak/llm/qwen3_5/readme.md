@@ -115,9 +115,12 @@ quant:
 也可以仅调用 GPTQModel 的 `gptqmodel.recipes.qwen35_mtp.quantize_qwen35_mtp`
 先生成新 checkpoint，再按普通 MTP YAML 导出。
 
-MTP 的 `export.model.spec_draft_head_weight_bits` 支持 4、5、8，须与
-checkpoint 中共享主模型 head 的实际位宽一致。W5 沿用本地 8 bit 槽位
-存储，导出 head 的逻辑位宽为 5；复用原校准整数码。
+主模型 export 的 `lm_head` 是唯一 head 位宽来源，并与 `quant.head.bits` 校验。
+MTP/DFlash/DFlash2 自动继承，不需要再填 `spec_draft_head_weight_bits`；旧字段显式
+不一致时会报错。规则适用于整个 Qwen3.5 dense/MoE 系列及 Qwen3-Next MTP。
+W5 沿用本地 8 bit 槽位，导出逻辑位宽为 5；draft 复用主 head 的完整量化载荷，
+包括 W8 路径也不单独 RTN。完整 W5＋MTP 和混合精度＋W5＋量化 MTP 的配置见
+[标准入口](../qwen3_5_moe/README.md#共享-head-与-mtp-标准入口)。
 
 GPU HMONNX 的 full causal MTP 验证按 token 顺序更新和读取 SEFP V cache，
 避免后续草稿改变已有 token 的共享指数；拒绝草稿后的提交也保持相同顺序。

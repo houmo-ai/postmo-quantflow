@@ -23,14 +23,19 @@ def resolve_config(
     model_dir: Path,
     sources: Mapping[str, SourceRef],
     workflow: Mapping[str, Any],
+    quant_checkpoint: str | None = None,
+    precision=None,
 ) -> dict[str, Any]:
     """Bind the assistant checkpoint and reject drift in the Workflow visual ABI."""
     if recipe.vision_gears:
         _validate_visual_workflow(recipe, workflow)
+    from .quantization import resolve_quantization
+    replacements = resolve_quantization(recipe, variant, workflow, quant_checkpoint, precision)
     if variant.speculative_mode != "dflash":
-        return {}
+        return replacements
     source = sources["dflash"]
     return {
+        **replacements,
         "export.model.dflash_config.hf_model": source.path,
         "export.model.dflash_config.noise_token_id": _validate_dflash_source(recipe, source, model_dir),
     }

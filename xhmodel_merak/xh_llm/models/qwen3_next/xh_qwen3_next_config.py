@@ -26,7 +26,7 @@ class XHQwen3NextMTPConfig(HFModelConfig):
         use_cache: bool = True,
         mtp_layer_index: int = 0,
         flash_attention: Mapping | None = None,
-        draft_head_weight_bits: int = 4,
+        draft_head_weight_bits: int | None = None,
         model_type: str = "Qwen3NextMTP",
         **kwargs,
     ):
@@ -41,6 +41,9 @@ class XHQwen3NextMTPConfig(HFModelConfig):
         self.use_cache = use_cache
         self.mtp_layer_index = mtp_layer_index
         self.flash_attention = flash_attention
+        self._head_bits_explicit = draft_head_weight_bits is not None
+        self._head_scheme_explicit = getattr(self, "quant_scheme", None) is not None
+        draft_head_weight_bits = 8 if draft_head_weight_bits is None else draft_head_weight_bits
         self.draft_head_weight_bits = draft_head_weight_bits
         if getattr(self, "quant_scheme", None) is None:
             self.quant_scheme = build_spec_draft_quant_scheme(draft_head_weight_bits)
@@ -77,6 +80,10 @@ class XHQwen3NextModelConfig(XHQwen3_5ModelConfig):
         )
         if hasattr(self, "visual_config"):
             del self.visual_config
+        if spec_decode_mode == "mtp" or mtp_config is not None:
+            from ...shared_head import inherit_head_config, resolve_shared_head_bits
+            self.spec_draft_head_weight_bits = resolve_shared_head_bits(self.quant_scheme, self.spec_draft_head_weight_bits, mtp_config)
+            mtp_config = inherit_head_config(mtp_config, self.spec_draft_head_weight_bits)
         if isinstance(mtp_config, Mapping):
             raw = dict(mtp_config)
             raw.setdefault("model_name", f"{model_name}_mtp")
@@ -85,7 +92,6 @@ class XHQwen3NextModelConfig(XHQwen3_5ModelConfig):
             # user-facing model/context selection.
             raw["hf_model"] = self.hf_model
             raw["context_max_length"] = self.context_max_length
-            raw.setdefault("draft_head_weight_bits", self.spec_draft_head_weight_bits)
             raw["flash_attention"] = self.flash_attention
             mtp_config = XHQwen3NextMTPConfig(**raw)
         elif mtp_config is not None:

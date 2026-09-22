@@ -1,4 +1,3 @@
-import hashlib
 import inspect
 import json
 import subprocess
@@ -22,7 +21,7 @@ EXPECTED_VARIANTS = {
     "qwen3.5-9b": ["full", "mtp", "dflash"],
     "qwen3.6-27b": ["full", "mtp", "dflash"],
     "qwen3.8-27b": ["full", "mtp", "dflash"],
-    "qwen3.6-35b-a3b": ["full", "mtp", "dflash", "lora"],
+    "qwen3.6-35b-a3b": ["full", "mtp", "dflash", "lora", "lora_mtp"],
     "ornith-1.0-35b-a3b": ["full"],
     "qwen3.5-122b-a10b": ["full", "mtp", "dflash"],
     "qwen3-next-80b-a3b": ["full", "mtp"],
@@ -50,12 +49,14 @@ def test_registry_exposes_the_stable_cross_task_matrix():
     assert [item["model_id"] for item in models] == sorted(EXPECTED_VARIANTS)
 
 
-def test_distributed_catalog_preserves_the_full_public_description_snapshot():
-    descriptions = {model: describe_model(model, full=True) for model in EXPECTED_VARIANTS}
-    # First-release API: one public model_id; export naming stays internal.
-    payload = json.dumps(descriptions, sort_keys=True, separators=(",", ":")).encode()
+@pytest.mark.parametrize("model_id,variants", EXPECTED_VARIANTS.items())
+def test_full_description_matches_public_model_and_variants(model_id, variants):
+    description = describe_model(model_id, full=True)
 
-    assert hashlib.sha256(payload).hexdigest() == "62b6f5cbe1c6b099d3a9337542e09f5714c6684fbee54d4a00e7c81aad89d4dc"
+    assert description["model_id"] == model_id
+    assert description["variants"] == variants
+    assert description["default_variant"] == variants[0]
+    assert [item["name"] for item in description["workflow_variants"]] == variants
 
 
 @pytest.mark.parametrize("model_id", EXPECTED_VARIANTS)

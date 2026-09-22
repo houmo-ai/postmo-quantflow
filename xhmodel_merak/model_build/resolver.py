@@ -79,7 +79,17 @@ def resolve_build_plan(
     _validate_resources(recipe, resource_refs)
     resource_refs.update(_resolve_bundled_resources(recipe))
 
+    checkpoint_precision = False
+    if (quant_checkpoint and precision is None
+            and ("wmix", recipe.default_precision.activation) in recipe.supported_precisions
+            and (Path(quant_checkpoint).expanduser() / "config.json").is_file()):
+        from .checkpoint import checkpoint_has_mixed_precision
+        if checkpoint_has_mixed_precision(quant_checkpoint, model=model_id):
+            precision = {"weight": "wmix", "activation": recipe.default_precision.activation}
+            checkpoint_precision = True
     resolved_precision, precision_source = _resolve_precision(recipe, precision, quant_method)
+    if checkpoint_precision:
+        precision_source = "quant_checkpoint"
     resolved_method, method_source = _resolve_quant_method(
         recipe,
         resolved_precision,
@@ -169,8 +179,14 @@ def resolve_build_plan(
         model_dir=source_dir,
         sources=source_refs,
         deployment_precision=deployment_precision,
+        quant_checkpoint=checkpoint_path,
+        precision=resolved_precision,
     )
     config_replacements.update(recipe_config.replacements)
+    # Whole quant sections returned by family policies precede resource bindings.
+    for resource_name, binding in recipe.resource_config_bindings:
+        config_replacements.pop(binding, None)
+        config_replacements[binding] = resource_refs[resource_name].path
     _verify_source_bindings_during_resolution(recipe.model_id, source_dir, source_refs, source_bindings)
     lora_paths = lora_request.paths if lora_request is not None else ()
     lora_sha256 = tuple(_resource_sha256(Path(path)) for path in lora_paths)
@@ -306,14 +322,8 @@ def _select_variant(
     speculative: SpeculativeRequest | None,
     lora: LoRARequest | None,
 ) -> VariantRecipe:
-    if speculative and lora:
-        raise unsupported_combination(
-            recipe.model_id,
-            "Speculative decoding and LoRA do not share a validated public Workflow",
-            speculative=speculative.mode,
-            lora=list(lora.paths),
-        )
-    variant_name = "lora" if lora else (speculative.mode if speculative else recipe.default_variant.name)
+    variant_name = (f"lora_{speculative.mode}" if speculative and lora else
+                    "lora" if lora else speculative.mode if speculative else recipe.default_variant.name)
     variant = recipe.get_variant(variant_name)
     if variant is None:
         allowed_variants = [item.name for item in recipe.variants]
@@ -360,7 +370,7 @@ def _resolve_precision(
             {"weight": weight, "activation": activation},
             f"allowed profiles are {list(recipe.supported_precisions)!r}",
         )
-    components = recipe.default_precision.components if weight != "w16" else {}
+    components = recipe.default_precision.components if weight == recipe.default_precision.weight else {}
     return ResolvedPrecision(weight=weight, activation=activation, components=components), "user_explicit"
 
 

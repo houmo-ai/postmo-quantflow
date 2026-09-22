@@ -11,6 +11,7 @@ import yaml
 
 from xhmodel_merak.model_artifact import EFFECTIVE_WORKFLOW_NAME, MANIFEST_NAME, SCHEMA_VERSION
 from xhmodel_merak.model_artifact.files import file_sha256
+from xhmodel_merak.model_artifact.export_info import publish_export_info
 from xhmodel_merak.model_catalog.registry import get_artifact_format_spec
 
 from . import workspace
@@ -148,3 +149,32 @@ def file_manifest(root: Path) -> list[dict[str, Any]]:
             }
         )
     return files
+
+
+def write_child_manifests(root, plan, effective_workflow, quant_artifact, quant_metadata,
+                          artifact_metadata, fingerprints, embedding_metadata):
+    """Publish complete child model views using the same verified base checkpoint."""
+    import json
+    for child in artifact_metadata.get("children", []):
+        path = (root / child["path"]).resolve()
+        if not path.is_relative_to(root.resolve()) or path == root.resolve():
+            raise ValueError("Child artifact must be confined to the model package")
+        effective = path / EFFECTIVE_WORKFLOW_NAME
+        data = yaml.safe_load(effective_workflow.read_text())
+        meta = json.loads((path / child["metadata"]["metadata_file"]).read_text())
+        child_lora = meta.get("model_config", {}).get("lora")
+        if child_lora:
+            data["export"]["model"]["lora"] = child_lora
+        effective.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
+        # Embeddings were already normalized before artifact validation. Rewriting
+        # them here would invalidate the parent manifest's recorded checksums.
+        prefix = path.relative_to(root.resolve())
+        embedding = []
+        for item in embedding_metadata:
+            if Path(item["pt"]).is_relative_to(prefix):
+                embedding.append({**item, "pt": str(Path(item["pt"]).relative_to(prefix)),
+                                  "bin": str(Path(item["bin"]).relative_to(prefix))})
+        publish_export_info(path, child["metadata"], embedding_metadata=embedding)
+        child_manifest = build_manifest(path, plan, effective, quant_artifact, quant_metadata,
+                                        embedding, child["metadata"], fingerprints)
+        (path / MANIFEST_NAME).write_text(json.dumps(child_manifest, ensure_ascii=False, indent=2) + "\n")

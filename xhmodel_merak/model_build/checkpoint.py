@@ -91,6 +91,17 @@ def detect_checkpoint_method(path_value: str, *, model: str) -> str:
     return _checkpoint_method(providers, model=model, path=path_value)
 
 
+def checkpoint_has_mixed_precision(path_value: str, *, model: str) -> bool:
+    """Read the search declaration from embedded or sidecar quant metadata."""
+    for _, payload in _read_quant_metadata(Path(path_value).expanduser().resolve(), model):
+        config = payload.get("quantization_config", payload)
+        if isinstance(config, Mapping):
+            meta = config.get("meta")
+            if isinstance(meta, Mapping) and meta.get("auto_mixed_precision"):
+                return True
+    return False
+
+
 def _checkpoint_method(providers: set[str], *, model: str, path: str) -> str:
     providers = {_normalize_quant_provider(provider) for provider in providers}
     methods = set()

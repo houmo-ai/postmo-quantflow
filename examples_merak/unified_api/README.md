@@ -147,3 +147,59 @@ tokenizer 指向目录，LoRA 位于 `lora.<checkpoint>` 下。完整规则见
 构建交付时不包含临时子图、逐层导出工作文件、日志、评测报告和摘要缓存。
 推理可能在目录里新增缓存或临时文件，不影响再次加载；已交付的模型文件仍会校验完整性。
 MTP/DFLASH 等图只在选择对应变体时出现，按 `mtp_*` / `dflash_*` 平铺，不再增加一层目录。
+
+## Qwen：固定基座后复用 MTP 和 LoRA
+
+Qwen3.5/3.6/3.8 recipe v3 的新量化默认校准 Head W5。普通版与 MTP/DFlash
+使用同一主模型精度；MTP、DFlash、DFlash2 继承完整 head 载荷。
+旧 draft head 字段与主模型相同则兼容，冲突时报错。Qwen3-Next 保持原有量化
+recipe 默认值，采用相同的 head 继承规则，不提供 LoRA 组合。
+DFlash2 沿用 `speculative={"mode": "dflash"}` 和 `sources.dflash`，由 draft
+checkpoint 的架构声明识别，不增加一个 head 或精度选择参数。
+
+先生成并保留量化基座（不生成 Golden）：
+
+```python
+from xhmodel_merak.model_build import build_model
+
+base = build_model(
+    model_id="qwen3.6-35b-a3b",
+    model_dir="/models/original",
+    speculative={"mode": "mtp", "num_draft_tokens": 4},
+    quant_output_dir="/models/quantized",
+    output_dir="/exports/base_mtp",
+    low_memory=False,
+    device="cuda:0",
+)
+```
+
+MTP 非共享专家高阶校准 W4，其余 W8；Dense MTP 则 decoder block 的 Linear
+高阶校准 W4，融合 FC W8。Head 与主模型共享，算法跟随主干生产端。
+35B-A3B 需要 block 混合精度时，在首次调用增加 `precision={"weight": "wmix"}`；
+搜索配置由 recipe 固定，不向客户暴露 KL、head bit 或 MTP bit。
+
+第二阶段从返回的 **同一个 `base.quant_artifact`** 导出各个 LoRA：
+
+```python
+build_model(
+    model_id="qwen3.6-35b-a3b",
+    model_dir="/models/original",
+    quant_checkpoint=base.quant_artifact,
+    speculative={"mode": "mtp"},
+    lora={"paths": ["/adapters/adapter_a", "/adapters/adapter_b"]},
+    output_dir="/exports/lora_mtp",
+    low_memory=False,
+    device="cuda:0",
+)
+```
+
+LoRA 增量分支 W8A16。LoRA + MTP 要求已有完整量化 checkpoint，不重新搜索，
+也不自动补 head/MTP 校准；载荷缺失或冲突直接报错。adapter 修改 head、embedding
+或 MTP 自身时不支持该组合。量化产物及 LoRA 内容指纹写入 manifest。
+各 adapter 子目录保留独立运行时配置和共享 draft 组件。
+
+从同一 checkpoint 导出普通版时省略 `speculative`；省略 `precision` 时自动读取
+checkpoint 中的混合精度标记。复用旧 checkpoint 保留其已记录的 head 位宽，
+不会因为 recipe 默认值变为 W5 而改写旧权重。默认临时量化目录会被清理；首次
+需要后续复用必须传 `quant_output_dir`。相同主模型权重是关闭/开启 MTP 确定性
+解码一致性的前提，实际 token 一致性与接收率仍需在部署 runtime 上验收。

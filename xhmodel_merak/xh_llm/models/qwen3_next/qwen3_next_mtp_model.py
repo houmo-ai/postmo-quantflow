@@ -7,6 +7,7 @@ import torch
 from xhquant.api import FrontendType, to_frontend_graph
 
 from ...base_model import XHSubModel
+from ...shared_head import SharedHeadMixin
 from ...builder import register_llm_model
 from ...kv_cache_mixin import EmptyKVCacheMixin
 from ...types import LLMModelState, ModelMeta
@@ -22,7 +23,7 @@ class _MTPDataProcessor:
 
 
 @register_llm_model("Qwen3NextMTP", master=False)
-class XHQwen3NextMTPDraftModel(XHSubModel):
+class XHQwen3NextMTPDraftModel(SharedHeadMixin, XHSubModel):
     HF_MODEL_CLS = None
     HF_AUTO_MODEL_CLS = None
     META_CLS = ModelMeta

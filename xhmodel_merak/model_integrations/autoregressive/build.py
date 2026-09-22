@@ -151,7 +151,23 @@ def sanitize_artifact(stage_path: Path, plan: BuildPlan) -> None:
                 json.dumps(_scrub_known_path_fields(payload), ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+    for child in _lora_metadata_paths(stage_path, meta):
+        sanitize_artifact(child.parent, plan)
     _retain_runtime_files(stage_path, meta)
+
+
+def _lora_metadata_paths(root, meta):
+    root = Path(root).resolve()
+    children = []
+    for entry in meta.get("lora_adapters") or []:
+        relative = Path(entry["meta_file"])
+        path = confined_file(root, entry["meta_file"], "lora.meta_file")
+        if relative.is_absolute() or ".." in relative.parts or not path.is_relative_to(root) or path.parent == root:
+            raise ValueError("LoRA metadata must name a confined child model")
+        if not path.is_file():
+            raise ValueError(f"Missing LoRA runtime metadata: {relative}")
+        children.append(path)
+    return children
 
 
 def _retain_runtime_files(stage_path: Path, metadata: Mapping[str, Any]) -> None:
@@ -178,11 +194,12 @@ def _retain_runtime_files(stage_path: Path, metadata: Mapping[str, Any]) -> None
                 keep.update(asset.resolve() for asset in quant_runtime_asset_paths(candidate))
 
     visit(metadata)
-    for adapter in metadata.get("lora_adapters", ()):
-        child = confined_file(root, adapter["meta_file"], "lora.meta_file")
-        child_metadata = json.loads(child.read_text(encoding="utf-8"))
-        child_metadata.pop("lora_adapters", None)
-        visit(child_metadata, base=child.parent)
+    for child in _lora_metadata_paths(root, metadata):
+        # Each LoRA view has its own relative runtime paths. Its sanitizer has
+        # already reduced it to the runtime closure, including shared draft files.
+        keep.update(path.resolve() for path in child.parent.rglob("*") if path.is_file())
+    if metadata.get("active_lora"):
+        keep.add(root / "adapter_config.json")
     graphs = sorted(path for path in keep if path.suffix.lower() in {".onnx", ".hmonnx"})
     keep.update(validate_onnx_external_locations(root, graphs=graphs))
     for path in sorted(root.rglob("*"), key=lambda item: len(item.parts), reverse=True):
@@ -225,8 +242,12 @@ def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
     _validate_speculative_assets(stage_path, meta, plan)
     _validate_local_runtime_assets(stage_path, meta, plan)
     _validate_tokenizer_snapshot(stage_path / str(meta["hf_config"]), plan)
+    children = [{"path": child.parent.relative_to(stage_path).as_posix(),
+                 "metadata": validate_artifact(child.parent, plan)}
+                for child in _lora_metadata_paths(stage_path, meta)]
     golden_artifacts = _collect_golden_artifacts(stage_path, plan)
     return {
+        "children": children,
         "metadata_file": meta_path.name,
         "export_entries": describe_export(stage_path, meta),
         "export_json_roots": {

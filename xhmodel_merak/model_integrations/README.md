@@ -26,6 +26,11 @@ model_integrations/<family>/
 `list_models()`、`describe_model()` 在没有 Torch、SDK、模型权重时也应可用，
 不能靠注册模块下载资源或改环境变量。环境设置必须在执行阶段限定作用域并恢复。
 
+可选 `config_resolver` 是轻量规划 hook，接收 `recipe`、`variant`、`model_dir`、
+`sources`、`workflow`、`quant_checkpoint`、`precision`，返回 Workflow 点路径替换。
+只读来源配置，不加载权重或执行校准。先应用 family 策略，再解析用户的组件精度覆盖；
+已有 checkpoint 的模型身份、实际载荷和格式由执行阶段继续验证。
+
 ### 组件精度与已有权重
 
 `VariantRecipe.export_modes` 登记导出实现，第一项是默认值。只有实际实现分层导出的变体

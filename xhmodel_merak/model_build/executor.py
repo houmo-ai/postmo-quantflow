@@ -87,7 +87,6 @@ def execute_build(plan: BuildPlan) -> BuildResult:
 
         embedding_metadata = embeddings.write_embedding_bins(stage_path, plan)
         artifact_metadata = adapter.validate_artifact(stage_path, plan)
-        publish_export_info(stage_path, artifact_metadata, embedding_metadata=embedding_metadata)
         final_quant_metadata = checkpoint.inspect_quant_artifact(quant_inspection_path, plan)
         if quant_metadata is not None and final_quant_metadata != quant_metadata:
             raise ModelError(
@@ -100,6 +99,9 @@ def execute_build(plan: BuildPlan) -> BuildResult:
         published_quant_artifact = (
             quant_artifact if plan.quant_checkpoint or plan.quant_output_dir is not None else None
         )
+        manifest.write_child_manifests(stage_path, plan, effective_workflow, published_quant_artifact,
+                                       quant_metadata, artifact_metadata, source_fingerprints, embedding_metadata)
+        publish_export_info(stage_path, artifact_metadata, embedding_metadata=embedding_metadata)
         artifact_manifest = manifest.build_manifest(
             stage_path,
             plan,

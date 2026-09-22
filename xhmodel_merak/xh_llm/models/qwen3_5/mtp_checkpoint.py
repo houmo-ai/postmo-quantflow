@@ -37,27 +37,8 @@ def load_mtp_packed_experts(source):
 
 
 def load_mtp_shared_head(source):
-    from gptqmodel.quantization.config import FORMAT, QuantizeConfig
-    from gptqmodel.quantization.qwen35_mtp import CheckpointTensors, load_packed_linear
-
-    from ..._dequant_converter import gptqmodel_torch_qlinear_converter
-
-    reader = CheckpointTensors(source)
-    config = QuantizeConfig.from_quant_config(reader.config["quantization_config"])
-    if config.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2) or config.rotation:
-        raise ValueError("MTP shared head requires unrotated GPTQ/GPTQ V2 weights")
-    if not config.lm_head or config.dynamic_get("lm_head") is False:
-        raise ValueError("Packed MTP shared head conflicts with main head metadata")
-    values = {key: config.dynamic_get("lm_head", key, getattr(config, key))
-              for key in ("bits", "group_size", "sym", "desc_act")}
-    if not values.pop("sym") or values.pop("desc_act"):
-        raise ValueError("MTP shared head requires symmetric quantization without act-order")
-    text = reader.config.get("text_config", reader.config)
-    module = load_packed_linear(reader, "lm_head", **values, in_features=text["hidden_size"],
-                                out_features=text["vocab_size"], qzero_format=1 if config.format == FORMAT.GPTQ else 2)
-    bits = values["bits"]
-    gptqmodel_torch_qlinear_converter(module)
-    return module, bits
+    from ...shared_head import load_packed_head
+    return load_packed_head(source)
 
 
 def configure_packed_mtp_scheme(scheme, model, *, explicit):
@@ -65,6 +46,10 @@ def configure_packed_mtp_scheme(scheme, model, *, explicit):
     from xhquant.api import QuantScheme
 
     requirements = {}
+    if getattr(model, "_mtp_block_bits", None):
+        requirements.update({name: model._mtp_block_bits
+                             for name, module in model.named_modules()
+                             if name.startswith("layer.") and hasattr(module, "quant_weight")})
     if getattr(model, "_mtp_expert_bits", None):
         requirements["layer_mlp_moeblock"] = model._mtp_expert_bits
     if getattr(model, "_mtp_head_bits", None):
@@ -79,7 +64,7 @@ def configure_packed_mtp_scheme(scheme, model, *, explicit):
     # Default draft head used an SSFP RTN schema; calibrated head uses the
     # same integer SEFP scheme as the main model.
     for name, bits in requirements.items():
-        aliases = (name, name.replace("_", ".")) if name != "lm_head" else (name,)
+        aliases = tuple(dict.fromkeys((name, name.replace(".", "_"), name.replace("_", ".")))) if name != "lm_head" else (name,)
         for section in ("nodes", "nodes_cfg"):
             entries = result.setdefault(section, {})
             for alias in aliases:
@@ -95,3 +80,21 @@ def configure_packed_mtp_scheme(scheme, model, *, explicit):
         for alias in aliases:
             result["nodes"][alias] = {"quant_type": f"w{bits}a8h1_sefp"}
     return result
+
+
+def load_mtp_packed_dense(source):
+    from gptqmodel.quantization.qwen35_mtp import CheckpointTensors, MTPQuantizationConfig, inspect_mtp_checkpoint, load_packed_linear, Qwen35MTP
+    from gptqmodel.quantization.qwen35_mtp_dense import dense_linears
+    from ..._dequant_converter import gptqmodel_torch_qlinear_converter
+    reader = CheckpointTensors(source)
+    bits = reader.config["mtp_quantization"]["block_bits"]
+    inspect_mtp_checkpoint(source, MTPQuantizationConfig(block_bits=bits))
+    with torch.device("meta"):
+        template = Qwen35MTP(reader.config)
+    result = {}
+    for name, layer in dense_linears(template).items():
+        module = load_packed_linear(reader, "mtp." + name, bits=bits, group_size=64,
+                                   in_features=layer.in_features, out_features=layer.out_features)
+        gptqmodel_torch_qlinear_converter(module)
+        result[name.replace("layers.0.", "layer.")] = module
+    return result, bits

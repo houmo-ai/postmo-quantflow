@@ -33,14 +33,15 @@ class _QwenAdapter:
         image = normalized.get("image")
         image_path = str(require_local_file(recipe, "image", image)) if image is not None else None
         variant = str(manifest.get("recipe", {}).get("variant", recipe.variants[0].name))
-        if variant in {"mtp", "dflash"} and image_path is not None:
+        spec_mode = recipe.get_variant(variant).speculative_mode
+        if spec_mode in {"mtp", "dflash"} and image_path is not None:
             raise ModelError(
                 ErrorCode.UNSUPPORTED_COMBINATION,
                 "The public speculative runtime accepts text input only",
                 model=recipe.model_id,
                 variant=variant,
             )
-        if variant in {"mtp", "dflash"} and selected_golden:
+        if spec_mode in {"mtp", "dflash"} and selected_golden:
             raise ModelError(
                 ErrorCode.GOLDEN_NOT_SUPPORTED,
                 "Golden is unavailable for speculative draft sessions",
@@ -71,7 +72,7 @@ class _QwenAdapter:
         }
         if selected_golden:
             runtime_kwargs["golden_components"] = selected_golden
-        if variant not in {"mtp", "dflash"}:
+        if spec_mode not in {"mtp", "dflash"}:
             runtime_kwargs["device_map"] = [device]
 
         golden_before = snapshot_golden_dirs(root, selected_golden) if selected_golden else {}

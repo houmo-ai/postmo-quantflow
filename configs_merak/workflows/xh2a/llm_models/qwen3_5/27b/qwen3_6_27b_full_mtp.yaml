@@ -65,7 +65,6 @@ export:
     only_first_block: false
     spec_decode_mode: mtp
     num_draft_tokens: 4
-    spec_draft_head_weight_bits: 4
     output_post_norm_hidden: true
     mtp_config:
       hidden_size: 5120

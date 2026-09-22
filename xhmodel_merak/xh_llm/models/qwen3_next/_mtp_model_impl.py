@@ -582,8 +582,6 @@ class MTPModel(nn.Module):
             mtp_vocab_size_override = None
 
         mtp_sd = {}
-        lm_head_weight = None
-        embed_weight = None
         packed_gate_proj_weight = None
         packed_up_proj_weight = None
         packed_down_proj_weight = None
@@ -639,10 +637,6 @@ class MTPModel(nn.Module):
                         if model_key in rms_norm_weight_keys:
                             tensor = tensor + 1.0
                         mtp_sd[model_key] = tensor
-                    elif key == "lm_head.weight":
-                        lm_head_weight = f.get_tensor(key).to(dtype)
-                    elif "embed_tokens.weight" in key:
-                        embed_weight = f.get_tensor(key).to(dtype)
 
         if is_moe:
             mtp_sd["layer.mlp.moeblock.expert_gate_proj_weight"] = packed_gate_proj_weight
@@ -672,12 +666,9 @@ class MTPModel(nn.Module):
             ).to(dtype)
             model.lm_head.weight.data.copy_(mtp_lm_head_tensor)
             del mtp_lm_head_tensor
-        elif lm_head_weight is not None:
-            model.lm_head.weight.data.copy_(lm_head_weight)
-        elif embed_weight is not None:
-            model.lm_head.weight.data.copy_(embed_weight)
         else:
-            raise RuntimeError("Could not load lm_head.weight from target model")
+            from ...shared_head import load_checkpoint_head
+            model.lm_head, model._shared_head_bits = load_checkpoint_head(target_model_dir, dtype=dtype)
 
         model.to(dtype)
         return model

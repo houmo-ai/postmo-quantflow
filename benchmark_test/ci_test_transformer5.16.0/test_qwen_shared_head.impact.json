@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen-target-owned-head",
+      "patterns": [
+        "xhmodel_merak/xh_llm/shared_head.py",
+        "xhmodel_merak/xh_llm/hmonnx/shared_head.py",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/*/*mtp*.yaml",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/*/*dflash*.yaml",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/*/*mtp*.yaml",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/*/*dflash*.yaml",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_next/*/*mtp*.yaml",
+        "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_mtp_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_dflash_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_next/xh_qwen3_next_config.py",
+        "xhmodel_merak/xh_llm/models/qwen3_next/qwen3_next_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_next/qwen3_next_mtp_model.py",
+        "examples_merak/llm/qwen3_next/qwen3_next_xh_export_hmonnx.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_dflash_model_impl.py"
+      ]
+    }
+  ]
+}

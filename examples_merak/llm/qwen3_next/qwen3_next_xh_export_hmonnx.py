@@ -104,7 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--normalize-force-fp32", action="store_true")
     parser.add_argument("--mtp", action="store_true", help="Export Qwen3NextMTP draft graphs")
     parser.add_argument("--num-draft-tokens", type=int, default=4)
-    parser.add_argument("--mtp-head-weight-bits", type=int, choices=[4, 8], default=4)
+    parser.add_argument("--mtp-head-weight-bits", type=int, choices=[4, 5, 8], default=None,
+                        help="Legacy consistency check; MTP head inherits the target head by default.")
     parser.add_argument("--debug", action="store_true")
     return parser
 
