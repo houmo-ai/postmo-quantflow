@@ -186,7 +186,6 @@ def test_real_gdn_layer_export_assembly_and_inference(tmp_path, mode, steps, sup
         _module_name_to_filename,
         replace_placeholder_node,
     )
-    from xhmodel_merak.xh_llm.hmonnx.deterministic_export import flatten_placeholder_quant_metadata
     from xhquant.api import (
         HMONNXInference,
         PrecisionMode,
@@ -237,7 +236,6 @@ def test_real_gdn_layer_export_assembly_and_inference(tmp_path, mode, steps, sup
     graph.output(tuple(graph.call_function(operator.getitem, (block, index)) for index in range(count)))
     quanted = to_quant_graph(FrontendGraph.convert(GraphModule(root, graph), {}), "XH2a", config)
     ptq_quantize(quanted, [values], PrecisionMode.ALIGNED, ["cpu"], infer_shape=False)
-    flatten_placeholder_quant_metadata(quanted)
     main_file = tmp_path / "main.onnx"
     to_export_hmonnx_from_quanted_graph(quanted, values, str(main_file), save_as_external_data=True)
     main = onnx.load(main_file, load_external_data=False)

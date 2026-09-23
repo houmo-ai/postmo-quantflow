@@ -52,7 +52,8 @@ def build_artifact_name(
         raise RuntimeError(f"Recipe {recipe.model_id!r} has no artifact naming contract")
     variant_token = f"_{variant.name}" if variant.name != "full" else ""
     precision_token = "wmix_amix" if precision.components else f"{precision.weight}{precision.activation}"
-    vision_token = f"_{recipe.vision_profile}" if recipe.vision_profile else ""
+    vision_profile = recipe.vision_profile.replace("-", "_") if recipe.vision_profile else ""
+    vision_token = f"_{vision_profile}" if vision_profile else ""
     return (
         f"hmquant_xh2_{model_name}{variant_token}_{precision_token}_{_length_token(prefill)}_"
         f"{_length_token(context)}_mpe{_length_token(recipe.max_pe_length)}{vision_token}"

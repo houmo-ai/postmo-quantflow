@@ -46,7 +46,6 @@ from xhquant.utils.registry import _DMRegistryCls
 
 from ...shared_head import SharedHeadMixin, quantized_head, resolve_shared_head_bits
 from ...builder import register_llm_model
-from ...hmonnx.deterministic_export import canonicalize_hmonnx_artifact
 from ...kv_cache_mixin import KVCacheWithLinearMixin
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...types import (
@@ -1676,33 +1675,8 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         else:
             self.to_wrap()
             meta_info = self._export_language_hmonnx_impl(exported_info, lora_adapters=lora_adapters)
-        self._finalize_deterministic_language_hmonnx(exported_info, meta_info)
         return meta_info
 
-    @staticmethod
-    def _finalize_deterministic_language_hmonnx(
-        exported_info: ExportData,
-        meta_info: VLLMModelMeta,
-    ) -> None:
-        """Give regular and low-memory exports one production serialization."""
-
-        logger = get_xhquant_logger()
-        exported_dir = Path(exported_info.exported_dir)
-        for path_field, md5_field in (
-            ("prefill_hmonnx", "prefill_hmonnx_md5"),
-            ("decode_hmonnx", "decode_hmonnx_md5"),
-        ):
-            hmonnx_path = Path(getattr(meta_info, path_field))
-            if not hmonnx_path.is_absolute():
-                hmonnx_path = exported_dir / hmonnx_path
-            canonicalize_hmonnx_artifact(hmonnx_path, logger=logger)
-            setattr(meta_info, md5_field, calculate_file_md5(str(hmonnx_path)))
-
-        json.dump(
-            meta_info.to_dict(),
-            open(str(exported_dir / "golden_meta_info.json"), "w"),
-            indent=4,
-        )
 
     def _export_language_hmonnx_impl(
         self,

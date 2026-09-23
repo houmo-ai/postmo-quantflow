@@ -1,4 +1,4 @@
-"""Real SDK tuple metadata and HMONNX assembly, without a checkpoint."""
+"""Real SDK tuple ports and HMONNX assembly; preserve SDK debug metadata."""
 
 import operator
 
@@ -7,10 +7,6 @@ import pytest
 import torch
 
 from xhmodel_merak.xh_llm.big_hf_model_helper import replace_placeholder_node
-from xhmodel_merak.xh_llm.hmonnx.deterministic_export import (
-    _decode_quant_metadata_model,
-    flatten_placeholder_quant_metadata,
-)
 from xhquant.api import (
     PrecisionMode,
     QuantScheme,
@@ -69,38 +65,22 @@ class _Outputs(torch.nn.Module):
 
 @pytest.mark.parametrize("indices,count", [([0], 1), ([2, 0, 3, 1], 4), ([3, 0], 5)])
 @pytest.mark.parametrize("normalized", [False, True], ids=["fx-getitem", "normalized-qgetitem"])
-def test_real_sdk_placeholder_tuple_metadata_and_hmonnx_assembly(tmp_path, indices, count, normalized):
+def test_real_sdk_placeholder_tuple_assembly_preserves_metadata(tmp_path, indices, count, normalized):
     values = [torch.tensor([[0.25, -0.5]])]
     main = _quantize(_main_graph(indices, count, normalized), values)
-    # QuantedInfo really loses literal indices; never infer them from node order.
-    original = main.dump_quant_info_to_onnx_model("QuantedInfo")
-    accesses = [node for node in original.graph.node if list(node.input) == ["block"]]
-    assert len(accesses) == len(indices)
-    assert all(not any(attr.name == "index" for attr in node.attribute) for node in accesses)
-    assert flatten_placeholder_quant_metadata(main) == 1
     sub = _quantize(to_frontend_graph(_Outputs(count), "TorchFX", values), values)
     main_file, sub_file = tmp_path / "main.onnx", tmp_path / "sub.onnx"
     to_export_hmonnx_from_quanted_graph(main, values, str(main_file), save_as_external_data=True)
     to_export_hmonnx_from_quanted_graph(sub, values, str(sub_file), save_as_external_data=True)
     model = onnx.load(main_file, load_external_data=False)
-    _, metadata = _decode_quant_metadata_model(model)
-    placeholder = next(node for node in metadata.graph.node if node.op_type.endswith("QPlaceHolderModule"))
-    assert len(placeholder.output) == count
-    for ordinal, index in enumerate(indices):
-        assert placeholder.output[index] == accesses[ordinal].output[0]
+    sdk_metadata = [(entry.key, entry.value) for entry in model.metadata_props]
     runtime_placeholder = next(node for node in model.graph.node if node.op_type == "PlaceHolder")
     replace_placeholder_node(
         runtime_placeholder, model, sub_file, "main_external_data", tmp_path / "main_external_data"
     )
     onnx.checker.check_model(model)
-    _, metadata = _decode_quant_metadata_model(model)
-    assert not any(node.op_type.endswith("QPlaceHolderModule") for node in metadata.graph.node)
+    assert [(entry.key, entry.value) for entry in model.metadata_props] == sdk_metadata
     assert not any(node.op_type in {"PlaceHolder", "TupleGetItem"} for node in model.graph.node)
-    known = {value.name for value in metadata.graph.input}
-    for node in metadata.graph.node:
-        assert set(node.input) <= known
-        known.update(node.output)
-    assert all(value.name in known for value in metadata.graph.output)
 
     # Execute the assembled artifact, not just its metadata or an FX substitute.
     from xhquant.api import HMONNXInference
@@ -114,11 +94,20 @@ def test_real_sdk_placeholder_tuple_metadata_and_hmonnx_assembly(tmp_path, indic
     torch.testing.assert_close(tuple(actual), tuple(expected[index].half() for index in indices))
 
 
-@pytest.mark.parametrize("indices,count", [([0, 0], 1), ([2], 2), ([-1], 2)])
-def test_metadata_rejects_ambiguous_or_invalid_tuple_access(indices, count):
-    model = to_quant_graph(_main_graph(indices, count), "XH2a", {}).disable_quant()
-    model.create_quant_meta()
-    before = dict(model.graph_meta.quant_meta)
-    with pytest.raises(RuntimeError, match="Invalid placeholder tuple access"):
-        flatten_placeholder_quant_metadata(model)
-    assert model.graph_meta.quant_meta == before
+
+@pytest.mark.parametrize("invalid_index", [0, 99, -1])
+def test_assembly_rejects_invalid_executable_tuple_indices(tmp_path, invalid_index):
+    values = [torch.tensor([[0.25, -0.5]])]
+    main = _quantize(_main_graph([0, 1], 2), values)
+    sub = _quantize(to_frontend_graph(_Outputs(2), "TorchFX", values), values)
+    main_file, sub_file = tmp_path / "main.onnx", tmp_path / "sub.onnx"
+    to_export_hmonnx_from_quanted_graph(main, values, str(main_file), save_as_external_data=True)
+    to_export_hmonnx_from_quanted_graph(sub, values, str(sub_file), save_as_external_data=True)
+    model = onnx.load(main_file, load_external_data=False)
+    accesses = [node for node in model.graph.node if node.op_type == "TupleGetItem"]
+    assert len(accesses) == 2
+    index = next(attr for attr in accesses[1].attribute if attr.name == "index")
+    index.i = invalid_index
+    placeholder = next(node for node in model.graph.node if node.op_type == "PlaceHolder")
+    with pytest.raises(RuntimeError, match="index|indices"):
+        replace_placeholder_node(placeholder, model, sub_file, "main_external_data", tmp_path / "main_external_data")

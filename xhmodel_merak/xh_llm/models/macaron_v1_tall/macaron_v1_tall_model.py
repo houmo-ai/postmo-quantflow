@@ -17,17 +17,5 @@ class XHMacaronV1TallModel(XHQwen3_5MoeModel):
     )
     HMONNXINFERENCE_CLS = XHMacaronV1TallHMONNXModel
 
-    @staticmethod
-    def _finalize_deterministic_language_hmonnx(exported_info, meta_info):
-        """Keep semantic initializer names for the runtime-LoRA pass.
-
-        Qwen's deterministic finalizer intentionally replaces initializer
-        names with positional names.  Macaron injects LoRA by the original
-        module initializer names.  Skip name-rewriting canonicalization until
-        a name-preserving deterministic finalizer is available.
-        """
-
-        return None
-
 
 __all__ = ["XHMacaronV1TallModel"]

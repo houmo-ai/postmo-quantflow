@@ -20,7 +20,7 @@ from xhmodel_merak.model_inference import api as inference_api
 from xhmodel_merak.model_inference import inference_model
 
 
-ARTIFACT_NAME = "hmquant_xh2_qwen3_5_4b_w4a8_256_2k_mpe256k_visualm96-196-384-704-1536"
+ARTIFACT_NAME = "hmquant_xh2_qwen3_5_4b_w4a8_256_2k_mpe256k_visualm96_196_384_704_1536"
 
 
 @pytest.fixture(autouse=True)
@@ -1294,6 +1294,25 @@ def test_inference_model_rejects_legacy_schemas_even_with_old_opt_in(monkeypatch
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ModelError, match="rebuild"):
         inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
+
+
+@pytest.mark.parametrize("legacy_separator", [False, True])
+def test_recipe_contract_requires_underscore_visual_name(artifact, legacy_separator):
+    from xhmodel_merak.model_artifact.validation import validate_recipe_contract
+
+    manifest = _complete_manifest(artifact)
+    recipe = get_recipe(manifest["model_id"])
+    variant = recipe.get_variant(manifest["recipe"]["variant"])
+    profile = recipe.vision_profile
+    assert profile and "-" in profile
+    canonical = profile.replace("-", "_")
+    assert manifest["export"]["artifact_name"].endswith("_" + canonical)
+    if legacy_separator:
+        manifest["export"]["artifact_name"] = manifest["export"]["artifact_name"].replace(canonical, profile)
+        with pytest.raises(ModelError, match="installed model Recipe"):
+            validate_recipe_contract(artifact, manifest, recipe, variant)
+    else:
+        validate_recipe_contract(artifact, manifest, recipe, variant)
 
 
 def test_inference_model_rejects_noncanonical_artifact_name(monkeypatch, artifact):

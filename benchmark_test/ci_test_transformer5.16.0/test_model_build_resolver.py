@@ -90,7 +90,7 @@ def test_default_plan_uses_full_autoround_and_dynamic_vit(model_dir, tmp_path):
     )
     assert isinstance(plan.source_bindings["model"]["device"], int)
     assert isinstance(plan.source_bindings["model"]["inode"], int)
-    assert plan.artifact_name == ("hmquant_xh2_qwen3_5_9b_w4a8_256_2k_mpe256k_visualm96-196-384-704-1536")
+    assert plan.artifact_name == ("hmquant_xh2_qwen3_5_9b_w4a8_256_2k_mpe256k_visualm96_196_384_704_1536")
     assert re.search(r"(?:^|_)20\d{6}(?:_|$)", plan.artifact_name) is None
 
 

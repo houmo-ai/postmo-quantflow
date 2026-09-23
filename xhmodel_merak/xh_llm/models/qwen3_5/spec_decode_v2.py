@@ -22,7 +22,7 @@ def _graph_path(config) -> str:
 class Qwen3_5SpecDecodeV2Model(Qwen3_5SpecDecodeONNXModel):  # noqa: N801
     """Reuse speculative scheduling/ABI with shared, packed HMONNX V2 graphs."""
 
-    def __init__(self, *, prefill, decode, draft, session_device, shared_head_bits=None, **kwargs):
+    def __init__(self, *, prefill, decode, draft, session_device, **kwargs):
         device = torch.device(session_device)
         if device.type == "cuda" and device.index is None:
             device = torch.device("cuda", torch.cuda.current_device())
@@ -57,12 +57,6 @@ class Qwen3_5SpecDecodeV2Model(Qwen3_5SpecDecodeONNXModel):  # noqa: N801
         }
         try:
             super().__init__(prefill=prefill, decode=decode, draft=draft, **kwargs)
-            if shared_head_bits is not None:
-                from ...hmonnx.shared_head import bind_session_heads
-                consumers = [self.prefill_session, self.draft_decode_session]
-                if self.spec_decode_mode == "mtp" and self.draft_prefill_session is not None:
-                    consumers.append(self.draft_prefill_session)
-                bind_session_heads(self.decode_session, consumers, logical_bits=shared_head_bits)
         finally:
             # Sessions now own the tensors; do not retain another graph pool.
             self._v2_graphs.clear()

@@ -34,13 +34,14 @@ def test_family_head_inheritance(family, bits):
     assert target_head_bits(config.mtp_config.quant_scheme) == bits
     from types import SimpleNamespace
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import build_qwen35_spec_decode_contract
-    from xhmodel_merak.xh_llm.hmonnx.shared_head import shared_head_bits
 
     metadata = SimpleNamespace(
         mtp_prefill_config=SimpleNamespace(hmonnx="mtp_prefill.onnx"),
         mtp_decode_config=SimpleNamespace(hmonnx="mtp_decode.onnx"),
     )
-    assert shared_head_bits(build_qwen35_spec_decode_contract(config, metadata)) == bits
+    assert build_qwen35_spec_decode_contract(config, metadata)["shared_head"] == {
+        "version": 1, "owner": "target", "logical_bits": bits
+    }
     for override in (
         {"spec_draft_head_weight_bits": 5 if bits != 5 else 4},
         {"mtp_config": {"draft_head_weight_bits": 5 if bits != 5 else 4}},
@@ -54,8 +55,10 @@ def test_family_head_inheritance(family, bits):
             cls(**{**kwargs, **override})
 
 
+
+
 @pytest.mark.parametrize("bits", [4, 5, 8])
-def test_fixed_head_export_and_runtime_storage(bits, tmp_path):
+def test_fixed_head_export_and_independent_runtime(bits, tmp_path):
     from xhquant.api import (
         PrecisionMode,
         to_frontend_graph,
@@ -65,7 +68,6 @@ def test_fixed_head_export_and_runtime_storage(bits, tmp_path):
     )
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceV2
     from xhquant.xhonnxruntime.llm_hmonnx_loader import MultiHMONNXLoader
-    from xhmodel_merak.xh_llm.hmonnx.shared_head import bind_session_heads, assert_shared_head, session_head
 
     class Head(torch.nn.Module):
         def __init__(self):
@@ -113,19 +115,10 @@ def test_fixed_head_export_and_runtime_storage(bits, tmp_path):
             convert_quanted_model_to_hmonnx(graph, inputs, str(path))
         loader = MultiHMONNXLoader({name: str(path)})
         sessions.append(HMONNXInferenceV2.from_onnx_graph(str(path), loader.graphs[name]))
-    bind_session_heads(sessions[0], [sessions[1]], logical_bits=bits)
-    owner, consumer = map(session_head, sessions)
-    assert_shared_head(owner, consumer)
-    assert sessions[0].graph_module.get_submodule(owner.node_name) is owner
-    assert sessions[1].graph_module.get_submodule(consumer.node_name) is consumer
-    value = inputs[0]
-    torch.testing.assert_close(owner(value), consumer(value), rtol=0, atol=0)
-    # Independent runtime placement must not duplicate shared integer storage.
-    if torch.cuda.is_available():
-        owner.to("cuda")
-        consumer.to("cuda")
-        assert_shared_head(owner, consumer)
-    # Exercise the metadata-driven V2 entry, not only the binding helper.
+    # Each exported graph must execute correctly on its own, with no runtime
+    # head discovery, binding or storage-address requirement.
+    torch.testing.assert_close(sessions[0](*inputs), sessions[1](*inputs), rtol=0, atol=0)
+    # Exercise the V2 entry with normal SDK session construction.
     import onnx
     from xhmodel_merak.xh_llm.models.qwen3_5.spec_decode_v2 import Qwen3_5SpecDecodeV2Model
 
@@ -155,17 +148,14 @@ def test_fixed_head_export_and_runtime_storage(bits, tmp_path):
         spec_decode_mode="mtp",
         session_device="cpu",
         auto_offload=False,
-        shared_head_bits=bits,
     )
-    runtime_owner = session_head(runtime.decode_session)
-    for session in (runtime.prefill_session, runtime.draft_prefill_session, runtime.draft_decode_session):
-        assert_shared_head(runtime_owner, session_head(session))
-    consumer.qweight = consumer.qweight.clone()
-    with pytest.raises(RuntimeError, match="storage"):
-        assert_shared_head(owner, consumer)
-    consumer.qweight[0, 0] += 1
-    with pytest.raises(ValueError, match="values differ"):
-        bind_session_heads(sessions[0], [sessions[1]], logical_bits=bits)
+    feed = [inputs[0], torch.tensor([0]), torch.tensor([2]), torch.ones(1, 2).half()]
+    outputs = [session(*feed) for session in (
+        runtime.decode_session, runtime.prefill_session,
+        runtime.draft_prefill_session, runtime.draft_decode_session,
+    )]
+    for output in outputs[1:]:
+        torch.testing.assert_close(output, outputs[0], rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("tied", [True, False])
@@ -286,25 +276,6 @@ def test_head_resolution_matches_export(scheme, expected):
     assert _head_recipe_kwargs({"head": {"bits": expected}}, {"quant_scheme": scheme})["head"]["bits"] == expected
 
 
-def test_shared_head_artifact_contract():
-    from xhmodel_merak.xh_llm.hmonnx.shared_head import shared_head_bits
-
-    assert shared_head_bits({}) is None
-    for bits in (4, 5, 8):
-        assert shared_head_bits({"shared_head": {"version": 1, "owner": "target", "logical_bits": bits}}) == bits
-    for value in (
-        None,
-        {},
-        {"version": 2, "owner": "target", "logical_bits": 5},
-        {"version": 1, "owner": "draft", "logical_bits": 5},
-        {"version": 1, "owner": "target", "logical_bits": 7},
-    ):
-        with pytest.raises(ValueError):
-            shared_head_bits({"shared_head": value})
-    with pytest.raises(ValueError, match="conflict"):
-        shared_head_bits(
-            {"shared_head": {"version": 1, "owner": "target", "logical_bits": 5}, "draft_head_weight_bits": 4}
-        )
 
 
 @pytest.mark.parametrize("family", ["dense", "moe", "next"])
@@ -483,7 +454,6 @@ def test_real_dflash_decode_reuses_w5_head(tmp_path, architecture):
     convert_quanted_model_to_hmonnx(target, head_inputs, str(tmp_path / "target.onnx"))
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceV2, HMONNXInferenceConfig
     from xhquant.xhonnxruntime.llm_hmonnx_loader import MultiHMONNXLoader
-    from xhmodel_merak.xh_llm.hmonnx.shared_head import bind_session_heads, assert_shared_head, session_head
     paths = {name: str(tmp_path / f"{name}.onnx") for name in ("target", "draft")}
     loader = MultiHMONNXLoader(paths)
     sessions = {name: HMONNXInferenceV2.from_onnx_graph(path, loader.graphs[name],
@@ -495,10 +465,6 @@ def test_real_dflash_decode_reuses_w5_head(tmp_path, architecture):
     def runtime_inputs():
         return [CacheTensor(value.clone()) if "cache" in info.name else value.clone()
                 for value, info in zip(runtime_args, runtime.inputs, strict=True)]
-    before = runtime(*runtime_inputs())
-    bind_session_heads(sessions["target"], [runtime], logical_bits=5)
-    assert_shared_head(session_head(sessions["target"]), session_head(runtime))
-    after = runtime(*runtime_inputs())
-    torch.testing.assert_close(after, before, rtol=0, atol=0)
-    for value in after if isinstance(after, (tuple, list)) else [after]:
+    output = runtime(*runtime_inputs())
+    for value in output if isinstance(output, (tuple, list)) else [output]:
         assert torch.isfinite(value).all()

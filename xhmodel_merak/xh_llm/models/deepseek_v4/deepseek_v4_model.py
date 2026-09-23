@@ -20,7 +20,6 @@ from xhquant.api import get_xhquant_logger
 from xhquant.utils.registry import _DMRegistryCls
 
 from ...builder import register_llm_model
-from ...hmonnx.deterministic_export import canonicalize_hmonnx_artifact
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...text_llm_model import TextLLMModel
 from ...types import LLMModelMeta, LLMModelState, ModelSwitcher
@@ -691,7 +690,6 @@ class XHDeepSeekV4Model(TextLLMModel):
             self._quanted_model.decode.fixed()
             self._export_hmonnx(exported_info)
         meta_info = exported_info.meta
-        self._finalize_deterministic_hmonnx(exported_info)
         meta_info.prefill_onnx = meta_info.prefill_hmonnx
         meta_info.decode_onnx = meta_info.decode_hmonnx
         meta_info.token_embedding_file = meta_info.quant_embedding
@@ -721,22 +719,6 @@ class XHDeepSeekV4Model(TextLLMModel):
         config_path.write_text(json.dumps(config, indent=4) + "\n", encoding="utf-8")
         return config_path
 
-    @staticmethod
-    def _finalize_deterministic_hmonnx(exported_info) -> None:
-        """Give regular and streamed exports one byte-stable serialization."""
-
-        logger = get_xhquant_logger()
-        exported_dir = Path(exported_info.exported_dir)
-        meta_info = exported_info.meta
-        for path_field, md5_field in (
-            ("prefill_hmonnx", "prefill_hmonnx_md5"),
-            ("decode_hmonnx", "decode_hmonnx_md5"),
-        ):
-            hmonnx_path = Path(getattr(meta_info, path_field))
-            if not hmonnx_path.is_absolute():
-                hmonnx_path = exported_dir / hmonnx_path
-            canonicalize_hmonnx_artifact(hmonnx_path, logger=logger)
-            setattr(meta_info, md5_field, calculate_file_md5(str(hmonnx_path)))
 
     def _extra_export_metadata(self, output_dir: str, meta_info):
         del output_dir

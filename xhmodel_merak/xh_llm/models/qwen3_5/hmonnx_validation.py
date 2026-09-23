@@ -719,7 +719,6 @@ def _load_merak_spec_runtime(
         meta_info,
         spec_mode=spec_mode,
     )
-    from ...hmonnx.shared_head import shared_head_bits
     spec_decode_contract = meta_info.get("spec_decode") or {}
     draft_contract = spec_decode_contract.get("draft") or {}
     dflash_sliding_window = (
@@ -736,7 +735,6 @@ def _load_merak_spec_runtime(
 
     runtime = Qwen3_5SpecDecodeV2Model(
         session_device=exec_device,
-        shared_head_bits=shared_head_bits(spec_decode_contract),
         prefill={"onnx": str(prefill_onnx)},
         decode={"onnx": str(decode_onnx)},
         draft=draft,

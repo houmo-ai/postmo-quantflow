@@ -46,9 +46,10 @@
 - 低内存导出沿用同一模型语义，只改变权重加载和导出调度。占位模块不持有真实权重；
   与真实模块共用静态输出布局，明确 Q/K/V cache 的顺序、数量及 recurrent state 是否返回。
   prefill、单 token decode、多 token verify 分别验证；不对 FX Proxy 求长度或靠截断掩盖不一致。
-- 主图回填同时处理可执行图和量化元数据。SDK 元数据未记录 tuple 索引时，必须在 FX
-  索引仍可用的阶段解析成显式端口，不能按节点顺序或跨图名称猜接线。改动先跑当前 CI 中
-  的小 GDN 导出/拼装/推理及 tuple 边界用例，再跑真实权重；小用例通过不等于整模型通过。
+- 主图回填使用可执行 HMONNX 的显式 tuple 索引和端口，不按节点顺序猜接线。
+  SDK 输出的调试/量化描述元数据保持原样，其范围仍是原始导出片段；完整拼装图描述
+  属于 SDK 能力，不在 ModelZoo 补写。改动先跑当前 CI 中的小 GDN 导出/拼装/推理及
+  tuple 边界用例，再跑真实权重；小用例通过不等于整模型通过。
 - 组件图精度通过 recipe 的 `deployment_precision_bindings` 声明实际 QuantScheme 路径、
   可选值及共用配置的组件；默认值取所选 variant/context 的 YAML。覆盖只改基础 `quant_type`，
   保留节点/算子例外，不改已打包权重。构建 Manifest 与最终有效配置必须一致，推理时复核。

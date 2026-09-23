@@ -45,7 +45,6 @@ from xhquant.utils.registry import DynamicModule, _DMRegistryCls
 
 from ._dequant_converter import ensure_gptqmodel_unpack_buffers
 from .base_model import XHBaseModel
-from .hmonnx.deterministic_export import merge_placeholder_quant_metadata
 from .wrap_model import wrap_llm_model
 
 
@@ -1365,203 +1364,6 @@ def _merge_opset_imports(main_model: onnx.ModelProto, subgraph_model: onnx.Model
             )
 
 
-_POST_INLINE_CSE_OPS = frozenset(
-    {
-        ("", "Cast"),
-        ("", "Unsqueeze"),
-    }
-)
-
-
-def _inline_initializer_signature(initializer: onnx.TensorProto) -> tuple[Any, ...] | None:
-    """Return an exact value signature for an inline initializer.
-
-    External tensors deliberately return ``None``. Equal shape/location metadata
-    does not imply equal bytes, and loading multi-gigabyte weights would defeat
-    the memory guarantee of this export path.
-    """
-    if initializer.data_location == onnx.TensorProto.EXTERNAL or initializer.external_data:
-        return None
-    segment = (
-        initializer.segment.SerializeToString(deterministic=True)
-        if initializer.HasField("segment")
-        else b""
-    )
-    return (
-        int(initializer.data_type),
-        tuple(initializer.dims),
-        bytes(initializer.raw_data),
-        tuple(initializer.float_data),
-        tuple(initializer.int32_data),
-        tuple(initializer.string_data),
-        tuple(initializer.int64_data),
-        tuple(initializer.double_data),
-        tuple(initializer.uint64_data),
-        segment,
-    )
-
-
-def _nested_graph_tensor_references(graph: onnx.GraphProto) -> set[str]:
-    """Collect names mentioned inside nested graph attributes.
-
-    Nested ONNX graphs can capture values from an outer scope. The post-inline
-    canonicalizer does not rewrite lexical scopes, so any possibly captured
-    name is protected from top-level deduplication.
-    """
-    references: set[str] = set()
-    for node in graph.node:
-        for attribute in node.attribute:
-            nested_graphs = []
-            if attribute.type == onnx.AttributeProto.GRAPH:
-                nested_graphs.append(attribute.g)
-            elif attribute.type == onnx.AttributeProto.GRAPHS:
-                nested_graphs.extend(attribute.graphs)
-            for nested_graph in nested_graphs:
-                references.update(name for nested_node in nested_graph.node for name in nested_node.input if name)
-                references.update(_nested_graph_tensor_references(nested_graph))
-    return references
-
-
-def _quantization_annotation_names(graph: onnx.GraphProto) -> set[str]:
-    names: set[str] = set()
-    for annotation in graph.quantization_annotation:
-        if annotation.tensor_name:
-            names.add(annotation.tensor_name)
-        names.update(name for name in annotation.quant_parameter_tensor_names.values() if name)
-    return names
-
-
-def _resolve_tensor_alias(name: str, aliases: dict[str, str]) -> str:
-    seen = set()
-    while name in aliases:
-        if name in seen:
-            raise RuntimeError(f"Tensor alias cycle detected while canonicalizing HMONNX: {name!r}")
-        seen.add(name)
-        name = aliases[name]
-    return name
-
-
-def _replace_node_inputs(node: onnx.NodeProto, aliases: dict[str, str]) -> None:
-    for index, name in enumerate(node.input):
-        if name:
-            node.input[index] = _resolve_tensor_alias(name, aliases)
-
-
-def _replace_top_level_node_inputs(graph: onnx.GraphProto, aliases: dict[str, str]) -> None:
-    for node in graph.node:
-        _replace_node_inputs(node, aliases)
-
-
-def _drop_aliased_value_info(graph: onnx.GraphProto, aliases: dict[str, str]) -> None:
-    retained = [value for value in graph.value_info if value.name not in aliases]
-    del graph.value_info[:]
-    graph.value_info.extend(retained)
-
-
-def _deduplicate_inline_initializers(graph: onnx.GraphProto) -> int:
-    """Deduplicate byte-identical small constants after all subgraphs are merged."""
-    protected = (
-        {value.name for value in graph.input}
-        | {value.name for value in graph.output}
-        | _nested_graph_tensor_references(graph)
-        | _quantization_annotation_names(graph)
-    )
-    groups: dict[tuple[Any, ...], list[onnx.TensorProto]] = defaultdict(list)
-    for initializer in graph.initializer:
-        signature = _inline_initializer_signature(initializer)
-        if signature is not None:
-            groups[signature].append(initializer)
-
-    aliases: dict[str, str] = {}
-    for initializers in groups.values():
-        if len(initializers) < 2:
-            continue
-        canonical = next((item for item in initializers if item.name in protected), initializers[0])
-        for initializer in initializers:
-            if initializer is canonical or initializer.name in protected:
-                continue
-            aliases[initializer.name] = canonical.name
-
-    if not aliases:
-        return 0
-    _replace_top_level_node_inputs(graph, aliases)
-    retained = [initializer for initializer in graph.initializer if initializer.name not in aliases]
-    del graph.initializer[:]
-    graph.initializer.extend(retained)
-    _drop_aliased_value_info(graph, aliases)
-    return len(aliases)
-
-
-def _node_cse_key(node: onnx.NodeProto) -> tuple[Any, ...]:
-    attributes = tuple(
-        sorted(
-            (attribute.name, attribute.SerializeToString(deterministic=True))
-            for attribute in node.attribute
-        )
-    )
-    return node.domain, node.op_type, tuple(node.input), attributes
-
-
-def _deduplicate_post_inline_pure_nodes(graph: onnx.GraphProto) -> int:
-    """Run conservative CSE for boundary artifacts known to be pure.
-
-    The allowlist is intentionally narrow. Custom HMONNX operators may carry
-    cache/state semantics even when their protobufs look identical and must
-    never be merged by this generic finalizer.
-    """
-    protected_outputs = (
-        {value.name for value in graph.output}
-        | _nested_graph_tensor_references(graph)
-        | _quantization_annotation_names(graph)
-    )
-    aliases: dict[str, str] = {}
-    canonical_outputs: dict[tuple[Any, ...], str] = {}
-    retained = []
-    for node in graph.node:
-        _replace_node_inputs(node, aliases)
-        eligible = (
-            (node.domain, node.op_type) in _POST_INLINE_CSE_OPS
-            and len(node.output) == 1
-            and bool(node.output[0])
-            and node.output[0] not in protected_outputs
-        )
-        if not eligible:
-            retained.append(node)
-            continue
-        key = _node_cse_key(node)
-        canonical_output = canonical_outputs.get(key)
-        if canonical_output is None:
-            canonical_outputs[key] = node.output[0]
-            retained.append(node)
-            continue
-        aliases[node.output[0]] = canonical_output
-
-    if not aliases:
-        return 0
-    del graph.node[:]
-    graph.node.extend(retained)
-    _replace_top_level_node_inputs(graph, aliases)
-    _drop_aliased_value_info(graph, aliases)
-    return len(aliases)
-
-
-def _canonicalize_merged_hmonnx_model(model: onnx.ModelProto) -> dict[str, int]:
-    """Restore whole-graph optimizations lost at placeholder boundaries."""
-    graph = model.graph
-    deduplicated_initializers = _deduplicate_inline_initializers(graph)
-    deduplicated_nodes = _deduplicate_post_inline_pure_nodes(graph)
-    stats = {
-        "deduplicated_inline_initializers": deduplicated_initializers,
-        "deduplicated_pure_nodes": deduplicated_nodes,
-        # The monolithic exporter retains its pre-existing dead inline
-        # constants. Removing only constants introduced by placeholder
-        # subgraphs makes low-memory structure mode-dependent, so canonicalize
-        # by value/CSE only and preserve the same lifecycle as the full graph.
-        "removed_unreferenced_inline_initializers": 0,
-    }
-    return stats
-
-
 def _check_name_conflicts(
     main_graph: onnx.GraphProto,
     placeholder: onnx.NodeProto,
@@ -1651,20 +1453,6 @@ def replace_placeholder_node(
         raise RuntimeError(
             f"TupleGetItem indices for {placeholder.name} must be unique valid subgraph output indices; "
             f"duplicates={sorted(duplicate_indices)}, unexpected={sorted(unexpected_indices)}"
-        )
-
-    module_target = _node_attr(placeholder, "content", "")
-    if isinstance(module_target, bytes):
-        module_target = module_target.decode("utf-8")
-    if module_target:
-        merge_placeholder_quant_metadata(
-            main_model,
-            subgraph_model,
-            module_target,
-            {
-                output_index: tuple_getitem.output[0]
-                for output_index, tuple_getitem in tuple_getitems
-            },
         )
 
     replacements = {value.name: placeholder.input[index] for index, value in enumerate(subgraph.input)}
@@ -1764,11 +1552,6 @@ def replace_placeholders_with_subgraphs(
         remaining = [node.name for node in model.graph.node if node.op_type == "PlaceHolder"]
         if remaining:
             raise RuntimeError(f"Graph still has PlaceHolder nodes: {remaining[:10]}")
-        canonicalization_stats = _canonicalize_merged_hmonnx_model(model)
-        logger.info(
-            "Canonicalized merged HMONNX after placeholder replacement: %s",
-            canonicalization_stats,
-        )
         onnx.save(model, str(model_path))
         onnx.checker.check_model(str(model_path))
     except Exception as exc:

@@ -147,9 +147,11 @@ Qwen3-Next 当前仅有 MTP 接入，这条共享规则不意味着新增 DFlash
 低位宽 GPTQ head 读取实际 packed 载荷，只有 tied 浮点模型允许 embedding 回退。
 裁剪词表导致 head 形状不一致时拒绝共享，不隐式替换为另一份 head。
 
-新产物携带 `spec_decode.shared_head` v1（owner=target、logical_bits）。V2 验证入口
-及 vLLM Merak 插件检查主图/draft 的格式和张量一致后绑定同一存储，并在执行前检查
-地址，不能以数值相等替代共享。没有该字段的旧产物保持原加载语义。
+新产物携带 `spec_decode.shared_head` v1（owner=target、logical_bits），描述导出时
+head 的量化载荷来源。量化模拟器直接通过 SDK 加载和执行各图，不定位或重新绑定
+head，不要求各 session 的 head 具有相同存储地址。通用 initializer 去重由 SDK loader
+负责。`vllm-merak` 同样使用普通图加载流程，不解析这一声明来定位、重绑 head
+或增加存储地址校验；无需额外的共享 head helper。
 
 标准 W5＋MTP 及混合精度＋W5＋量化 MTP 入口见
 [Qwen MoE README](../../examples_merak/llm/qwen3_5_moe/README.md#共享-head-与-mtp-标准入口)。
