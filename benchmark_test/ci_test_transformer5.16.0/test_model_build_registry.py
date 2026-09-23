@@ -15,6 +15,7 @@ from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_
 
 EXPECTED_VARIANTS = {
     "macaron-v1-tall": ["full"],
+    "minicpm5-2.6b": ["full"],
     "qwen3.5-0.8b": ["full"],
     "qwen3.5-2b": ["full"],
     "qwen3.5-4b": ["full"],

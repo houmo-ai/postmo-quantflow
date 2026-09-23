@@ -79,6 +79,47 @@ def test_auto_llm_workflow_loads_declared_workflow_class(monkeypatch, tmp_path):
     assert captured_cfg["hf_model"] is None
 
 
+def test_minicpm5_dense_workflow_resolves_model_specific_adapter(tmp_path):
+    from xhmodel_merak.xh_llm import AutoLLMConfig
+    from xhmodel_merak.xh_llm.models.minicpm5_dense.minicpm5_model import XHMiniCPM5ModelConfig
+    from xhmodel_merak.xh_llm.models.minicpm5_dense.workflow import XHMiniCPM5Workflow
+    from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
+
+    hf_model_dir = tmp_path / "hf"
+    hf_model_dir.mkdir()
+    config_path = tmp_path / "minicpm5.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "quant": {"bits": 8},
+                "export": {
+                    "model": {
+                        "chip_arch": "XH2a",
+                        "model_type": "LlamaForCausalLM",
+                        "hf_model": None,
+                        "model_name": "minicpm5_2_6b",
+                        "context_max_length": 2048,
+                        "prefill_chunk_length": 256,
+                        "quant_scheme": {"quant_type": "w8a8_sefp", "ops": {}},
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    workflow = AutoLLMWorkflow.from_config(str(hf_model_dir), str(config_path))
+
+    assert type(workflow) is XHMiniCPM5Workflow
+    assert workflow.expected_model_cls_name == "XHMiniCPM5Model"
+
+    model_config = WorkflowConfig.from_file(str(config_path)).build_export_dict()["model"]
+    model_config["hf_model"] = str(hf_model_dir)
+    resolved_config = AutoLLMConfig.from_pretrained(model_config)
+    assert type(resolved_config) is XHMiniCPM5ModelConfig
+
+
 def test_base_workflow_formats_xhquant_model_name_from_workflow_config(tmp_path):
     from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
