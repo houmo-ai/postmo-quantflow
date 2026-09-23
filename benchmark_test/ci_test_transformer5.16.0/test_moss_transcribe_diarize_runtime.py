@@ -6,10 +6,14 @@ import torch
 import numpy as np
 import pytest
 
+from _moss_test_initializers import initialized_moss_test_models
 from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.hmonnx_runtime import MossHMONNXRuntime
 from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.hmonnx_runtime import _rewrapping_kvcache_slices
 from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.hmonnx_runtime import _runtime_tool_path
 from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.workflow import _golden_inputs
+
+
+pytestmark = pytest.mark.usefixtures("initialized_moss_test_models")
 
 
 def test_runtime_uses_xh2a_input_names_and_last_hidden_state(tmp_path: Path, monkeypatch):

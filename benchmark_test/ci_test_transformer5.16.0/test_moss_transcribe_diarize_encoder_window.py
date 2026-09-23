@@ -10,6 +10,7 @@ import pytest
 import torch
 import yaml
 
+from _moss_test_initializers import initialized_moss_test_models
 from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.encoder import (
     ENCODER_AUDIO_TOKENS,
     ENCODER_MEL_BINS,
@@ -27,6 +28,9 @@ from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.processing import (
     audio_token_length,
     extract_moss_log_mel,
 )
+
+
+pytestmark = pytest.mark.usefixtures("initialized_moss_test_models")
 
 
 _WORKFLOW = (
