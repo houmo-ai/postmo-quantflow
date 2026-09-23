@@ -360,9 +360,11 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         if isinstance(mtp_config, Mapping):
             mtp_config = dict(mtp_config)
             mtp_config["context_max_length"] = context_max_length
+            mtp_config["num_draft_tokens"] = num_draft_tokens
             mtp_config = BaseConfig(**mtp_config)
         elif mtp_config is not None:
             mtp_config.context_max_length = context_max_length
+            mtp_config.num_draft_tokens = num_draft_tokens
         self.mtp_config = mtp_config
         hf_config = self._load_hf_config(hf_model)
         text_config = hf_config.get("text_config", {})

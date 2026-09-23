@@ -209,7 +209,7 @@ def _retain_runtime_files(stage_path: Path, metadata: Mapping[str, Any]) -> None
             path.rmdir()
 
 
-def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
+def validate_artifact(stage_path: Path, plan: BuildPlan, *, speculative_validator=None) -> dict[str, Any]:
     meta_path = stage_path / "golden_meta_info.json"
     merak_path = stage_path / "merak_config.json"
     missing = [path.name for path in (meta_path, merak_path) if not path.is_file()]
@@ -239,7 +239,7 @@ def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
             vision_gears=plan.vision_gears,
         )
     _validate_runtime_lengths(meta, plan)
-    _validate_speculative_assets(stage_path, meta, plan)
+    (speculative_validator or _validate_speculative_assets)(stage_path, meta, plan)
     _validate_local_runtime_assets(stage_path, meta, plan)
     _validate_tokenizer_snapshot(stage_path / str(meta["hf_config"]), plan)
     children = [{"path": child.parent.relative_to(stage_path).as_posix(),

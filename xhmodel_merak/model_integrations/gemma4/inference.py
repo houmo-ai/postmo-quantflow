@@ -20,6 +20,12 @@ _FRAME_DIRECTORY_FPS = 2.0
 
 
 class _Gemma4Adapter:
+    def validate_artifact(self, *, recipe, root, manifest, meta_file):
+        variant = recipe.get_variant(manifest.get("recipe", {}).get("variant", recipe.default_variant.name))
+        if variant.speculative_mode == "mtp":
+            from .artifact import validate_mtp
+            validate_mtp(root, load_json(meta_file))
+
     def run(
         self,
         *,
@@ -35,7 +41,15 @@ class _Gemma4Adapter:
     ) -> TextInferenceResult:
         normalized = validate_inputs(recipe, inputs)
         media = [name for name in ("image", "video", "audio") if normalized.get(name) is not None]
-        if not media:
+        variant = recipe.get_variant(manifest.get("recipe", {}).get("variant", recipe.default_variant.name))
+        spec_mode = variant.speculative_mode
+        if spec_mode == "mtp":
+            if media or selected_golden:
+                raise ValueError("Gemma4 unified MTP currently accepts text only, without Golden")
+            from xhmodel_merak.xh_llm.models.gemma4_series.mtp_runtime import run_mtp_generation
+            output_text, output_tokens, latency_s, tokens_per_second, stats = run_mtp_generation(
+                meta_file, prompt=normalized["prompt"], max_new_tokens=int(normalized["max_new_tokens"]), device=device)
+        elif not media:
             output_text, output_tokens, latency_s, tokens_per_second, stats = run_text_generation(
                 meta_file,
                 prompt=normalized["prompt"],
@@ -73,6 +87,7 @@ class _Gemma4Adapter:
             output_tokens=output_tokens,
             tokens_per_second=tokens_per_second,
             stats=stats,
+            spec_decode_mode=spec_mode,
         )
 
 

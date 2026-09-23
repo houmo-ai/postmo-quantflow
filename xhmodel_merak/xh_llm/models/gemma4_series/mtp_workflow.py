@@ -259,6 +259,18 @@ def update_manifest_with_draft(
         shared_full_cache_length=shared_full_len,
         target_decode_sliding_output_length=target_decode_sliding,
     )
+    spec_decode.update(
+        runtime_contract_version=2,
+        target={"hidden_output_name": "target_hidden_state"},
+        draft={
+            "abi": "gemma4_mtp_dense_shared_kv_v1",
+            "decode_hmonnx": rel_draft,
+            "standalone_decode_hmonnx": rel_standalone_draft,
+            "cache_mutation": "read_only",
+            "cache_binding": "target_attention_type_owner",
+            "constant_draft_positions": True,
+        },
+    )
     if readonly_page_attention:
         assistant_layer_pattern = list(mtp_config_dict(meta).get("assistant_layer_pattern") or [])
         runtime_page_module_pattern = (

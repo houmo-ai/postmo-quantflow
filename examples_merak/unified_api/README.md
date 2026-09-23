@@ -148,6 +148,50 @@ tokenizer 指向目录，LoRA 位于 `lora.<checkpoint>` 下。完整规则见
 推理可能在目录里新增缓存或临时文件，不影响再次加载；已交付的模型文件仍会校验完整性。
 MTP/DFLASH 等图只在选择对应变体时出现，按 `mtp_*` / `dflash_*` 平铺，不再增加一层目录。
 
+## Gemma4：复用量化基座并增加 MTP
+
+`gemma4-e2b`、`gemma4-e4b`、`gemma4-12b-unified`、`gemma4-31b` 和
+`gemma4-26b-a4b` 使用同一接口。选择 MTP 时必须提供对应尺寸、架构的 assistant：
+
+E2B/E4B/31B/26B-A4B 的 Transformers 范围为 `>=5.5.0,<5.17.0`；
+12B Unified 单独要求 `>=5.13.0,<5.17.0`。普通版与 MTP 版遵循各自 recipe
+的同一版本门禁，构建/推理前检查；版本范围不代表每个补丁版本都跑过完整模型评测。
+
+```python
+from xhmodel_merak.model_build import build_model
+from xhmodel_merak.model_inference import inference_model
+
+result = build_model(
+    model_id="gemma4-12b-unified",
+    model_dir="/path/to/gemma-4-12B-it",
+    quant_checkpoint="/path/to/gemma4_12b_quant",
+    sources={"mtp": "/path/to/gemma-4-12B-it-assistant"},
+    speculative={"mode": "mtp", "num_draft_tokens": 4},
+    context_length=8192,
+    low_memory=False,
+    output_dir="./work_dirs/gemma4_12b_mtp",
+    device="cuda:0",
+)
+answer = inference_model(
+    artifact_dir=result.output_dir,
+    inputs={"prompt": "用一句话介绍你自己", "max_new_tokens": 64},
+    device="cuda:0",
+)
+print(answer.output_text, answer.stats)
+```
+
+`quant_checkpoint` 复用主模型已量化权重，跳过主干搜索与校准。省略时执行 recipe 的
+主模型量化流程。普通版与 MTP 版要对齐，须显式使用同一个 checkpoint。
+assistant 主干沿用 W8、独立 Head 沿用现有 W4 导出配置，执行导出 PTQ；
+这不表示 assistant 经过 AutoRound/GPTQ 校准。E2B/E4B 的 ordered head 还包含
+候选词选择，不能将整个候选表都视为已打包 W4。
+
+Gemma4 assistant 使用主模型的输入 embedding 和只读 KV，但拥有自己的输出 Head，
+不继承 Qwen 的共享 Head 规则，也不改变主模型 Head 精度。导出包包含 target
+prefill/verify、assistant decode 和独立执行所需资源；没有 assistant prefill。
+推理不再需要原 assistant 路径。当前 unified MTP 验证入口为文本、greedy、无 Golden，
+返回草稿数、接收数及接收率；MTP 图包含多模态主干不等于该验证入口已支持多模态输入。
+
 ## Qwen：固定基座后复用 MTP 和 LoRA
 
 Qwen3.5/3.6/3.8 recipe v3 的新量化默认校准 Head W5。普通版与 MTP/DFlash

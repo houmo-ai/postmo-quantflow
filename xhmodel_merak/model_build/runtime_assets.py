@@ -22,10 +22,13 @@ _NON_BEHAVIORAL_CONFIG_FIELDS = {
     "transformers_version",
 }
 _CRITICAL_CHECKPOINT_ONLY_FIELDS = {
+    "global_head_dim",
     "head_dim",
     "layer_types",
     "max_position_embeddings",
+    "num_global_key_value_heads",
     "partial_rotary_factor",
+    "per_layer_config",
     "rope_scaling",
     "rope_theta",
     "rope_type",
@@ -60,6 +63,10 @@ def explicit_rope_config(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _same_explicit_derived_field(expected: Mapping, actual: Mapping, key: str, value: Any) -> bool:
+    if key in {"global_head_dim", "num_global_key_value_heads", "per_layer_config"}:
+        left = _explicit_attention_layer_overrides(expected)
+        right = _explicit_attention_layer_overrides(actual)
+        return left is not None and right is not None and left == right
     if key == "use_cache" and isinstance(value, bool):
         # A duplicate at the composite root is harmless only when both text
         # configs explicitly declare the same value. Text-level changes fail.
@@ -80,6 +87,39 @@ def _same_explicit_derived_field(expected: Mapping, actual: Mapping, key: str, v
                 return False
         return True
     return _same_explicit_rope_factor(expected, actual, key, value)
+
+
+def _explicit_attention_layer_overrides(config: Mapping) -> dict | None:
+    """Compare explicit legacy full-attention geometry with HF sparse overrides.
+
+    No default dimensions or layer patterns are inferred. Extra overrides,
+    missing full-attention layers and conflicting legacy/new declarations fail.
+    """
+    layers = config.get("layer_types")
+    count = config.get("num_hidden_layers")
+    if type(count) is not int or not isinstance(layers, list) or len(layers) != count:
+        return None
+    names = {"global_head_dim": "head_dim", "num_global_key_value_heads": "num_key_value_heads"}
+    geometry = {new: config[old] for old, new in names.items() if config.get(old) is not None}
+    if any(type(value) is not int or value <= 0 for value in geometry.values()):
+        return None
+    legacy = {str(i): dict(geometry) for i, kind in enumerate(layers) if kind == "full_attention"}
+    declared = config.get("per_layer_config")
+    if declared is None:
+        return legacy if geometry and legacy else None
+    if not isinstance(declared, Mapping):
+        return None
+    normalized = {}
+    for key, override in declared.items():
+        if not isinstance(key, str) or not key.isdecimal() or not isinstance(override, Mapping):
+            return None
+        index = int(key)
+        if not 0 <= index < count or str(index) in normalized:
+            return None
+        normalized[str(index)] = dict(override)
+    if geometry and normalized != legacy:
+        return None
+    return normalized
 
 
 def _same_explicit_rope_factor(expected: Mapping, actual: Mapping, key: str, value: Any) -> bool:

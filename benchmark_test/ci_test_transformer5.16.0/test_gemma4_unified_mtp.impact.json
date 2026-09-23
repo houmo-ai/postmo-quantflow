@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "gemma4-unified-mtp",
+      "patterns": [
+        "xhmodel_merak/model_integrations/gemma4/*.py",
+        "xhmodel_merak/model_integrations/autoregressive/build.py",
+        "xhmodel_merak/model_integrations/autoregressive/export_info.py",
+        "xhmodel_merak/xh_llm/models/gemma4_series/mtp_runtime.py",
+        "xhmodel_merak/xh_llm/models/gemma4_series/gemma4_series_mtp_model.py",
+        "xhmodel_merak/xh_llm/models/gemma4_series/mtp_workflow.py",
+        "xhmodel_merak/xh_llm/models/gemma4_series/mtp_contract.py",
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/*/*mtp*.yaml",
+        "examples_merak/llm/gemma4_series/mtp_hmonnx_inference.py",
+        "xhmodel_merak/xh_llm/models/gemma4_series/xh_gemma4_series_config.py"
+      ]
+    }
+  ]
+}

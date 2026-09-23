@@ -186,3 +186,27 @@ def test_recipe_type_aliases_reject_ambiguous_or_non_type_rules(aliases):
 
     with pytest.raises(ValueError, match="config type aliases"):
         replace(get_recipe("qwen3.8-27b"), config_type_aliases=aliases)
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_explicit_full_attention_geometry_survives_hf_per_layer_serialization(reverse):
+    common = {'num_hidden_layers': 4, 'layer_types': ['sliding_attention', 'full_attention'] * 2,
+              'head_dim': 32, 'num_key_value_heads': 2}
+    legacy = {**common, 'global_head_dim': 64, 'num_global_key_value_heads': 1}
+    current = {**common, 'per_layer_config': {'01': {'head_dim': 64, 'num_key_value_heads': 1},
+                                            '03': {'head_dim': 64, 'num_key_value_heads': 1}}}
+    pair = (current, legacy) if reverse else (legacy, current)
+    assert behavior_config_mismatches(*pair) == []
+    for overrides in [
+        {'01': {'head_dim': 32, 'num_key_value_heads': 1}, '03': {'head_dim': 64, 'num_key_value_heads': 1}},
+        {'01': {'head_dim': 64, 'num_key_value_heads': 1}},
+        {**current['per_layer_config'], '00': {'head_dim': 64}},
+        {**current['per_layer_config'], '04': {'head_dim': 64}},
+        {**current['per_layer_config'], '1': {'head_dim': 64}},
+    ]:
+        bad = {**current, 'per_layer_config': overrides}
+        assert behavior_config_mismatches(*((bad, legacy) if reverse else (legacy, bad)))
+    # Do not accept an override when neither source dimensions nor pattern
+    # explain it, or when both declarations disagree within one config.
+    assert behavior_config_mismatches(common, current)
+    assert behavior_config_mismatches(legacy, {**legacy, **current, 'global_head_dim': 128})

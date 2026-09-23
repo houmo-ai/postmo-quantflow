@@ -54,10 +54,17 @@ def describe_export(root: Path, meta: Mapping[str, Any], *, base: Path = Path())
     if isinstance(spec, Mapping):
         mode = spec.get("mode")
         if mode == "mtp":
+            draft = spec.get("draft")
             phases = (
-                ("prefill", spec.get("draft_prefill_onnx") or spec.get("draft_onnx"), "prefill"),
-                ("decode", spec.get("draft_decode_onnx") or spec.get("draft_onnx"), "decode"),
+                (("prefill", draft.get("prefill_hmonnx"), "prefill"),
+                 ("decode", draft.get("decode_hmonnx"), "decode"))
+                if isinstance(draft, Mapping) else
+                (("prefill", spec.get("draft_prefill_onnx") or spec.get("draft_onnx"), "prefill"),
+                 ("decode", spec.get("draft_decode_onnx") or spec.get("draft_onnx"), "decode"))
             )
+            standalone = spec.get("standalone_draft_decode_onnx")
+            if standalone and standalone != dict((phase, value) for phase, value, _ in phases).get("decode"):
+                phases += (("standalone_decode", standalone, "decode"),)
         elif mode == "dflash":
             phases = (
                 ("context", spec.get("draft_context_onnx"), "prefill"),

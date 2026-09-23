@@ -454,17 +454,13 @@ class Gemma4AssistantSelfAttention(nn.Module):
         self.q_proj = hf_attn.q_proj
         self.q_norm = hf_attn.q_norm
         self.o_proj = hf_attn.o_proj
-        global_head_dim = getattr(self.config, "global_head_dim", None) or self.config.head_dim
-        default_head_dim = global_head_dim if layer_type == "full_attention" else self.config.head_dim
-        self.head_dim = int(getattr(hf_attn, "head_dim", default_head_dim))
+        # Native attention has already resolved per-layer overrides. Unified
+        # may use different head widths/KV counts for full and sliding layers;
+        # reading those attributes from its global config is ambiguous.
+        self.head_dim = int(hf_attn.head_dim)
         self.num_attention_heads = int(self.config.num_attention_heads)
-        if layer_type == "full_attention":
-            self.num_key_value_heads = int(
-                getattr(self.config, "num_global_key_value_heads", None) or self.config.num_key_value_heads
-            )
-        else:
-            self.num_key_value_heads = int(self.config.num_key_value_heads)
-        self.num_key_value_groups = self.num_attention_heads // self.num_key_value_heads
+        self.num_key_value_groups = int(hf_attn.num_key_value_groups)
+        self.num_key_value_heads = self.num_attention_heads // self.num_key_value_groups
         self.rope = xhnn.Rope()
         sliding_window = (
                 int(getattr(self.config, "sliding_window", 0) or 0)

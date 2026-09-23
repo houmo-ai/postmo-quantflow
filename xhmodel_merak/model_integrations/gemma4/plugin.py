@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision
+from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision, VariantRecipe
 from xhmodel_merak.model_catalog.registry import ModelCatalog
 from xhmodel_merak.model_integrations._shared import (
-    AUTOREGRESSIVE_BUILD,
     AUTOROUND_REQUIREMENTS,
     GEMMA4_INFERENCE,
     GPTQ_REQUIREMENTS,
@@ -61,7 +60,14 @@ def _recipe(
         export_name=export_name,
         task="multimodal-generation",
         modalities=modalities,
-        variants=(variant("full", config),),
+        variants=(
+            variant("full", config),
+            VariantRecipe(
+                name="mtp", workflow_config=config.removesuffix(".yaml") + "_mtp.yaml",
+                speculative_mode="mtp", required_sources=("mtp",), extra_components=("mtp",),
+            ),
+        ),
+        config_resolver="xhmodel_merak.model_integrations.gemma4.planning:resolve_config",
         default_precision=ResolvedPrecision(weight="w4", activation="a8"),
         supported_precisions=(("w4", "a8"), ("w16", "a8")),
         quant_methods=(method,),
@@ -70,7 +76,7 @@ def _recipe(
         deployment_precision_bindings=autoregressive_precision_bindings(components),
         components=components,
         golden_components=(),
-        build_adapter=AUTOREGRESSIVE_BUILD,
+        build_adapter="gemma4.build",
         inference_adapter=GEMMA4_INFERENCE,
         artifact_format="autoregressive",
         input_schema=text_media_input_schema(tuple(modality for modality in modalities if modality != "text")),
@@ -175,6 +181,12 @@ def register(catalog: ModelCatalog) -> None:
             target="xhmodel_merak.model_integrations.gemma4.inference:adapter",
             artifact_formats=("autoregressive",),
         ),
+        provider=PROVIDER_ID,
+    )
+    catalog.register_adapter(
+        AdapterSpec(name="gemma4.build", kind="build",
+                    target="xhmodel_merak.model_integrations.gemma4.build",
+                    artifact_formats=("autoregressive",), source_config_for_embeddings=True),
         provider=PROVIDER_ID,
     )
     for recipe in _recipes():
