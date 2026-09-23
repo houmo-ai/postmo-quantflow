@@ -9,6 +9,7 @@
         "xhmodel_merak/xh_llm/models/qwen3_5/workflow.py",
         "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full.yaml",
         "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w[45].yaml",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_full_dflash2_*_head_w5.yaml",
         "xhmodel_merak/xh_llm/shared_head.py"
       ]
     }

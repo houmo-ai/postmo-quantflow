@@ -461,6 +461,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         self.reranked_repo_dir = reranked_repo_dir
         self.force_rerank = force_rerank
         self.lora = coerce_lora_config(lora)
+        draft_pe_length = self.max_pe_length if self.max_pe_length is not None else context_max_length
 
         if isinstance(mtp_config, Mapping):
             mtp_config = dict(mtp_config)
@@ -471,11 +472,14 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             # cache capacity.
             mtp_config["hf_model"] = hf_model
             mtp_config["context_max_length"] = context_max_length
+            # RoPE follows the target position table, not the KV-cache length.
+            mtp_config["max_pe_length"] = draft_pe_length
             mtp_config["flash_attention"] = flash_attention
             mtp_config = XHQwen3_5_MTPConfig(**mtp_config)
         elif mtp_config is not None:
             mtp_config.hf_model = hf_model
             mtp_config.context_max_length = context_max_length
+            mtp_config.max_pe_length = draft_pe_length
             mtp_config.flash_attention = flash_attention
         self.mtp_config = mtp_config
 
@@ -486,10 +490,11 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             if "hf_model" not in dflash_config:
                 dflash_config["hf_model"] = hf_model
             # The assistant checkpoint is independent, but its shared target
-            # cache is not: one top-level context value owns both capacities.
+            # cache is not: context_max_length owns the KV cache, while the
+            # RoPE table stays aligned with the target max_pe_length.
             dflash_config["target_model_dir"] = hf_model
             dflash_config["max_sequence_length"] = context_max_length
-            dflash_config["max_pe_length"] = context_max_length
+            dflash_config["max_pe_length"] = draft_pe_length
             dflash_config["batch_size"] = batch_size
             dflash_config["input_sequence_length"] = prefill_chunk_length
             # The unified workflow flag applies to the target and the DFlash
@@ -500,7 +505,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         elif dflash_config is not None:
             dflash_config.target_model_dir = hf_model
             dflash_config.max_sequence_length = context_max_length
-            dflash_config.max_pe_length = context_max_length
+            dflash_config.max_pe_length = draft_pe_length
             dflash_config.batch_size = batch_size
             dflash_config.input_sequence_length = prefill_chunk_length
             dflash_config.flash_attention = flash_attention

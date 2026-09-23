@@ -1,4 +1,5 @@
 """Qwen head recipe and real local W4/W5 packed-consumption contracts."""
+import json
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,47 @@ def test_head_config_agreement(export_bits, quant_bits, accepted):
             _head_recipe_kwargs(quant, export)
     else:
         assert bool(_head_recipe_kwargs(quant, export)) == (export_bits < 8)
+
+
+@pytest.mark.parametrize("context,flash_attention", [(8192, False), (262144, True)])
+def test_qwen38_dflash2_w5_workflow_uses_one_head(tmp_path, context, flash_attention):
+    from xhmodel_merak.xh_llm.models.qwen3_5.quant_adapter import _head_recipe_kwargs
+    from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import XHQwen3_5ModelConfig
+    from xhmodel_merak.xh_llm.shared_head import target_head_bits
+
+    folder = ROOT / "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b"
+    suffix = "8k" if context == 8192 else "256k_fa"
+    workflow = yaml.safe_load((folder / f"qwen3_8_27b_full_dflash2_{suffix}_head_w5.yaml").read_text())
+    export = workflow["export"]["model"]
+    assert export["dflash_config"]["hf_model"] == "weights/Qwen3.8-27B-DFlash2"
+    draft = tmp_path / "dflash2"
+    draft.mkdir()
+    (draft / "config.json").write_text(json.dumps({
+        "architectures": ["DFlash2DraftModel"],
+        "hidden_size": 128,
+        "sliding_window": 128,
+        "dflash_config": {
+            "mask_token_id": 0,
+            "target_layer_ids": [0],
+            "block_size": 8,
+            "conv_kernel_size": 4,
+            "conv_group_size": 32,
+            "selector_rank": 16,
+            "selector_top_k": 32,
+        },
+    }), encoding="utf-8")
+    config_export = {**export, "dflash_config": {**export["dflash_config"], "hf_model": str(draft)}}
+    config = XHQwen3_5ModelConfig(**config_export)
+
+    assert _head_recipe_kwargs(workflow["quant"], export)["head"]["bits"] == 5
+    assert target_head_bits(export["quant_scheme"]) == 5
+    assert config.dflash_config.draft_head_weight_bits == 5
+    assert target_head_bits(config.dflash_config.quant_scheme, "core_lm_head") == 5
+    assert config.dflash_config.max_pe_length == export["max_pe_length"] == 262144
+    assert config.dflash_config.max_sequence_length == context
+    assert export["fuse_gdr_ops"] is True
+    assert export["fuse_gdr_block_recurrent_ops"] is True
+    assert export["flash_attention"]["enable"] is flash_attention
 
 
 def test_legacy_w8_skip_does_not_require_checkpoint_or_calibration(tmp_path):

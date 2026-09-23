@@ -200,6 +200,24 @@ Qwen3.5/3.6/3.8 recipe v3 的新量化默认校准 Head W5。普通版与 MTP/DF
 recipe 默认值，采用相同的 head 继承规则，不提供 LoRA 组合。
 DFlash2 沿用 `speculative={"mode": "dflash"}` 和 `sources.dflash`，由 draft
 checkpoint 的架构声明识别，不增加一个 head 或精度选择参数。
+例如 Qwen3.8 的 AutoRound 主干先通过 W5 head workflow 补校准，之后统一接口
+读取新 checkpoint 中的 W5 元数据并让 target/draft 共用 head：
+
+```python
+build_model(
+    model_id="qwen3.8-27b",
+    model_dir="/models/Qwen3.8-27B",
+    quant_checkpoint="/models/autoround_quant_head_w5",
+    sources={"dflash": "/models/Qwen3.8-27B-DFlash2"},
+    speculative={"mode": "dflash"},
+    context_length=8192,
+    output_dir="/exports/qwen3_8_dflash2_w5_8k",
+    device="cuda:0",
+)
+```
+
+`context_length=262144` 选择 256K FlashAttention workflow；两档的 RoPE 表
+长度均由 `max_pe_length=262144` 控制。
 
 先生成并保留量化基座（不生成 Golden）：
 

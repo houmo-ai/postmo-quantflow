@@ -43,6 +43,55 @@ def test_default_target_is_identical_with_or_without_mtp(tmp_path, model_id):
     assert "mtp" not in base.quant
 
 
+@pytest.mark.parametrize("context,flash_attention", [(8192, False), (262144, True)])
+def test_qwen38_dflash2_unified_plan_reuses_w5_head(tmp_path, context, flash_attention):
+    from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import XHQwen3_5ModelConfig
+    from xhmodel_merak.xh_llm.shared_head import target_head_bits
+
+    source = source_for(tmp_path, "qwen3.8-27b")
+    draft = tmp_path / "draft"
+    draft.mkdir()
+    (draft / "config.json").write_text(json.dumps({
+        "architectures": ["DFlash2DraftModel"],
+        "hidden_size": 5120,
+        "num_target_layers": 64,
+        "sliding_window": 2048,
+        "dflash_config": {
+            "mask_token_id": 3, "target_layer_ids": [0], "block_size": 8,
+            "conv_kernel_size": 2, "conv_group_size": 16,
+            "selector_rank": 256, "selector_top_k": 16,
+        },
+    }))
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    source_config = json.loads((source / "config.json").read_text())
+    checkpoint_config = {**source_config, "quantization_config": {
+        "bits": 4, "provider": "auto-round", "quant_method": "gptq", "lm_head": True,
+        "meta": {"lm_head_quantization": {"bits": 5}},
+    }}
+    (checkpoint / "config.json").write_text(json.dumps(checkpoint_config))
+
+    plan = resolve_build_plan(
+        model_id="qwen3.8-27b", model_dir=str(source),
+        sources={"dflash": str(draft)}, speculative={"mode": "dflash"},
+        context_length=context, quant_checkpoint=str(checkpoint),
+        output_dir=str(tmp_path / "out"),
+    )
+    cfg = effective(plan, tmp_path)
+    export = cfg.export["model"]
+    model = XHQwen3_5ModelConfig(**export)
+
+    assert plan.quant_checkpoint == str(checkpoint.resolve())
+    assert cfg.quant["head"]["bits"] == target_head_bits(export["quant_scheme"]) == 5
+    assert model.dflash_config.draft_head_weight_bits == 5
+    assert target_head_bits(model.dflash_config.quant_scheme, "core_lm_head") == 5
+    assert model.dflash_config.max_pe_length == export["max_pe_length"] == 262144
+    assert model.dflash_config.max_sequence_length == context
+    assert export["fuse_gdr_ops"] is True
+    assert export["fuse_gdr_block_recurrent_ops"] is True
+    assert export["flash_attention"]["enable"] is flash_attention
+
+
 @pytest.mark.parametrize("sidecar", [False, True])
 def test_mixed_checkpoint_and_lora_mtp_are_reused_without_search(tmp_path, sidecar):
     source = source_for(tmp_path, "qwen3.6-35b-a3b")

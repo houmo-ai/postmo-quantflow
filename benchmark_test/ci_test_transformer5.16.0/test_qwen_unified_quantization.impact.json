@@ -7,6 +7,7 @@
         "xhmodel_merak/model_integrations/qwen/quantization.py",
         "xhmodel_merak/model_integrations/qwen/planning.py",
         "xhmodel_merak/model_integrations/qwen/plugin.py",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b_full_dflash2_*_head_w5.yaml",
         "xhmodel_merak/model_integrations/autoregressive/build.py",
         "xhmodel_merak/model_build/resolver.py",
         "xhmodel_merak/model_build/recipe_config.py",

@@ -210,6 +210,12 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
 Qwen3.8 的 Base/MTP 同样使用上面的流程，换成 `qwen3_8_27b_full*.yaml`。
 DFlash2 的 8K 与 256K 配置分别为 `qwen3_8_27b_full_dflash2_8k.yaml`、
 `qwen3_8_27b_full_dflash2_256k_fa.yaml`，不要只改目录名来切换上下文。
+共享 W5 head 时选对应的 `*_head_w5.yaml` 配置。已有 AutoRound 主干若只有浮点
+`lm_head.weight`，`--export-from-quanted-model` 会先通过 GPTQModel 校准 head，
+在输入目录同级写出 `<输入目录名>_head_w5`，然后用这份新 checkpoint 导出；
+再次导出可直接传新目录。DFlash2 的 head 继承主模型 W5 载荷，
+`max_pe_length` 仍是 262144，8K/256K 配置分别控制 KV cache 长度。
+统一接口复用 checkpoint 时只接受已补齐的 W5 head，不会在构建中隐式补校准。
 
 动态剪枝现在只作用于 Decode，Prefill 始终使用原始 Top-K。
 普通 MoE workflow 可直接配置：
