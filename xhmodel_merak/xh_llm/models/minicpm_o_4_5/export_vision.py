@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from .export_common import build_component_model, quantize_and_export
+from .minicpmo_vision_model import build_resampler_pos_embed
 
 
 def capture_vision_inputs(host: Any, model: Any) -> tuple[torch.Tensor, ...]:
@@ -16,8 +17,11 @@ def capture_vision_inputs(host: Any, model: Any) -> tuple[torch.Tensor, ...]:
     values = torch.zeros((1, 3, patch_size, patch_count * patch_size), dtype=torch.float16)
     position_ids = torch.arange(patch_count, dtype=torch.int32).unsqueeze(0)
     attention_mask = torch.zeros((1, 1, patch_count, patch_count), dtype=torch.float16)
-    sizes = torch.tensor([[height, width]], dtype=torch.int32)
-    return values, position_ids, attention_mask, sizes
+    resampler_pos_embed = build_resampler_pos_embed(
+        (height, width), patch_count, host.resampler.pos_embed, torch.float16
+    ).permute(1, 0, 2)
+    resampler_key_padding_mask = torch.zeros((1, patch_count), dtype=torch.float16)
+    return values, position_ids, attention_mask, resampler_pos_embed, resampler_key_padding_mask
 
 
 def export_minicpm_o_4_5_vision(

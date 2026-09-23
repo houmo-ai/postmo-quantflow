@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from ...hmonnx.hmonnx_model import HMONNXBaseModel, HMONNXModel
+from .minicpmo_token2wav_modules import deterministic_hift_source
 from .runtime_token2wav_adapters import (
     Token2WavRuntimeProtocol,
     _HMONNXCampplusAdapter,
@@ -97,6 +98,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         stft_meta = hift_meta["stft"]
         self._hift_stft_n_fft = int(stft_meta["n_fft"])
         self._hift_stft_hop_length = int(stft_meta["hop_length"])
+        self.hift_source_config = hift_meta["source_generator"]
         self._flow_noise_shape = tuple(int(item) for item in decoder_meta["noise_shape"])
         self._noise_generator = torch.Generator(device="cpu")
         if noise_seed is None:
@@ -369,19 +371,17 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         past_mel = mel[:, :, :past_mel_length]
         past_mel = F.pad(past_mel, (0, mel_cache_length - past_mel_length))
         current_mel = prepare_hift_input(current_mel, frame_capacity=frame_capacity)
-        past_source = F.pad(cache_source, (0, source_cache_length - source_length))
         graph_dtype = torch.float16
         inputs = (
             current_mel.to(graph_dtype),
             torch.tensor([current_mel_length], dtype=torch.int32, device=mel.device),
             past_mel.to(graph_dtype),
             torch.tensor([past_mel_length], dtype=torch.int32, device=mel.device),
-            past_source.to(graph_dtype),
-            torch.tensor([source_length], dtype=torch.int32, device=mel.device),
-            self.stream_hift_phase_noise.to(mel.device),
-            self.stream_hift_source_noise.to(mel.device),
         )
-        prepared_speech_feat, full_source = _values(part1_session(*inputs))
+        prepared_speech_feat, f0 = _values(part1_session(*inputs))
+        full_source = self._host_hift_source(f0, self.stream_hift_phase_noise, self.stream_hift_source_noise)
+        if source_length:
+            full_source[:, :, :source_length] = cache_source.float().cpu()
         source_stft = run_hift_stft_on_cpu(
             full_source,
             n_fft=self._hift_stft_n_fft,
@@ -389,6 +389,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
             target_device=mel.device,
             target_dtype=graph_dtype,
         )
+        full_source = full_source.to(mel.device)
         (raw_waveform,) = _values(part2_session(prepared_speech_feat, source_stft))
         logical_mel_length = past_mel_length + current_mel_length
         logical_sample_length = logical_mel_length * self.hift_hop_length
@@ -405,7 +406,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         past_mel = self._stream_state.hift_cache["mel"][:, :, :mel_valid_length]
         past_source = self._stream_state.hift_cache["source"][:, :, :source_valid_length]
         combined_mel = torch.cat((past_mel.to(mel), mel), dim=2)
-        raw_waveform, full_source = self._run_hift_graph(combined_mel, past_source.to(mel), final)
+        raw_waveform, full_source = self._run_hift_graph(combined_mel, past_source.to(mel.device), final)
         emitted, present_speech, present_speech_length = apply_streaming_waveform_overlap(
             raw_waveform,
             raw_valid_length=int(raw_waveform.shape[1]),
@@ -647,18 +648,36 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         prompt_length = int(prompt_feat.shape[1])
         return feat[:, :, prompt_length : prompt_length + inputs.output_mel_length].float()
 
+    def _host_hift_source(self, f0: Tensor, phase_noise: Tensor, source_noise: Tensor) -> Tensor:
+        config = self.hift_source_config
+        f0 = F.interpolate(
+            f0.float().cpu().unsqueeze(1),
+            scale_factor=int(config["upsample_scale"]),
+            mode="nearest",
+        ).transpose(1, 2)
+        sine_waves, _ = deterministic_hift_source(
+            f0,
+            phase_noise.float().cpu(),
+            source_noise.float().cpu(),
+            sampling_rate=int(config["sampling_rate"]),
+            upsample_scale=int(config["upsample_scale"]),
+            sine_amp=float(config["sine_amp"]),
+            noise_std=float(config["noise_std"]),
+            voiced_threshold=float(config["voiced_threshold"]),
+        )
+        weight = torch.tensor(config["linear_weight"], dtype=torch.float32)
+        bias = torch.tensor(config["linear_bias"], dtype=torch.float32)
+        return torch.tanh(F.linear(sine_waves, weight, bias)).transpose(1, 2)
+
     def hift_inference(self, speech_feat: Tensor) -> Tensor:
         mel_frames = int(speech_feat.shape[2])
         prepared_speech_feat = prepare_hift_input(
             speech_feat,
             frame_capacity=self.hift_frame_capacity,
         ).to(torch.float16)
-        source = self.hift_part1_session(
-            prepared_speech_feat,
-            self.hift_phase_noise.to(speech_feat.device),
-            self.hift_source_noise.to(speech_feat.device),
-        )
-        source = source if isinstance(source, Tensor) else source[0]
+        f0 = self.hift_part1_session(prepared_speech_feat)
+        f0 = f0 if isinstance(f0, Tensor) else f0[0]
+        source = self._host_hift_source(f0, self.hift_phase_noise, self.hift_source_noise)
         source_stft = run_hift_stft_on_cpu(
             source,
             n_fft=self._hift_stft_n_fft,

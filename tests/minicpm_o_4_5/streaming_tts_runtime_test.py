@@ -447,7 +447,7 @@ def test_generate_chunk_surfaces_official_sampling_import_failure(monkeypatch) -
 def test_non_streaming_generation_surfaces_official_sampling_import_failure(monkeypatch) -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import hf_compatible
 
-    def fail(_num_code: int, _repetition_penalty: float):
+    def fail(_num_code: int, _repetition_penalty: float, **_kwargs):
         raise RuntimeError("official TTS sampling integration unavailable")
 
     monkeypatch.setattr(hf_compatible, "_official_tts_gen_logits", fail)

@@ -18,7 +18,7 @@ except ImportError:
 
 from transformers.models.whisper.modeling_whisper import WhisperEncoder, WhisperEncoderLayer
 
-from xhquant.nn import LLMCache
+from xhquant.nn import LLMCache, MaskedAdd
 
 from ...register import DynamicRegister, XHLLM_TRACEABLE_MODULES
 from ._audio_streaming import StreamingWhisperEncoderMixin
@@ -38,6 +38,7 @@ def _create_whisper_attention_wrapper(cls_to_wrap):
             self.register_buffer("kv_scale", torch.tensor(_kv_scale, dtype=torch.float16), persistent=False)
             self.k_cache = LLMCache(axis=2)
             self.v_cache = LLMCache(axis=2)
+            self.masked_add = MaskedAdd()
 
         def _shape_states(self, states: torch.Tensor, bsz: int) -> torch.Tensor:
             if hasattr(states, "reshape"):
@@ -114,8 +115,9 @@ def _create_whisper_attention_wrapper(cls_to_wrap):
             present_value_states = value_states
             attention_key_states = key_states.transpose(2, 3) * self.kv_scale
             attn_weights = torch.matmul(query_states, attention_key_states)
-            mask = attention_mask if attention_mask is not None else 0
-            attn_weights: Optional[Tensor] = torch.nn.functional.softmax(attn_weights + mask, dim=-1)
+            if attention_mask is not None:
+                attn_weights = self.masked_add(attn_weights, attention_mask)
+            attn_weights: Optional[Tensor] = torch.nn.functional.softmax(attn_weights, dim=-1)
             attn_output = torch.matmul(attn_weights, value_states)
 
             attn_output = attn_output.transpose(1, 2)

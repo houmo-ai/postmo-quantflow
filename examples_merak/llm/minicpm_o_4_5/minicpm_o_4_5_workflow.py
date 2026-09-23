@@ -31,8 +31,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dump-golden", action="store_true")
-    parser.add_argument("--golden-mode", choices=("synthetic", "real"), default="synthetic")
+    parser.add_argument("--golden-mode", choices=("synthetic", "real"), default="real")
     parser.add_argument("--golden-video", type=Path)
+    parser.add_argument("--golden-audio", type=Path)
     parser.add_argument("--golden-question", default="请简短描述视频内容。")
     parser.add_argument("--golden-max-new-tokens", type=int, default=32)
     return parser.parse_args()
@@ -41,22 +42,17 @@ def parse_args() -> argparse.Namespace:
 def build_golden_request(args: argparse.Namespace) -> dict[str, object]:
     if args.golden_mode == "synthetic":
         return {"mode": "synthetic"}
-    if args.golden_video is None:
-        raise ValueError("--golden-video is required with --golden-mode real")
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import normalize_minicpmo_video
-
-    contents = normalize_minicpmo_video(args.golden_video, include_audio=True, stack_frames=1)
-    return {
+    request: dict[str, object] = {
         "mode": "real",
-        "messages": [{"role": "user", "content": [*contents, args.golden_question]}],
-        "chat_kwargs": {
-            "omni_mode": True,
-            "max_new_tokens": args.golden_max_new_tokens,
-            "generate_audio": False,
-            "use_tts_template": False,
-            "max_slice_nums": 1,
-        },
+        "first_step_only": True,
+        "question": args.golden_question,
+        "max_new_tokens": args.golden_max_new_tokens,
     }
+    if args.golden_video is not None:
+        request["video_sample"] = str(args.golden_video)
+    if args.golden_audio is not None:
+        request["audio_sample"] = str(args.golden_audio)
+    return request
 
 
 def main() -> None:

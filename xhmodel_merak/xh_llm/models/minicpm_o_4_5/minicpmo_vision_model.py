@@ -7,6 +7,72 @@ from ...builder import register_llm_model
 from .minicpmo_base_model import XHMiniCPMOBaseModel
 
 
+def validate_patch_capacity(target_size: tuple[int, int], patch_capacity: int) -> None:
+    height, width = target_size
+    if min(height, width, patch_capacity) <= 0:
+        raise ValueError(
+            f"Target dimensions and capacity must be positive, got "
+            f"target={target_size}, patch_capacity={patch_capacity}"
+        )
+    token_count = height * width
+    if token_count > patch_capacity:
+        raise ValueError(f"Target {target_size} needs {token_count} patch tokens, exceeding capacity {patch_capacity}")
+
+
+def build_resampler_pos_embed_cache(
+    embed_dim: int,
+    max_side: int,
+    *,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Rebuild the checkpoint resampler's deterministic 2-D sin/cos cache."""
+    import numpy as np
+
+    grid_h = np.arange(max_side, dtype=np.float32)
+    grid_w = np.arange(max_side, dtype=np.float32)
+    grid = np.stack(np.meshgrid(grid_w, grid_h), axis=0)
+    half_dim = embed_dim // 2
+    omega = np.arange(half_dim // 2, dtype=np.float32)
+    omega /= half_dim / 2.0
+    omega = 1.0 / 10000.0**omega
+
+    def half(grid_axis: np.ndarray) -> np.ndarray:
+        out = np.einsum("hw,d->hwd", grid_axis, omega)
+        return np.concatenate([np.sin(out), np.cos(out)], axis=-1)
+
+    pos_embed = np.concatenate([half(grid[0]), half(grid[1])], axis=-1)
+    return torch.from_numpy(pos_embed).float().to(device)
+
+
+def build_resampler_pos_embed(
+    target_size: tuple[int, int],
+    patch_capacity: int,
+    pos_embed_cache: torch.Tensor,
+    dtype: torch.dtype,
+    *,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    """Crop native-grid positions and zero-pad to the graph's fixed capacity."""
+    validate_patch_capacity(target_size, patch_capacity)
+    height, width = target_size
+    cache_h, cache_w = pos_embed_cache.shape[0], pos_embed_cache.shape[1]
+    if height > cache_h or width > cache_w:
+        max_side = max(height, width)
+        pos_embed_cache = build_resampler_pos_embed_cache(
+            pos_embed_cache.shape[-1],
+            max_side,
+            device=pos_embed_cache.device,
+        )
+    embed = pos_embed_cache[:height, :width, :].reshape(height * width, -1)
+    padded = torch.zeros(
+        (patch_capacity, embed.shape[-1]),
+        dtype=dtype,
+        device=device,
+    )
+    padded[: height * width, :] = embed.to(dtype=dtype)
+    return padded.unsqueeze(0)
+
+
 def _prepare_4d_attention_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
     """
     Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
@@ -108,13 +174,38 @@ class XHMiniCPMOVisionModel(XHMiniCPMOBaseModel):
         all_pixel_values = inputs[0][:1]
         position_ids = inputs[1][:1]
         patch_attention_mask = inputs[2][:1]
-        tgt_sizes = inputs[3][:1]
+        resampler_pos_embed = self._build_resampler_pos_embed(inputs[3][:1])
+        resampler_key_padding_mask = self._build_resampler_key_padding_mask(inputs[3][:1])
         return (
             all_pixel_values,
             position_ids,
             patch_attention_mask,
-            tgt_sizes,
+            resampler_pos_embed,
+            resampler_key_padding_mask,
         )
+
+    def _build_resampler_pos_embed(self, tgt_sizes: Tensor) -> Tensor:
+        patch_capacity = self.wrap_cfg.image_slice_max_size[0] * self.wrap_cfg.image_slice_max_size[1]
+        return torch.cat(
+            [
+                build_resampler_pos_embed(
+                    (int(height), int(width)),
+                    patch_capacity,
+                    self.resampler.pos_embed,
+                    self.dtype,
+                    device=self.device,
+                )
+                for height, width in tgt_sizes.tolist()
+            ],
+            dim=0,
+        ).permute(1, 0, 2)
+
+    def _build_resampler_key_padding_mask(self, tgt_sizes: Tensor) -> Tensor:
+        patch_capacity = self.wrap_cfg.image_slice_max_size[0] * self.wrap_cfg.image_slice_max_size[1]
+        mask = torch.zeros((len(tgt_sizes), patch_capacity), dtype=self.dtype, device=self.device)
+        for index, (height, width) in enumerate(tgt_sizes.tolist()):
+            mask[index, int(height) * int(width) :] = -65504
+        return mask
 
     def prepare_inputs(self, data: Dict[str, Union[torch.Tensor, Any]]) -> Any:
         pixel_values = data["pixel_values"]
@@ -150,8 +241,6 @@ class XHMiniCPMOVisionModel(XHMiniCPMOBaseModel):
             tgt_max_patches = torch.max(tgt_sizes_t[:, 0] * tgt_sizes_t[:, 1])
             max_patches = self.wrap_cfg.image_slice_max_size[0] * self.wrap_cfg.image_slice_max_size[1]
             assert tgt_max_patches <= max_patches
-            assert torch.max(tgt_sizes_t[:, 0]) <= self.wrap_cfg.image_slice_max_size[0]
-            assert torch.max(tgt_sizes_t[:, 1]) <= self.wrap_cfg.image_slice_max_size[1]
             #
             all_pixel_values_t = torch.nn.utils.rnn.pad_sequence(all_pixel_values, batch_first=True, padding_value=0.0)
             # all_pixel_values = torch.nn.utils.rnn.pad_packed_sequence(all_pixel_values, batch_first=True, )
@@ -188,6 +277,8 @@ class XHMiniCPMOVisionModel(XHMiniCPMOBaseModel):
         all_pixel_values = all_pixel_values
         B = all_pixel_values.shape[0]
         hs = []
+        resampler_pos_embed = self._build_resampler_pos_embed(tgt_sizes)
+        resampler_key_padding_mask = self._build_resampler_key_padding_mask(tgt_sizes)
         for i in range(0, B):
             start_idx = i
             end_idx = i + vision_batch_size
@@ -195,7 +286,8 @@ class XHMiniCPMOVisionModel(XHMiniCPMOBaseModel):
                 all_pixel_values[start_idx:end_idx],
                 position_ids[start_idx:end_idx],
                 attention_mask[start_idx:end_idx],
-                tgt_sizes[start_idx:end_idx],
+                resampler_pos_embed[:, start_idx:end_idx],
+                resampler_key_padding_mask[start_idx:end_idx],
             )
             hs.append(tmp_hs)
         vision_embedding = torch.cat(hs, dim=0)

@@ -52,14 +52,18 @@ def test_vision_runtime_executes_exported_batch_one_serially() -> None:
 
     def session(*inputs: torch.Tensor) -> torch.Tensor:
         calls.append(inputs[0].shape[0])
+        assert inputs[3].shape == (4, 1, 8)
         return inputs[0].sum(dim=(-1, -2), keepdim=True)
 
     pixels = torch.ones((3, 3, 2, 2), dtype=torch.float16)
     position_ids = torch.zeros((3, 4), dtype=torch.int32)
     attention_mask = torch.zeros((3, 1, 4, 4), dtype=torch.float16)
-    target_sizes = torch.ones((3, 2), dtype=torch.int32)
+    resampler_pos_embed = torch.zeros((4, 3, 8), dtype=torch.float16)
+    resampler_key_padding_mask = torch.zeros((3, 4), dtype=torch.float16)
 
-    output = run_vision_slices(session, pixels, position_ids, attention_mask, target_sizes)
+    output = run_vision_slices(
+        session, pixels, position_ids, attention_mask, resampler_pos_embed, resampler_key_padding_mask
+    )
 
     assert calls == [1, 1, 1]
     assert output.shape[0] == 3
@@ -112,16 +116,23 @@ def test_vision_runtime_preserves_navit_patch_layout() -> None:
 
 def test_vision_export_dummy_uses_fixed_navit_layout() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.export_vision import capture_vision_inputs
+    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.minicpmo_vision_model import build_resampler_pos_embed_cache
 
-    host = SimpleNamespace(vpm=SimpleNamespace(embeddings=SimpleNamespace(patch_size=14)))
+    host = SimpleNamespace(
+        vpm=SimpleNamespace(embeddings=SimpleNamespace(patch_size=14)),
+        resampler=SimpleNamespace(pos_embed=build_resampler_pos_embed_cache(8, 40)),
+    )
     model = SimpleNamespace(wrap_cfg=SimpleNamespace(image_slice_max_size=[40, 40]))
 
-    pixels, position_ids, attention_mask, sizes = capture_vision_inputs(host, model)
+    pixels, position_ids, attention_mask, resampler_pos_embed, resampler_key_padding_mask = capture_vision_inputs(
+        host, model
+    )
 
     assert pixels.shape == (1, 3, 14, 22400)
     assert position_ids.shape == (1, 1600)
     assert attention_mask.shape == (1, 1, 1600, 1600)
-    assert sizes.tolist() == [[40, 40]]
+    assert resampler_pos_embed.shape == (1600, 1, 8)
+    assert resampler_key_padding_mask.shape == (1, 1600)
 
 
 def test_vision_runtime_wrap_model_delegates_to_forward() -> None:
@@ -606,33 +617,32 @@ def test_speech_capture_records_tokens_and_waveform_without_changing_result() ->
 def test_tts_alignment_maps_full_sequence_bounds_to_decode_hidden_states() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.hf_compatible import extract_tts_decode_alignment
 
-    prefill = (torch.zeros((1, 20, 4)),)
+    # Three prompt plus five generated tokens yield four decode hidden states.
+    prefill = (torch.zeros((1, 3, 4)),)
     decode = tuple((torch.full((1, 1, 4), float(index)),) for index in range(1, 5))
     outputs = SimpleNamespace(
         hidden_states=(prefill, *decode),
-        full_sequences=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]),
+        full_sequences=torch.tensor([[10, 11, 12, 13, 14, 15, 16, 17]]),
     )
 
     token_ids, hidden = extract_tts_decode_alignment(outputs, (3, None), 0)
 
     assert token_ids.tolist() == [13, 14, 15, 16]
-    assert hidden.shape == (4, 4)
     assert hidden[:, 0].tolist() == [1.0, 2.0, 3.0, 4.0]
 
 
 def test_tts_alignment_normalizes_generation_leading_dimensions() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.hf_compatible import extract_tts_decode_alignment
 
-    prefill = (torch.zeros((3, 1, 20, 4)),)
+    prefill = (torch.zeros((3, 1, 3, 4)),)
     decode = tuple((torch.full((3, 1, 1, 4), float(index)),) for index in range(1, 5))
     outputs = SimpleNamespace(
         hidden_states=(prefill, *decode),
-        full_sequences=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]),
+        full_sequences=torch.tensor([[10, 11, 12, 13, 14, 15, 16, 17]]),
     )
 
-    token_ids, hidden = extract_tts_decode_alignment(outputs, (3, None), 0)
+    _, hidden = extract_tts_decode_alignment(outputs, (3, None), 0)
 
-    assert token_ids.tolist() == [13, 14, 15, 16]
     assert hidden.shape == (4, 4)
     assert hidden[:, 0].tolist() == [1.0, 2.0, 3.0, 4.0]
 

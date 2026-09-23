@@ -10,16 +10,8 @@ import torch
 from xhquant.api import HMONNXGoldenInference
 from xhquant.core import CacheTensor
 
+from .minicpmo_vision_model import build_resampler_pos_embed, build_resampler_pos_embed_cache
 from .streaming_fixtures import CERTIFIED_STREAMING_CASES, streaming_case_manifest, validate_streaming_graph_coverage
-
-
-def _random_hift_inputs(harmonic_count: int, source_length: int) -> tuple[torch.Tensor, torch.Tensor]:
-    generator = torch.Generator(device="cpu")
-    generator.seed()
-    phase_noise = torch.rand((1, harmonic_count), generator=generator)
-    phase_noise[:, 0] = 0
-    source_noise = torch.randn((1, source_length, harmonic_count), generator=generator)
-    return phase_noise.to(torch.float16), source_noise.to(torch.float16)
 
 
 def dump_synthetic_golden(work_dir: Path, meta: Mapping[str, Any], device: str) -> dict[str, Any]:
@@ -60,11 +52,13 @@ def synthetic_golden_inputs(
     component: Mapping[str, Any],
 ) -> tuple[torch.Tensor, ...]:
     if name == "vision":
+        pos_embed_cache = build_resampler_pos_embed_cache(4096, 40)
         return (
             torch.zeros((1, 3, 14, 22400), dtype=torch.float16),
             torch.arange(1600, dtype=torch.int32).unsqueeze(0),
             torch.zeros((1, 1, 1600, 1600), dtype=torch.float16),
-            torch.tensor([[40, 40]], dtype=torch.int32),
+            build_resampler_pos_embed((40, 40), 1600, pos_embed_cache, torch.float16).permute(1, 0, 2),
+            torch.zeros((1, 1600), dtype=torch.float16),
         )
     if name == "audio":
         if role in {"stream_prefill", "stream_decode", "session_prefill", "session_decode"}:
@@ -121,7 +115,14 @@ def synthetic_golden_inputs(
         cache_shape = tuple(int(value) for value in component["kv_cache_shape"])
         cache_count = 2 * int(component["num_hidden_layers"])
         values += [CacheTensor(torch.zeros(cache_shape, dtype=torch.float16)) for _ in range(cache_count)]
-        values.append(torch.zeros((1, 1, length, int(component["kv_cache_shape"][-2])), dtype=torch.float16))
+        attention_mask = torch.full(
+            (1, 1, length, int(component["kv_cache_shape"][-2])),
+            torch.finfo(torch.float16).min,
+            dtype=torch.float16,
+        )
+        for row in range(length):
+            attention_mask[:, :, row, : past + row + 1] = 0
+        values.append(attention_mask)
         values.extend(
             (
                 torch.zeros((1, length, int(component["semantic_hidden_size"])), dtype=torch.float16),
@@ -196,21 +197,13 @@ def synthetic_golden_inputs(
             torch.zeros((2, 80, capacity), dtype=torch.float16),
         )
     if name == "token2wav_hift":
-        if role in {"stream_hift", "stream_hift_part1"}:
+        if role == "stream_hift_part1":
             contract = component["stream_contract"]
-            phase_noise, source_noise = _random_hift_inputs(
-                int(contract["harmonic_count"]),
-                int(contract["source_length"]),
-            )
             return (
                 torch.zeros((1, 80, int(contract["frame_capacity"])), dtype=torch.float16),
                 torch.tensor([int(contract["frame_capacity"])], dtype=torch.int32),
                 torch.zeros((1, 80, int(contract["mel_cache_length"])), dtype=torch.float16),
                 torch.tensor([0], dtype=torch.int32),
-                torch.zeros((1, 1, int(contract["source_cache_length"])), dtype=torch.float16),
-                torch.tensor([0], dtype=torch.int32),
-                phase_noise,
-                source_noise,
             )
         if role == "stream_hift_part2":
             contract = component["stream_contract"]
@@ -231,15 +224,7 @@ def synthetic_golden_inputs(
                 torch.zeros((1, 80, capacity), dtype=torch.float16),
                 torch.zeros((1, int(stft["n_fft"]) + 2, spectrum_frames), dtype=torch.float16),
             )
-        phase_noise, source_noise = _random_hift_inputs(
-            int(component["harmonic_count"]),
-            int(component["source_length"]),
-        )
-        return (
-            torch.zeros((1, 80, capacity), dtype=torch.float16),
-            phase_noise,
-            source_noise,
-        )
+        return (torch.zeros((1, 80, capacity), dtype=torch.float16),)
     if name == "speaker":
         # Runtime feeds these graphs float16 (runtime_token2wav calls
         # feat.to(torch.float16) / mel.to(torch.float16)); match qwen3_tts

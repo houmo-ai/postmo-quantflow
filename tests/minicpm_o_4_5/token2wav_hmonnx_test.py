@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, helper
 
 
 def test_flow_frontend_inputs_pad_tokens_and_prompt_mel_to_exported_shapes() -> None:
@@ -155,67 +155,6 @@ def test_deterministic_hift_source_matches_official_sinegen2_with_supplied_rando
     assert torch.equal(actual_uv, expected_uv)
 
 
-def test_deterministic_hift_source_onnx_avoids_scatternd(tmp_path) -> None:
-    import onnx
-
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.minicpmo_token2wav_modules import (
-        deterministic_hift_source,
-    )
-
-    class SourceWrapper(torch.nn.Module):
-        def forward(
-            self,
-            f0: torch.Tensor,
-            phase_noise: torch.Tensor,
-            gaussian_noise: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            return deterministic_hift_source(
-                f0,
-                phase_noise,
-                gaussian_noise,
-                sampling_rate=24000,
-                upsample_scale=4,
-                sine_amp=0.1,
-                noise_std=0.003,
-                voiced_threshold=10,
-            )
-
-    output = tmp_path / "deterministic_hift_source.onnx"
-    torch.onnx.export(
-        SourceWrapper(),
-        (
-            torch.ones(1, 16, 1),
-            torch.zeros(1, 3),
-            torch.zeros(1, 16, 3),
-        ),
-        output,
-        opset_version=17,
-    )
-
-    model = onnx.load(output)
-    assert all(node.op_type != "ScatterND" for node in model.graph.node)
-
-
-def test_hift_random_inputs_match_exported_source_contract() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.export_token2wav import (
-        create_hift_random_inputs,
-    )
-
-    phase_noise, source_noise = create_hift_random_inputs(
-        harmonic_count=9,
-        source_length=491040,
-        seed=1024,
-    )
-
-    assert phase_noise.shape == (1, 9)
-    assert phase_noise[0, 0].item() == 0.0
-    assert source_noise.shape == (1, 491040, 9)
-    assert torch.equal(
-        source_noise,
-        create_hift_random_inputs(harmonic_count=9, source_length=491040, seed=1024)[1],
-    )
-
-
 def test_hift_onnx_rejects_graph_level_random_operators() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.export_token2wav import (
         require_deterministic_onnx,
@@ -230,7 +169,7 @@ def test_hift_onnx_rejects_graph_level_random_operators() -> None:
         require_deterministic_onnx(model)
 
 
-def test_hift_runtime_supplies_persisted_source_inputs() -> None:
+def test_hift_runtime_generates_host_source_from_f0() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
 
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
@@ -241,43 +180,23 @@ def test_hift_runtime_supplies_persisted_source_inputs() -> None:
     runtime._hift_stft_n_fft = 4
     runtime._hift_stft_hop_length = 2
     observed_part1: list[tuple[torch.Tensor, ...]] = []
+    observed_host: list[tuple[torch.Tensor, ...]] = []
     observed_part2: list[tuple[torch.Tensor, ...]] = []
-    runtime.hift_part1_session = lambda *values: observed_part1.append(values) or torch.ones((1, 1, 4800))
+    runtime.hift_part1_session = lambda *values: observed_part1.append(values) or torch.ones((1, 10))
+    runtime._host_hift_source = lambda *values: observed_host.append(values) or torch.ones((1, 1, 4800))
     runtime.hift_part2_session = lambda *values: observed_part2.append(values) or torch.ones((1, 4800))
 
     waveform = runtime.hift_inference(torch.ones((1, 80, 6)))
 
-    assert len(observed_part1[0]) == 3
+    assert len(observed_part1[0]) == 1
     assert observed_part1[0][0].shape == (1, 80, 10)
-    assert torch.equal(observed_part1[0][1], runtime.hift_phase_noise)
-    assert torch.equal(observed_part1[0][2], runtime.hift_source_noise)
+    assert observed_host[0][0].shape == (1, 10)
+    assert torch.equal(observed_host[0][1], runtime.hift_phase_noise)
+    assert torch.equal(observed_host[0][2], runtime.hift_source_noise)
     assert len(observed_part2[0]) == 2
     assert observed_part2[0][0].shape == (1, 80, 10)
     assert observed_part2[0][1].shape == (1, 6, 2401)
     assert waveform.shape == (1, 2880)
-
-
-def test_hift_onnx_preparation_fixes_source_resize_to_frame_capacity() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.export_token2wav import prepare_hift_onnx
-
-    input_value = helper.make_tensor_value_info("speech_feat", TensorProto.FLOAT, [1, 80, 1024])
-    output_value = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 9, 1024])
-    scales = numpy_helper.from_array(torch.tensor([1.0, 1.0, 480.0]).numpy(), name="scales")
-    resize = helper.make_node(
-        "Resize",
-        ["speech_feat", "", "scales"],
-        ["output"],
-        name="/m_source/l_sin_gen/Resize",
-    )
-    model = helper.make_model(helper.make_graph([resize], "hift", [input_value], [output_value], [scales]))
-
-    prepared = prepare_hift_onnx(model, frame_capacity=1024)
-    prepared_resize = prepared.graph.node[0]
-    initializers = {value.name: numpy_helper.to_array(value) for value in prepared.graph.initializer}
-
-    assert prepared_resize.input[2] == ""
-    assert prepared_resize.input[3] == "token2wav_hift_source_sizes"
-    assert initializers["token2wav_hift_source_sizes"].tolist() == [1, 9, 1024]
 
 
 def test_token2wav_adapter_replaces_native_flow_and_hift_without_fallback() -> None:

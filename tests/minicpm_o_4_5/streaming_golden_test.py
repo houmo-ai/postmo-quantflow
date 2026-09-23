@@ -64,7 +64,6 @@ def test_streaming_graph_roles_are_complete_and_case_manifest_is_reproducible() 
             "token2wav_flow_decoder": {"graphs": {"stream_flow_estimator_step": "flow/step.onnx"}},
             "token2wav_hift": {
                 "graphs": {
-                    "stream_hift": "hift/reference.onnx",
                     "stream_hift_part1": "hift/part1.onnx",
                     "stream_hift_part2": "hift/part2.onnx",
                 }

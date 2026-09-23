@@ -32,7 +32,8 @@ export:
       - pixel_values
       - position_ids
       - attention_mask
-      - tgt_sizes
+      - resampler_pos_embed
+      - resampler_key_padding_mask
       output_names:
       - features
     audio:

@@ -187,6 +187,10 @@ def test_flow_frontend_normalization_does_not_export_dynamic_shape_expand(tmp_pa
     )
 
     class Encoder(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embed = nn.Identity()
+
         def forward(self, hidden, token_length):
             del token_length
             return hidden, hidden
@@ -331,49 +335,6 @@ def test_final_frontend_masks_padded_tokens_after_biased_encoder_embedding() -> 
     )
 
     assert torch.allclose(fixed_capacity[0][:, :, : reference[0].shape[2]], reference[0])
-
-
-def test_hift_stream_preparation_fixes_dynamic_slice_axes(tmp_path) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.export_token2wav import (
-        prepare_hift_stream_onnx,
-    )
-
-    # The fresh export keeps the pre-quantization graph as `<graph>_source.onnx`
-    # next to the quantized graph (see export_token2wav._convert). Prefer it over
-    # a stale absolute /tmp path so the test stays reproducible from a real export.
-    candidates = [
-        Path("work_dirs/minicpm_o_4_5_xh2a_w8a8_gptq_export/token2wav_hift/token2wav_hift_stream_hift_XH2a_w8a16_sefp_source.onnx"),
-    ]
-    source = next((path for path in candidates if path.is_file()), None)
-    if source is None:
-        pytest.skip("streaming HiFT export artifact not available; run the workflow export first")
-    model = onnx.load(str(source))
-    prepared = prepare_hift_stream_onnx(model)
-    prepared_path = tmp_path / "prepared.onnx"
-    onnx.save(prepared, prepared_path)
-    initializers = {value.name for value in prepared.graph.initializer}
-    assert all(
-        node.op_type != "Slice" or len(node.input) <= 3 or not node.input[3] or node.input[3] in initializers
-        for node in prepared.graph.node
-    )
-    assert all(
-        node.op_type != "Unsqueeze" or len(node.input) <= 1 or node.input[1] in initializers
-        for node in prepared.graph.node
-    )
-    assert all(
-        node.op_type != "Squeeze" or len(node.input) <= 1 or node.input[1] in initializers
-        for node in prepared.graph.node
-    )
-    assert all(node.op_type != "CumSum" or node.input[1] in initializers for node in prepared.graph.node)
-    pads = [node for node in prepared.graph.node if node.op_type == "Pad"]
-    assert len(pads) == 3
-    assert all(node.input[1] in initializers for node in pads)
-    assert all(node.op_type != "STFT" for node in prepared.graph.node)
-    assert all(node.op_type != "Pow" or node.input[1] in initializers for node in prepared.graph.node)
-    assert all(
-        node.op_type not in {"ReduceMean", "ReduceSum"} or len(node.input) < 2 or node.input[1] in initializers
-        for node in prepared.graph.node
-    )
 
 
 def test_estimator_step_cache_outputs_depend_on_past_cache_and_current_input() -> None:
@@ -553,22 +514,18 @@ def test_flow_stream_roles_use_explicit_cache_contract_and_seven_outputs(tmp_pat
     assert input_shapes[7:] == (torch.Size((1,)), torch.Size((1,)))
 
 
-def test_hift_stream_export_formal_inputs_match_wrapper_order() -> None:
+def test_hift_stream_part1_export_formal_inputs_match_wrapper_order() -> None:
     from inspect import signature
 
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamWrapper
+    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamPart1Wrapper
 
     expected = (
         "speech_feat",
         "speech_feat_valid_length",
         "past_mel",
         "past_mel_valid_length",
-        "past_source",
-        "past_source_valid_length",
-        "phase_noise",
-        "source_noise",
     )
-    parameters = tuple(signature(HiftStreamWrapper.forward).parameters)[1:]
+    parameters = tuple(signature(HiftStreamPart1Wrapper.forward).parameters)[1:]
     assert parameters == expected
 
 
@@ -581,87 +538,22 @@ def test_hift_stream_config_omits_exporter_derived_cache_metadata() -> None:
     assert "cache_axes" not in streaming
 
 
-def _realistic_hift_module(
-    *,
-    frame_capacity: int = 58,
-    mel_cache_length: int = 8,
-    source_cache_length: int = 3840,
-) -> nn.Module:
-    scale = 480
-
-    class SineGenerator:
-        sampling_rate = 24000
-        upsample_scale = scale
-        sine_amp = 0.1
-        noise_std = 0.0
-        voiced_threshold = 0.0
-
-    class F0Upsampler(nn.Module):
-        def forward(self, value: torch.Tensor) -> torch.Tensor:
-            return torch.nn.functional.interpolate(value, scale_factor=scale, mode="linear")
-
+def _f0_module() -> nn.Module:
     class Module(nn.Module):
-        istft_params = {"n_fft": 16, "hop_len": 4}
-        stft_window = torch.ones(16)
-        m_source = type(
-            "MSource",
-            (),
-            {
-                "l_sin_gen": SineGenerator(),
-                "l_linear": lambda _self, value: value,
-                "l_tanh": lambda _self, value: value,
-            },
-        )()
-        f0_upsamp = F0Upsampler()
-
         def f0_predictor(self, value: torch.Tensor) -> torch.Tensor:
             return value[:, 0, :]
-
-        def decode(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-            expected = x.shape[2] * scale
-            if s.shape[2] != expected:
-                raise RuntimeError(
-                    f"HiFT decode source length {s.shape[2]} must equal mel frames {x.shape[2]} * {scale} = {expected}"
-                )
-            return torch.zeros(x.shape[0], expected)
 
     return Module()
 
 
-def test_hift_stream_wrapper_left_aligns_logical_mel_and_returns_raw_source() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamWrapper
-
-    class SineGenerator:
-        sampling_rate = 24000
-        upsample_scale = 1
-        sine_amp = 0.1
-        noise_std = 0.0
-        voiced_threshold = 0.0
+def test_hift_stream_part1_left_aligns_logical_mel_and_returns_f0() -> None:
+    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamPart1Wrapper
 
     class Module(nn.Module):
-        istft_params = {"n_fft": 4, "hop_len": 2}
-        stft_window = torch.ones(4)
-        m_source = type(
-            "MSource",
-            (),
-            {
-                "l_sin_gen": SineGenerator(),
-                "l_linear": lambda _self, value: value,
-                "l_tanh": lambda _self, value: value,
-            },
-        )()
-
         def f0_predictor(self, value: torch.Tensor) -> torch.Tensor:
             return value[:, 0, :]
 
-        def f0_upsamp(self, value: torch.Tensor) -> torch.Tensor:
-            return value
-
-        def decode(self, x: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-            del s
-            return x[:, 0, :]
-
-    wrapper = HiftStreamWrapper(Module(), source_cache_length=4, mel_cache_length=4)
+    wrapper = HiftStreamPart1Wrapper(Module(), mel_cache_length=4)
     current = torch.zeros(1, 80, 6)
     current[:, 0, :3] = torch.tensor([1.0, 2.0, 3.0])
     outputs = wrapper(
@@ -669,70 +561,48 @@ def test_hift_stream_wrapper_left_aligns_logical_mel_and_returns_raw_source() ->
         torch.tensor([3], dtype=torch.int32),
         torch.full((1, 80, 4), 9.0),
         torch.tensor([0], dtype=torch.int32),
-        torch.full((1, 1, 4), 7.0),
-        torch.tensor([0], dtype=torch.int32),
-        torch.zeros(1, 1),
-        torch.zeros(1, 10, 1),
     )
 
     assert len(outputs) == 2
-    waveform, source = outputs
-    assert torch.equal(waveform[0, :3], torch.tensor([1.0, 2.0, 3.0]))
-    assert torch.count_nonzero(waveform[0, 3:]) == 0
-    assert source.shape == (1, 1, 10)
+    prepared_mel, f0 = outputs
+    assert torch.equal(prepared_mel[0, 0, :3], torch.tensor([1.0, 2.0, 3.0]))
+    assert torch.count_nonzero(prepared_mel[0, 0, 3:]) == 0
+    assert torch.equal(f0, prepared_mel[:, 0, :])
 
 
 @pytest.mark.parametrize("past_mel_valid", (0, 8))
-def test_hift_stream_decode_source_aligns_with_mel_frames(past_mel_valid: int) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamWrapper
+def test_hift_stream_part1_f0_aligns_with_mel_frames(past_mel_valid: int) -> None:
+    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamPart1Wrapper
 
     frame_capacity = 58
     mel_cache_length = 8
-    source_cache_length = 3840
-    upsample_scale = 480
-    assert source_cache_length == mel_cache_length * upsample_scale
-
-    module = _realistic_hift_module(
-        frame_capacity=frame_capacity,
-        mel_cache_length=mel_cache_length,
-        source_cache_length=source_cache_length,
-    )
-    wrapper = HiftStreamWrapper(
+    module = _f0_module()
+    wrapper = HiftStreamPart1Wrapper(
         module,
-        source_cache_length=source_cache_length,
         mel_cache_length=mel_cache_length,
     )
 
-    source_noise = torch.zeros((1, (frame_capacity + mel_cache_length) * upsample_scale, 1))
     args = (
         torch.zeros(1, 80, frame_capacity),
         torch.tensor([frame_capacity], dtype=torch.int32),
         torch.zeros(1, 80, mel_cache_length),
         torch.tensor([past_mel_valid], dtype=torch.int32),
-        torch.zeros(1, 1, source_cache_length),
-        torch.tensor([source_cache_length], dtype=torch.int32),
-        torch.zeros(1, 1),
-        source_noise,
     )
     outputs = wrapper(*args)
 
-    waveform = outputs[0]
-    expected_length = (frame_capacity + mel_cache_length) * upsample_scale
+    prepared_mel = outputs[0]
     assert len(outputs) == 2
-    assert tuple(outputs[1].shape) == (1, 1, expected_length)
-    assert waveform.shape[1] == expected_length
+    assert tuple(outputs[1].shape) == (1, frame_capacity + mel_cache_length)
+    assert prepared_mel.shape[2] == frame_capacity + mel_cache_length
 
 
-def test_hift_stream_graph_excludes_speech_cache_and_overlap_window(tmp_path) -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamWrapper
+def test_hift_stream_part1_graph_excludes_speech_cache_and_overlap_window(tmp_path) -> None:
+    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.streaming_token2wav import HiftStreamPart1Wrapper
 
-    hift = _realistic_hift_module()
-    hift.decode = lambda x, s: torch.clamp(x[:, 0, :].repeat_interleave(480, dim=1) + s[:, 0, :] * 0, -1, 1)
-    wrapper = HiftStreamWrapper(
+    hift = _f0_module()
+    wrapper = HiftStreamPart1Wrapper(
         hift,
-        source_cache_length=3840,
         mel_cache_length=8,
-        waveform_length=31680,
     )
     output = tmp_path / "stream_hift.onnx"
     torch.onnx.export(
@@ -742,10 +612,6 @@ def test_hift_stream_graph_excludes_speech_cache_and_overlap_window(tmp_path) ->
             torch.tensor([58], dtype=torch.int32),
             torch.zeros(1, 80, 8),
             torch.tensor([0], dtype=torch.int32),
-            torch.zeros(1, 1, 3840),
-            torch.tensor([0], dtype=torch.int32),
-            torch.zeros(1, 1),
-            torch.zeros(1, 31680, 1),
         ),
         output,
         input_names=(
@@ -753,48 +619,38 @@ def test_hift_stream_graph_excludes_speech_cache_and_overlap_window(tmp_path) ->
             "speech_feat_valid_length",
             "past_mel",
             "past_mel_valid_length",
-            "past_source",
-            "past_source_valid_length",
-            "phase_noise",
-            "source_noise",
         ),
-        output_names=(
-            "raw_waveform",
-            "full_source",
-        ),
+        output_names=("prepared_speech_feat", "f0"),
         opset_version=17,
     )
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.export_token2wav import prepare_hift_stream_onnx
 
     model = prepare_hift_stream_onnx(onnx.load(output))
+    initializers = {value.name for value in model.graph.initializer}
+    assert all(
+        node.op_type != "Slice" or len(node.input) <= 3 or not node.input[3] or node.input[3] in initializers
+        for node in model.graph.node
+    )
+    assert all(
+        node.op_type not in {"Squeeze", "Unsqueeze"} or len(node.input) <= 1 or node.input[1] in initializers
+        for node in model.graph.node
+    )
     assert [value.name for value in model.graph.input] == [
         "speech_feat",
         "speech_feat_valid_length",
         "past_mel",
         "past_mel_valid_length",
-        "past_source",
-        "past_source_valid_length",
-        "phase_noise",
-        "source_noise",
     ]
     assert "last_chunk" not in [value.name for value in model.graph.input]
     assert [value.name for value in model.graph.output] == [
-        "raw_waveform",
-        "full_source",
+        "prepared_speech_feat",
+        "f0",
     ]
-    assert [dim.dim_value for dim in model.graph.output[1].type.tensor_type.shape.dim] == [1, 1, 31680]
+    assert len(model.graph.output[1].type.tensor_type.shape.dim) == 2
     assert sum(node.op_type == "ConvTranspose" for node in model.graph.node) == 0
     assert all(node.op_type != "STFT" for node in model.graph.node)
     assert all("speech_window" not in initializer.name for initializer in model.graph.initializer)
-    resize_nodes = [node for node in model.graph.node if node.op_type == "Resize"]
-    resize_sizes = {
-        initializer.name: tuple(int(value) for value in numpy_helper.to_array(initializer).reshape(-1).tolist())
-        for initializer in model.graph.initializer
-        if "stream_sizes" in initializer.name
-    }
-    assert resize_nodes
-    assert all(len(node.input) >= 4 and not node.input[2] and node.input[3] in resize_sizes for node in resize_nodes)
-    assert set(resize_sizes.values()) == {(1, 1, 31680), (1, 1, 66)}
+    assert all(node.op_type != "Sin" for node in model.graph.node)
 
 
 def test_workflow_metadata_defaults_to_offline_roles(tmp_path, monkeypatch) -> None:
@@ -807,10 +663,9 @@ def test_workflow_metadata_defaults_to_offline_roles(tmp_path, monkeypatch) -> N
     def fake_export(**kwargs):
         name = kwargs["component_cfg"].get("model_type", "token2wav")
         component_cfg = kwargs["component_cfg"]
-        # Distinguish by structural config keys, not quant_type: the default
-        # config now uses w8a16_sefp for both flow decoder and hift.
+        # Distinguish by structural config keys, not quant_type.
         assert component_cfg["export_mode"] == "offline"
-        roles = ("main",)
+        roles = ("part1", "part2") if "frame_capacity" in component_cfg else ("main",)
         return {
             "graphs": {role: tmp_path / f"{name}_{role}.onnx" for role in roles},
             "stream_contract": {"cache_inputs": ["cache"], "cache_outputs": ["present_cache"]},
@@ -846,7 +701,7 @@ def test_workflow_metadata_defaults_to_offline_roles(tmp_path, monkeypatch) -> N
     meta = json.loads((Path(result.work_dir) / "export_meta_info.json").read_text(encoding="utf-8"))
     assert set(meta["components"]["token2wav_flow_frontend"]["graphs"]) == {"main"}
     assert set(meta["components"]["token2wav_flow_decoder"]["graphs"]) == {"main"}
-    assert set(meta["components"]["token2wav_hift"]["graphs"]) == {"main"}
+    assert set(meta["components"]["token2wav_hift"]["graphs"]) == {"part1", "part2"}
 
 
 def _constant_rooted_expand_model() -> onnx.ModelProto:

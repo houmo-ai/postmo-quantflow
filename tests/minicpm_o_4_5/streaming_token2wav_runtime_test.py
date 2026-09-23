@@ -84,7 +84,6 @@ def _flow_meta() -> dict[str, object]:
 def _hift_meta() -> dict[str, object]:
     return {
         "graphs": {
-            "stream_hift": "hift.onnx",
             "stream_hift_part1": "hift_part1.onnx",
             "stream_hift_part2": "hift_part2.onnx",
         },
@@ -757,7 +756,7 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
         hift_input_counts.append(("part1", len(args)))
         return (
             torch.zeros(1, 80, 10, dtype=torch.float16),
-            torch.zeros(1, 1, 10, dtype=torch.float16),
+            torch.zeros(1, 10, dtype=torch.float16),
         )
 
     def run_hift_part2(*args):
@@ -766,6 +765,7 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
 
     runtime.hift_stream_part1_session = run_hift_part1
     runtime.hift_stream_part2_session = run_hift_part2
+    runtime._host_hift_source = lambda *_args: torch.zeros(1, 1, 10)
 
     runtime_token2wav.install_hmonnx_token2wav(tokenizer, runtime)
     normal = tokenizer.stream([1, 2], last_chunk=False)
@@ -776,7 +776,7 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
     assert runtime.report.full_execution_counts["token2wav_flow_stream"] == 1
     assert runtime.report.full_execution_counts["token2wav_flow_stream_final"] == 1
     assert runtime.report.full_execution_counts["token2wav_hift_stream"] == 2
-    assert hift_input_counts == [("part1", 8), ("part2", 2), ("part1", 8), ("part2", 2)]
+    assert hift_input_counts == [("part1", 4), ("part2", 2), ("part1", 4), ("part2", 2)]
 
 
 def test_top_level_init_bridges_official_prompt_cache_before_stream() -> None:
@@ -1254,28 +1254,28 @@ def test_stream_hift_crops_waveform_and_source_to_logical_combined_mel_length() 
     runtime.stream_hift_phase_noise = torch.zeros(1, 1, dtype=torch.float16)
     runtime.stream_hift_source_noise = torch.zeros(1, 16, 1, dtype=torch.float16)
     runtime._pending_hift_final = False
-    observed: list[tuple[int, int, int]] = []
+    observed: list[tuple[int, int]] = []
 
     def hift_part1_session(*args):
         observed.append(
             (
                 int(args[1].reshape(()).item()),
                 int(args[3].reshape(()).item()),
-                int(args[5].reshape(()).item()),
             )
         )
         return (
             torch.zeros(1, 80, 8, dtype=torch.float16),
-            torch.arange(16, dtype=torch.float16).reshape(1, 1, 16),
+            torch.zeros(1, 8, dtype=torch.float16),
         )
 
     runtime.hift_stream_part1_session = hift_part1_session
     runtime.hift_stream_part2_session = lambda _mel, _stft: torch.arange(16, dtype=torch.float16).reshape(1, 16)
+    runtime._host_hift_source = lambda *_args: torch.arange(16, dtype=torch.float32).reshape(1, 1, 16)
 
     first_wave, first_source = runtime.stream_hift(torch.zeros(1, 80, 3), torch.zeros(1, 1, 0))
     later_wave, later_source = runtime.stream_hift(torch.zeros(1, 80, 5), torch.zeros(1, 1, 4))
 
-    assert observed == [(3, 0, 0), (3, 2, 4)]
+    assert observed == [(3, 0), (3, 2)]
     assert first_wave.shape == (1, 6)
     assert first_source.shape == (1, 1, 6)
     assert later_wave.shape == (1, 10)
@@ -1439,7 +1439,7 @@ def test_streaming_flow_role_feeds_fp16_activations_to_w8a16_graphs() -> None:
     assert observed["estimator_current_valid"] == torch.int32
 
 
-def test_streaming_hift_role_pads_mel_to_capacity_and_feeds_fp16_caches() -> None:
+def test_streaming_hift_role_pads_mel_to_capacity_and_feeds_fp16_graph_inputs() -> None:
     """Exported streaming HiFT is w8a16 with fixed [1, 80, capacity] mel input."""
     runtime = _flow_role_runtime()
     runtime.stream_hift_meta = {
@@ -1461,19 +1461,19 @@ def test_streaming_hift_role_pads_mel_to_capacity_and_feeds_fp16_caches() -> Non
     observed: dict[str, object] = {}
 
     def hift_part1_session(*args):
-        speech_feat, speech_feat_length, past_mel, _mel_len, past_source, _source_len, _phase, _source_noise = args
+        speech_feat, speech_feat_length, past_mel, _mel_len = args
         observed["speech_feat_shape"] = tuple(speech_feat.shape)
         observed["speech_feat_dtype"] = speech_feat.dtype
         observed["speech_feat_valid_length"] = int(speech_feat_length.reshape(-1)[0])
         observed["past_mel_dtype"] = past_mel.dtype
-        observed["past_source_dtype"] = past_source.dtype
         return (
             torch.zeros(1, 80, 14, dtype=torch.float16),
-            torch.zeros(1, 1, 8, dtype=torch.float16),
+            torch.zeros(1, 14, dtype=torch.float16),
         )
 
     runtime.hift_stream_part1_session = hift_part1_session
     runtime.hift_stream_part2_session = lambda _mel, _stft: torch.ones(1, 8, dtype=torch.float16)
+    runtime._host_hift_source = lambda *_args: torch.zeros(1, 1, 8)
 
     runtime._run_hift_role(torch.zeros(1, 80, 2, dtype=torch.float32), final=False)
 
@@ -1481,7 +1481,6 @@ def test_streaming_hift_role_pads_mel_to_capacity_and_feeds_fp16_caches() -> Non
     assert observed["speech_feat_valid_length"] == 2
     assert observed["speech_feat_dtype"] == torch.float16
     assert observed["past_mel_dtype"] == torch.float16
-    assert observed["past_source_dtype"] == torch.float16
 
 
 def test_streaming_hift_role_rejects_final_mel_exceeding_capacity() -> None:
@@ -1524,8 +1523,7 @@ def test_streaming_hift_role_rejects_final_mel_exceeding_capacity() -> None:
 
 
 def test_streaming_hift_role_uses_stream_noise_instead_of_full_noise() -> None:
-    """The streaming HiFT graph expects the per-chunk stream noise, not the full-length
-    non-streaming noise loaded at construction."""
+    """Host source generation uses per-chunk noise, not offline noise."""
     runtime = _flow_role_runtime()
     runtime.stream_hift_meta = {
         "mel_cache_length": 8,
@@ -1551,15 +1549,20 @@ def test_streaming_hift_role_uses_stream_noise_instead_of_full_noise() -> None:
     observed: dict[str, torch.Tensor] = {}
 
     def hift_part1_session(*args):
-        observed["phase_noise"] = args[6]
-        observed["source_noise"] = args[7]
         return (
             torch.zeros(1, 80, 14, dtype=torch.float16),
-            torch.zeros(1, 1, 8, dtype=torch.float16),
+            torch.zeros(1, 14, dtype=torch.float16),
         )
 
     runtime.hift_stream_part1_session = hift_part1_session
     runtime.hift_stream_part2_session = lambda _mel, _stft: torch.ones(1, 8, dtype=torch.float16)
+
+    def host_source(_f0, phase, source):
+        observed["phase_noise"] = phase
+        observed["source_noise"] = source
+        return torch.zeros(1, 1, 8)
+
+    runtime._host_hift_source = host_source
 
     runtime._run_hift_role(torch.zeros(1, 80, 2, dtype=torch.float16), final=False)
 

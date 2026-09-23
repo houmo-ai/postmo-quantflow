@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +21,70 @@ from .export_token2wav import (
 )
 from .export_tts import export_minicpm_o_4_5_tts
 from .export_vision import export_minicpm_o_4_5_vision
-from .golden import dump_real_golden
+from .golden import default_real_request, dump_real_golden
 from .synthetic_golden import dump_synthetic_golden
+
+
+def _golden_graph_name(graph: Path) -> str:
+    stem = graph.stem.removeprefix("hmquant_").removesuffix("_with_act")
+    return f"hmquant_{stem}_with_act.onnx"
+
+
+def promote_real_golden(
+    work_dir: Path,
+    synthetic_meta: Mapping[str, Any],
+    real_meta: Mapping[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(synthetic_meta)
+    real = deepcopy(real_meta)
+    graphs = {
+        _golden_graph_name(work_dir / item["graph"]): (role, work_dir / item["golden_dir"])
+        for role, item in merged["components"].items()
+    }
+    plans: list[tuple[str, str, Path, Path]] = []
+    for session_name, item in real["components"].items():
+        source = work_dir / item["directory"]
+        graph_name = next(source.glob("*.onnx")).name
+        role, target = graphs[graph_name]
+        plans.append((session_name, role, source, target))
+    moved: list[tuple[Path, Path, Path]] = []
+    try:
+        for session_name, role, source, target in plans:
+            backup = target.with_name(target.name + ".synthetic_backup")
+            if backup.exists():
+                raise FileExistsError(backup)
+            target.rename(backup)
+            try:
+                source.rename(target)
+            except Exception:
+                backup.rename(target)
+                raise
+            moved.append((source, target, backup))
+            old_dir = Path(real["components"][session_name]["directory"])
+            new_dir = target.relative_to(work_dir)
+            real["components"][session_name]["directory"] = str(new_dir)
+            real["components"][session_name]["files"] = [
+                str(new_dir / Path(path).relative_to(old_dir)) for path in real["components"][session_name]["files"]
+            ]
+            merged["components"][role]["source"] = "real_first_call" if real["first_step_only"] else "real_capture"
+    except Exception:
+        for source, target, backup in reversed(moved):
+            target.rename(source)
+            backup.rename(target)
+        raise
+
+    for _, _, backup in moved:
+        shutil.rmtree(backup)
+    for item in merged["components"].values():
+        item.setdefault("source", "synthetic")
+    merged["mode"] = "mixed" if len(plans) < len(graphs) else "real"
+    merged["first_step_only"] = bool(real["first_step_only"])
+    merged["real_sample"] = real.get("sample", real.get("streaming_case", "offline_omni_video"))
+    (work_dir / "real_golden_meta_info.json").write_text(json.dumps(real, indent=2, ensure_ascii=False) + "\n")
+    real_root = work_dir / "real_golden"
+    if real_root.is_dir() and not any(real_root.iterdir()):
+        real_root.rmdir()
+    return merged
 
 
 # The w4a8 export path is limited by the xhquant W4 CUDA kernel to
@@ -281,16 +345,19 @@ class MiniCPMO45Workflow(BaseLLMWorkflow):
     def dump_golden(self, export_result: ExportResult, device: str, input_messages: Any = None) -> str:
         work_dir = Path(export_result.work_dir)
         meta = json.loads((work_dir / "export_meta_info.json").read_text(encoding="utf-8"))
-        mode = (
-            "real"
-            if isinstance(input_messages, Mapping)
-            and (input_messages.get("mode") == "real" or "streaming_case" in input_messages)
-            else "synthetic"
-        )
-        if mode == "real":
-            golden_meta = dump_real_golden(work_dir, meta, device, input_messages)
-        else:
+        request = input_messages if isinstance(input_messages, Mapping) else {}
+        if request.get("mode") == "synthetic":
             golden_meta = dump_synthetic_golden(work_dir, meta, device)
+        else:
+            default_request = not any(key in request for key in ("messages", "streaming_case", "duplex_audio_sample"))
+            if default_request:
+                request = default_real_request(meta, request)
+            real_meta = dump_real_golden(work_dir, meta, device, request)
+            real_meta["first_step_only"] = bool(request.get("first_step_only", False))
+            if default_request and not {"tts_prefill", "tts_decode"}.issubset(real_meta["components"]):
+                raise RuntimeError("default real Golden sample did not execute both TTS graphs")
+            synthetic_meta = dump_synthetic_golden(work_dir, meta, device)
+            golden_meta = promote_real_golden(work_dir, synthetic_meta, real_meta)
         golden_file = work_dir / "golden_meta_info.json"
         golden_file.write_text(json.dumps(golden_meta, indent=2), encoding="utf-8")
         return str(golden_file)

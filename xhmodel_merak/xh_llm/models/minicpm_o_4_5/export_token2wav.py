@@ -16,19 +16,17 @@ from torch import Tensor, nn
 from xhquant.api import DeviceType, QuantScheme, convert_onnx_to_hmonnx, create_quant_config
 
 from .minicpmo_token2wav_modules import (
-    DeterministicHiftForwardWrapper,
-    DeterministicHiftPart1Wrapper,
     FlowDecoderWrapper,
     FlowEstimatorStepWrapper,
     FlowFrontendWrapper,
     FlowStreamingFrontendWrapper,
+    HiftF0Wrapper,
     HiftPart2Wrapper,
     _normalize_embedding,
 )
 from .streaming_token2wav import (
     FLOW_CACHE_NAMES,
     HiftStreamPart1Wrapper,
-    HiftStreamWrapper,
 )
 
 
@@ -310,19 +308,6 @@ def make_stream_export_flow(flow: nn.Module, *, cache_capacity: int, append_capa
     return export_flow
 
 
-def create_hift_random_inputs(
-    *,
-    harmonic_count: int,
-    source_length: int,
-    seed: int,
-) -> tuple[Tensor, Tensor]:
-    generator = torch.Generator(device="cpu").manual_seed(seed)
-    phase_noise = torch.rand((1, harmonic_count), generator=generator)
-    phase_noise[:, 0] = 0
-    source_noise = torch.randn((1, source_length, harmonic_count), generator=generator)
-    return phase_noise, source_noise
-
-
 def require_deterministic_onnx(model: onnx.ModelProto) -> None:
     random_operators = sorted({node.op_type for node in model.graph.node if node.op_type in _RANDOM_ONNX_OPERATORS})
     if random_operators:
@@ -396,110 +381,8 @@ def _convert(
     return output_file
 
 
-def prepare_hift_onnx(model: onnx.ModelProto, *, frame_capacity: int) -> onnx.ModelProto:
-    sizes_name = "token2wav_hift_source_sizes"
-    model.graph.initializer.append(
-        numpy_helper.from_array(np.array([1, 9, frame_capacity], dtype=np.int64), name=sizes_name)
-    )
-    for node in model.graph.node:
-        if node.name == "/m_source/l_sin_gen/Resize":
-            while len(node.input) < 4:
-                node.input.append("")
-            node.input[2] = ""
-            node.input[3] = sizes_name
-    return model
-
-
 def prepare_hift_stream_onnx(model: onnx.ModelProto) -> onnx.ModelProto:
-    """Replace scale-based Resize with fixed sizes for the streaming HiFT graphs.
-
-    The stochastic sine generation downscales/upscales by a fractional scale factor
-    ``1/480`` that loses precision in fp16: for the streaming source length 31680 the
-    backend floors the downsampled length to 65 (-> 31200 samples) instead of 66
-    (-> 31680). Pinning each Resize to explicit integer sizes keeps the fixed-shape
-    contract exact so the HMONNX graph runs on the simulator.
-    """
-    infer_model = shape_inference.infer_shapes(model, strict_mode=False, data_prop=True)
-    del model.graph.value_info[:]
-    model.graph.value_info.extend(infer_model.graph.value_info)
-    shapes: dict[str, list[int]] = {}
-    for value in list(infer_model.graph.value_info) + list(infer_model.graph.input):
-        tensor = value.type.tensor_type
-        if tensor.HasField("shape"):
-            shapes[value.name] = [dim.dim_value for dim in tensor.shape.dim]
-    for value in infer_model.graph.output:
-        tensor = value.type.tensor_type
-        if tensor.HasField("shape"):
-            shapes[value.name] = [dim.dim_value for dim in tensor.shape.dim]
-    constants: dict[str, np.ndarray] = {}
-    for initializer in model.graph.initializer:
-        constants[initializer.name] = numpy_helper.to_array(initializer)
-    for node in model.graph.node:
-        if node.op_type == "Constant":
-            for attribute in node.attribute:
-                if attribute.name == "value":
-                    constants[node.output[0]] = numpy_helper.to_array(attribute.t)
-
-    # torch.onnx may leave the intermediate shape of the three HiFT source
-    # Resizes unavailable during the first export pass.  In that case the
-    # scale-to-size rewrite below would silently skip the node, and the
-    # HMONNX frontend can round 30720 samples down to 30240 in fp16.  The
-    # source-noise input gives us the fixed physical length and harmonic
-    # count, so use the known HiFT source path as a deterministic fallback.
-    source_noise = next((value for value in model.graph.input if value.name == "source_noise"), None)
-    source_length = 0
-    harmonic_count = 0
-    if source_noise is not None:
-        dimensions = source_noise.type.tensor_type.shape.dim
-        if len(dimensions) >= 3:
-            source_length = int(dimensions[1].dim_value)
-            harmonic_count = int(dimensions[2].dim_value)
-    for node in model.graph.node:
-        if node.op_type != "Resize" or len(node.input) < 3 or not node.input[2]:
-            continue
-        scales_name = node.input[2]
-        scales = constants.get(scales_name)
-        input_shape = shapes.get(node.input[0])
-        if scales is None:
-            continue
-        scales = scales.reshape(-1)
-        if scales.size != 3:
-            continue
-        # If shape inference cannot provide a fully static input shape, use the
-        # fixed source-noise contract. This covers both the dynamo exporter
-        # (missing intermediate value_info) and legacy exporter graphs whose
-        # inferred dimensions contain zeros/dynamic parameters.
-        if input_shape is None or any(dimension <= 0 for dimension in input_shape):
-            if not source_length or not harmonic_count:
-                continue
-            scale = float(scales[-1])
-            if scale <= 0:
-                continue
-            # The f0 branch starts from a mel-rate tensor and its Resize
-            # scale is 480; its target is the already-fixed source length.
-            # The two source branches, in contrast, use 1/480 then 480.
-            is_f0_resize = "/f0_upsamp/" in node.name or "Unsqueeze" in node.input[0]
-            target = source_length if is_f0_resize or scale > 1.0 else int(round(source_length * scale))
-            if target <= 0:
-                continue
-            channels = 1 if is_f0_resize else harmonic_count
-            sizes = [1, channels, target]
-        else:
-            sizes = []
-            for axis, dimension in enumerate(input_shape):
-                factor = float(scales[axis]) if axis < len(scales) else 1.0
-                target = int(round(dimension * factor))
-                if target <= 0:
-                    break
-                sizes.append(target)
-            if len(sizes) != len(input_shape):
-                continue
-        sizes_name = f"{node.name}_stream_sizes"
-        model.graph.initializer.append(numpy_helper.from_array(np.asarray(sizes, dtype=np.int64), name=sizes_name))
-        while len(node.input) < 4:
-            node.input.append("")
-        node.input[2] = ""
-        node.input[3] = sizes_name
+    """Materialize constant shape inputs in the streaming Mel/F0 graph."""
     constant_values: dict[str, np.ndarray] = {}
     initializer_names = {initializer.name for initializer in model.graph.initializer}
     for initializer in model.graph.initializer:
@@ -626,18 +509,6 @@ def prepare_hift_stream_onnx(model: onnx.ModelProto) -> onnx.ModelProto:
         initializer_names.add(initializer_name)
         constant_values[initializer_name] = array
         node.input[1] = initializer_name
-    if source_noise is not None:
-        dimensions = source_noise.type.tensor_type.shape.dim
-        source_length = int(dimensions[1].dim_value) if len(dimensions) >= 2 else 0
-        if source_length > 0:
-            output_shapes = {"raw_waveform": (1, source_length), "full_source": (1, 1, source_length)}
-            for output in model.graph.output:
-                shape = output_shapes.get(output.name)
-                if shape is None:
-                    continue
-                output.type.tensor_type.shape.ClearField("dim")
-                for size in shape:
-                    output.type.tensor_type.shape.dim.add().dim_value = size
     return model
 
 
@@ -855,37 +726,24 @@ def export_hift(
             "n_fft": int(hift.istft_params["n_fft"]),
             "hop_length": int(hift.istft_params["hop_len"]),
         },
+        "source_generator": {
+            "sampling_rate": int(hift.m_source.l_sin_gen.sampling_rate),
+            "upsample_scale": int(hift.m_source.l_sin_gen.upsample_scale),
+            "sine_amp": float(hift.m_source.l_sin_gen.sine_amp),
+            "noise_std": float(hift.m_source.l_sin_gen.noise_std),
+            "voiced_threshold": float(hift.m_source.l_sin_gen.voiced_threshold),
+            "linear_weight": hift.m_source.l_linear.weight.detach().float().cpu().tolist(),
+            "linear_bias": hift.m_source.l_linear.bias.detach().float().cpu().tolist(),
+        },
     }
     if export_mode == "offline":
-        phase_noise, source_noise = create_hift_random_inputs(
-            harmonic_count=harmonic_count,
-            source_length=source_length,
-            seed=1024,
-        )
-        inputs = (torch.zeros((1, 80, frame_capacity)), phase_noise, source_noise)
-
-        def prepare_offline(model: onnx.ModelProto) -> onnx.ModelProto:
-            model = prepare_hift_onnx(model, frame_capacity=frame_capacity)
-            require_deterministic_onnx(model)
-            return model
-
-        graphs["main"] = _convert(
-            DeterministicHiftForwardWrapper(hift, waveform_length=frame_capacity * 480),
-            inputs,
-            (("speech_feat", "phase_noise", "source_noise"), ("waveform",)),
-            component_dir / f"{name_prefix}token2wav_hift_offline_{target_device}_{quant_type}.onnx",
-            target_device,
-            quant_type,
-            prepare=prepare_offline,
-        )
         graphs["part1"] = _convert(
-            DeterministicHiftPart1Wrapper(hift),
-            inputs,
-            (("speech_feat", "phase_noise", "source_noise"), ("full_source",)),
+            HiftF0Wrapper(hift),
+            (torch.zeros((1, 80, frame_capacity)),),
+            (("speech_feat",), ("f0",)),
             component_dir / f"{name_prefix}token2wav_hift_offline_part1_{target_device}_{quant_type}.onnx",
             target_device,
             quant_type,
-            prepare=prepare_offline,
         )
         stft_frames = frame_capacity * 480 // int(hift.istft_params["hop_len"]) + 1
         graphs["part2"] = _convert(
@@ -904,56 +762,26 @@ def export_hift(
         streaming = config["streaming"]
         stream_frame_capacity = int(streaming["frame_capacity"])
         stream_source_length = (stream_frame_capacity + int(streaming["mel_cache_length"])) * 480
-        stream_phase_noise, stream_source_noise = create_hift_random_inputs(
-            harmonic_count=harmonic_count,
-            source_length=stream_source_length,
-            seed=1024,
-        )
         source_cache_length = int(streaming["source_cache_length"])
         stream_inputs = (
             torch.zeros((1, 80, stream_frame_capacity)),
             torch.tensor([stream_frame_capacity], dtype=torch.int32),
             torch.zeros((1, int(streaming["mel_cache_length"]), 80)).transpose(1, 2),
             torch.tensor([0], dtype=torch.int32),
-            torch.zeros((1, 1, source_cache_length)),
-            torch.tensor([source_cache_length], dtype=torch.int32),
-            stream_phase_noise,
-            stream_source_noise,
         )
         input_names = (
             "speech_feat",
             "speech_feat_valid_length",
             "past_mel",
             "past_mel_valid_length",
-            "past_source",
-            "past_source_valid_length",
-            "phase_noise",
-            "source_noise",
-        )
-        output_names = ("raw_waveform", "full_source")
-        graphs["stream_hift"] = _convert(
-            HiftStreamWrapper(
-                hift,
-                source_cache_length=source_cache_length,
-                mel_cache_length=int(streaming["mel_cache_length"]),
-                waveform_length=stream_source_length,
-            ),
-            stream_inputs,
-            (input_names, output_names),
-            component_dir / f"{name_prefix}token2wav_hift_stream_{target_device}_{quant_type}.onnx",
-            target_device,
-            quant_type,
-            prepare=prepare_hift_stream_onnx,
         )
         graphs["stream_hift_part1"] = _convert(
             HiftStreamPart1Wrapper(
                 hift,
-                source_cache_length=source_cache_length,
                 mel_cache_length=int(streaming["mel_cache_length"]),
-                waveform_length=stream_source_length,
             ),
             stream_inputs,
-            (input_names, ("prepared_speech_feat", "full_source")),
+            (input_names, ("prepared_speech_feat", "f0")),
             component_dir / f"{name_prefix}token2wav_hift_stream_part1_{target_device}_{quant_type}.onnx",
             target_device,
             quant_type,

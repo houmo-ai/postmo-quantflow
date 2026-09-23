@@ -233,25 +233,10 @@ class _SiglipVisionEmbeddings(DynamicRegister):
 )
 class _Resampler(DynamicRegister):
     def _setup(self, cfg: Optional[Dict] = None):
-        self.image_slice_max_size = cfg.image_slice_max_size
-        self._adjust_pos_cache(torch.tensor([self.image_slice_max_size]), "cpu")
+        pass
 
-    def _adjust_pos_cache(self, tgt_sizes, device):
-        max_h = torch.max(tgt_sizes[:, 0])
-        max_w = torch.max(tgt_sizes[:, 1])
-        if max_h > self.max_size[0] or max_w > self.max_size[1]:
-            self.max_size = [max(max_h, self.max_size[0]), max(max_w, self.max_size[1])]
-            self._set_2d_pos_cache(self.max_size, device)
-
-    def forward(self, x: torch.Tensor, tgt_sizes: torch.Tensor):
+    def forward(self, x: torch.Tensor, resampler_pos_embed: torch.Tensor, key_padding_mask: torch.Tensor):
         bs = 1
-        dtype = x.dtype
-
-        max_h, max_w = self.image_slice_max_size
-        max_patch_len = int(max_h * max_w)
-
-        base_pos_embed = self.pos_embed[:max_h, :max_w, :].reshape((max_patch_len, -1)).to(dtype)
-        pos_embed = base_pos_embed.unsqueeze(1)
 
         x = self.kv_proj(x)  # B * L * D
         x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
@@ -261,8 +246,9 @@ class _Resampler(DynamicRegister):
         q = self.ln_q(self.query)
         out = self.attn(
             self._repeat(q, bs),
-            x + pos_embed,  # L * B * D +  L * B * D
+            x + resampler_pos_embed,  # L * B * D +  L * B * D
             x,
+            key_padding_mask=key_padding_mask,
         )[0]
         #  out: Q * B * D
         x = out.permute(1, 0, 2)  # B * Q * D
@@ -795,7 +781,8 @@ class _SiglipVisionTransformer(DynamicRegister):
         pixel_values,
         position_ids: Optional[torch.IntTensor] = None,
         attention_mask: Optional[torch.BoolTensor] = None,
-        tgt_sizes: Optional[torch.IntTensor] = None,
+        resampler_pos_embed: Optional[torch.FloatTensor] = None,
+        resampler_key_padding_mask: Optional[torch.FloatTensor] = None,
         # output_attentions: Optional[bool] = None,
         # output_hidden_states: Optional[bool] = None,
         # return_dict: Optional[bool] = None,
@@ -847,7 +834,11 @@ class _SiglipVisionTransformer(DynamicRegister):
 
         last_hidden_state = encoder_outputs[0]
         last_hidden_state = self.post_layernorm(last_hidden_state)
-        last_hidden_state = self.resampler(last_hidden_state, tgt_sizes)
+        last_hidden_state = self.resampler(
+            last_hidden_state,
+            resampler_pos_embed,
+            resampler_key_padding_mask,
+        )
         # if not return_dict:
         #     return (last_hidden_state, None) + encoder_outputs[1:]
 

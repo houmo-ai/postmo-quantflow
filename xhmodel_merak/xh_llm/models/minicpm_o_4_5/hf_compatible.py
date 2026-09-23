@@ -14,7 +14,12 @@ from transformers.cache_utils import Cache, StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPooling, CausalLMOutputWithPast, ModelOutput
 
 
-def _official_tts_gen_logits(num_code: int, repetition_penalty: float):
+def _official_tts_gen_logits(
+    num_code: int,
+    repetition_penalty: float,
+    top_p: float | None = 0.7,
+    top_k: int | None = 20,
+):
     import sys
 
     gen_logits = None
@@ -26,7 +31,7 @@ def _official_tts_gen_logits(num_code: int, repetition_penalty: float):
                 break
     if gen_logits is None:
         raise RuntimeError("official TTS sampling integration unavailable")
-    return gen_logits(num_code=num_code, repetition_penalty=repetition_penalty)
+    return gen_logits(num_code=num_code, repetition_penalty=repetition_penalty, top_p=top_p, top_k=top_k)
 
 
 def patch_tts_streaming_generator_cache_compat(generator_cls) -> None:
@@ -118,7 +123,7 @@ def extract_tts_decode_alignment(outputs, tts_bound, tts_proj_layer):
         full_sequences = outputs["full_sequences"]
     full_sequence = full_sequences[0]
     decode_hidden_states = outputs.hidden_states[1:]
-    input_ids_length = len(full_sequence) - len(decode_hidden_states)
+    input_ids_length = len(full_sequence) - len(outputs.hidden_states)
     start = max(int(tts_bound[0]), input_ids_length)
     end = len(full_sequence) if tts_bound[1] is None else int(tts_bound[1])
     decode_start = start - input_ids_length
@@ -1001,7 +1006,7 @@ def create_tts_model_wraped_cls(cls):
             streaming_tts_text_mask=None,
             force_no_stop=False,
             min_new_token=10,
-            max_new_token=50,
+            max_new_token=None,
             logits_warpers=None,
             logits_processors=None,
             show_tqdm=False,
@@ -1016,12 +1021,13 @@ def create_tts_model_wraped_cls(cls):
                     inputs_embeds=inputs_embeds,
                     eos_token=eos_token,
                     force_no_stop=force_no_stop,
-                    max_new_token=max_new_token,
+                    max_new_token=2048 if max_new_token is None else max_new_token,
                     sampling_params=sampling_params,
                     show_tqdm=show_tqdm,
                     **kwargs,
                 )
 
+            max_new_token = 50 if max_new_token is None else max_new_token
             if logits_warpers is None:
                 logits_warpers = []
             if logits_processors is None:
@@ -1281,6 +1287,8 @@ def create_tts_model_wraped_cls(cls):
             logits_warpers, logits_processors = _official_tts_gen_logits(
                 self.config.num_audio_tokens,
                 _rep_penalty,
+                top_p=_top_p,
+                top_k=_top_k,
             )
 
             assert inputs_embeds.shape[0] == 1

@@ -158,7 +158,7 @@ class _LlamaAttention(DynamicModule):
 
         attn_weights = torch.matmul(query_states, key_states)
 
-        attn_weights = attn_weights + attention_mask
+        attn_weights = self.masked_add(attn_weights, attention_mask)
         attn_weights: Optional[Tensor] = torch.softmax(attn_weights, dim=-1)
 
         value_states = torch.repeat_interleave(
@@ -199,6 +199,7 @@ class _LlamaAttention(DynamicModule):
         self.enable_rope = cfg.get("enable_rope", True)
         if self.enable_rope:
             self.rope = xhnn.Rope()
+        self.masked_add = xhnn.MaskedAdd()
 
         self.slice_1 = xhnn.Slice([0], [self.head_dim // 2], [3], [1])
         self.slice_2 = xhnn.Slice([self.head_dim // 2], [sys.maxsize], [3], [1])

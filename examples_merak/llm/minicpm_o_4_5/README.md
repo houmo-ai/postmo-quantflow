@@ -136,14 +136,15 @@ PYTHONPATH=$PWD python \
 
 ## Golden
 
-Workflow 支持 `synthetic` 和 `real` 两种 Golden。`synthetic` 逐图检查固定输入输出契约；
-`real` 使用真实视频请求记录实际执行到的图。例如：
+`--dump-golden` 默认使用真实样本记录运行图，并用合成输入补齐未执行的参考图。
+`offline` 使用模型 assets 中的视频，`session` 使用同一视频的音频，`stream` 使用
+默认双工音频样本；可分别用 `--golden-video` 或 `--golden-audio` 覆盖。
+仅需逐图合成 Golden 时使用 `--golden-mode synthetic`。
 
 ```bash
 PYTHONPATH=$PWD python \
   examples_merak/llm/minicpm_o_4_5/minicpm_o_4_5_workflow.py \
   --model-dir /path/to/MiniCPM-o-4_5 \
   --device cuda:0 \
-  --dump-golden \
-  --golden-mode synthetic
+  --dump-golden
 ```

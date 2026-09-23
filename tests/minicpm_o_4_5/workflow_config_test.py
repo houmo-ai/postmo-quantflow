@@ -580,6 +580,8 @@ def test_dump_golden_routes_streaming_case_to_real_capture(tmp_path, monkeypatch
         "dump_real_golden",
         lambda root, meta, device, request: calls.extend([root, meta, device, request]) or {"mode": "real"},
     )
+    monkeypatch.setattr(workflow_module, "dump_synthetic_golden", lambda root, meta, device: {"mode": "synthetic"})
+    monkeypatch.setattr(workflow_module, "promote_real_golden", lambda root, synthetic, real: real)
 
     output = workflow.dump_golden(
         ExportResult(work_dir=str(work_dir), config_file=str(work_dir / "effective.yaml")),
@@ -599,7 +601,7 @@ def test_dump_synthetic_golden_writes_each_component_input_and_output(tmp_path, 
         "components": {
             "vision": {"graphs": {"main": "vision/model.onnx"}},
             "token2wav_hift": {
-                "graphs": {"main": "token2wav_hift/model.onnx"},
+                "graphs": {"part1": "token2wav_hift/part1.onnx"},
                 "frame_capacity": 4,
                 "harmonic_count": 9,
                 "source_length": 1920,
@@ -628,7 +630,7 @@ def test_dump_synthetic_golden_writes_each_component_input_and_output(tmp_path, 
     monkeypatch.setattr(golden_module, "HMONNXGoldenInference", Session)
     golden = golden_module.dump_synthetic_golden(tmp_path, meta, "cpu")
 
-    assert set(golden["components"]) == {"vision_main", "token2wav_hift_main"}
+    assert set(golden["components"]) == {"vision_main", "token2wav_hift_part1"}
     for component in golden["components"].values():
         assert (tmp_path / component["golden_dir"]).is_dir()
 
@@ -694,6 +696,8 @@ def test_synthetic_golden_inputs_match_exported_vision_and_llm_shapes(tmp_path) 
     )
 
     assert vision[0].shape == (1, 3, 14, 22400)
+    assert vision[3].shape == (1600, 1, 4096)
+    assert vision[4].shape == (1, 1600)
     assert llm[0].shape == (1, 256, 4096)
     assert len(llm) == 3 + 2 * 36
 
@@ -716,6 +720,8 @@ def test_dump_golden_real_mode_delegates_to_real_capture(tmp_path, monkeypatch) 
         lambda root, meta, device, messages: observed.extend([root, meta, device, messages]) or {"mode": "real"},
         raising=False,
     )
+    monkeypatch.setattr(workflow_module, "dump_synthetic_golden", lambda root, meta, device: {"mode": "synthetic"})
+    monkeypatch.setattr(workflow_module, "promote_real_golden", lambda root, synthetic, real: real)
     output = workflow.dump_golden(
         ExportResult(work_dir=str(work_dir), config_file=str(work_dir / "effective.yaml")),
         device="cpu",

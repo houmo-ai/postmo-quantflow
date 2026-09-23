@@ -62,11 +62,24 @@ def deterministic_hift_source(
     return sine_waves, uv
 
 
+class _MaskPaddedFlowEmbed(torch.nn.Module):
+    def __init__(self, embed: torch.nn.Module):
+        super().__init__()
+        self.embed = embed
+
+    def forward(self, hidden: torch.Tensor, mask: torch.Tensor):
+        hidden, pos_emb, mask = self.embed(hidden, mask)
+        return hidden * mask.transpose(1, 2), pos_emb, mask
+
+
 class FlowFrontendWrapper(torch.nn.Module):
     def __init__(self, flow_module: torch.nn.Module, mel_capacity: int):
         super().__init__()
         self.flow = flow_module
         self.mel_capacity = int(mel_capacity)
+        # Static padding must remain zero after the encoder's biased embedding,
+        # before its lookahead convolution reads the padded right context.
+        self.flow.encoder.embed = _MaskPaddedFlowEmbed(self.flow.encoder.embed)
 
     def forward(
         self,
@@ -136,10 +149,7 @@ class FlowStreamingFrontendWrapper(torch.nn.Module):
             spks,
             present_cnn,
             present_att,
-            (
-                conformer_cache_valid_length.reshape(()).to(torch.int32)
-                + current_mel_valid_length.reshape(()).to(torch.int32)
-            ).reshape(1),
+            (conformer_cache_valid_length.to(torch.int32) + current_mel_valid_length.to(torch.int32)).reshape(1),
         )
 
     @staticmethod
@@ -153,8 +163,8 @@ class FlowStreamingFrontendWrapper(torch.nn.Module):
     ) -> torch.Tensor:
         cache_positions = torch.arange(cache_capacity, device=device)
         current_positions = torch.arange(current_capacity, device=device)
-        cache_valid = cache_positions >= cache_capacity - cache_valid_length.reshape(()).to(torch.int64)
-        current_valid = current_positions < current_valid_length.reshape(()).to(torch.int64)
+        cache_valid = cache_positions >= cache_capacity - cache_valid_length.to(torch.int64)
+        current_valid = current_positions < current_valid_length.to(torch.int64)
         return torch.cat((cache_valid, current_valid)).reshape(1, 1, cache_capacity + current_capacity)
 
     def _forward_fixed_cache_encoder(
@@ -191,10 +201,10 @@ class FlowStreamingFrontendWrapper(torch.nn.Module):
         present_base_cnn = normal_base_cnn + base_cache_control * (final_base_cnn - normal_base_cnn)
 
         base_current_capacity = hidden.shape[1]
-        token_valid = token_valid_length.reshape(()).to(torch.int32)
-        is_final = last_chunk.reshape(()).to(torch.int32)
+        token_valid = token_valid_length.to(torch.int32)
+        is_final = last_chunk.to(torch.int32)
         base_current_valid = token_valid - pre_lookahead + is_final * pre_lookahead
-        base_cache_valid = cache_valid_length.reshape(()).to(torch.int32) // int(encoder.up_layer.stride)
+        base_cache_valid = cache_valid_length.to(torch.int32) // int(encoder.up_layer.stride)
         base_mask = self._attention_mask(
             cache_capacity=cache_half_capacity,
             cache_valid_length=base_cache_valid,
@@ -289,8 +299,8 @@ class FlowEstimatorStepWrapper(torch.nn.Module):
         cache_capacity = att_cache.shape[3]
         current_positions = torch.arange(current_capacity, device=hidden.device)
         cache_positions = torch.arange(cache_capacity, device=hidden.device)
-        current_valid = current_positions < current_frame_valid_length.reshape(()).to(torch.int64)
-        cache_valid = cache_positions >= cache_capacity - past_cache_valid_length.reshape(()).to(torch.int64)
+        current_valid = current_positions < current_frame_valid_length.to(torch.int64)
+        cache_valid = cache_positions >= cache_capacity - past_cache_valid_length.to(torch.int64)
         key_mask = torch.cat((current_valid, cache_valid))
         attention_mask = key_mask.reshape(1, 1, -1).expand(hidden.shape[0], current_capacity, -1)
         new_cnn: list[torch.Tensor] = []
@@ -329,11 +339,7 @@ class FlowEstimatorStepWrapper(torch.nn.Module):
         current_frame_valid_length: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         cache1, cache2 = cnn_cache.split((conv.in_channels, conv.out_channels), dim=1)
-        indices = (
-            torch.arange(2, device=x.device, dtype=torch.int64)
-            + current_frame_valid_length.reshape(()).to(torch.int64)
-            - 2
-        )
+        indices = torch.arange(2, device=x.device, dtype=torch.int64) + current_frame_valid_length.to(torch.int64) - 2
         first_input = conv.block[0](x)
         first_output, _ = conv.block[1].forward_chunk(first_input, cache1)
         present_cache1 = torch.index_select(first_input, 2, indices)
@@ -423,7 +429,7 @@ class FlowEstimatorStepWrapper(torch.nn.Module):
 
 
 class HiftForwardWrapper(torch.nn.Module):
-    """Complete reference graph; runtime uses part1 -> CPU STFT -> part2."""
+    """HiFT decoder operations used by the part2 graph."""
 
     def __init__(self, hift_module: torch.nn.Module, waveform_length: int | None = None):
         super().__init__()
@@ -448,9 +454,6 @@ class HiftForwardWrapper(torch.nn.Module):
         self.register_buffer("istft_window", self.hift.stft_window.detach().float())
         self.register_buffer("istft_window_sq", self.hift.stft_window.detach().float().pow(2))
         self.register_buffer("overlap_add_kernel", overlap_kernel)
-        stft_window = self.hift.stft_window.detach().float().reshape(1, 1, self.n_fft)
-        self.register_buffer("stft_cos_kernel", torch.cos(angle).unsqueeze(1) * stft_window)
-        self.register_buffer("stft_sin_kernel", -torch.sin(angle).unsqueeze(1) * stft_window)
         if waveform_length is None:
             self.istft_envelope = None
         else:
@@ -459,24 +462,6 @@ class HiftForwardWrapper(torch.nn.Module):
             envelope = F.conv_transpose1d(envelope_frames, overlap_kernel, stride=self.hop_len)
             pad = self.n_fft // 2
             self.register_buffer("istft_envelope", envelope[:, :, pad:-pad].clamp_min(1e-8))
-
-    def _exportable_stft(self, x: torch.Tensor):
-        pad = self.n_fft // 2
-        source = x.unsqueeze(1)
-        left = torch.flip(source[:, :, 1 : pad + 1], dims=(-1,))
-        right = torch.flip(source[:, :, -pad - 1 : -1], dims=(-1,))
-        padded = torch.cat((left, source, right), dim=-1)
-        real = F.conv1d(
-            padded,
-            self.stft_cos_kernel.to(device=x.device, dtype=x.dtype),
-            stride=self.hop_len,
-        )
-        imag = F.conv1d(
-            padded,
-            self.stft_sin_kernel.to(device=x.device, dtype=x.dtype),
-            stride=self.hop_len,
-        )
-        return real, imag
 
     def _exportable_istft(self, magnitude: torch.Tensor, phase: torch.Tensor):
         magnitude = torch.clip(magnitude, max=1e2)
@@ -538,80 +523,13 @@ class HiftForwardWrapper(torch.nn.Module):
         waveform = self._exportable_istft(magnitude, phase)
         return torch.clamp(waveform, -self.hift.audio_limit, self.hift.audio_limit)
 
-    def forward(self, speech_feat: torch.Tensor, cache_source: torch.Tensor) -> torch.Tensor:
-        original_stft = getattr(self.hift, "_stft", None)
-        original_istft = getattr(self.hift, "_istft", None)
-        self.hift._stft = self._exportable_stft
-        self.hift._istft = self._exportable_istft
-        try:
-            wav, _ = self.hift.forward(speech_feat=speech_feat, cache_source=cache_source)
-        finally:
-            if original_stft is not None:
-                self.hift._stft = original_stft
-            if original_istft is not None:
-                self.hift._istft = original_istft
-        return wav
-
-
-class DeterministicHiftForwardWrapper(HiftForwardWrapper):
-    def forward(
-        self,
-        speech_feat: torch.Tensor,
-        phase_noise: torch.Tensor,
-        source_noise: torch.Tensor,
-    ) -> torch.Tensor:
-        f0 = self.hift.f0_predictor(speech_feat)
-        f0 = self.hift.f0_upsamp(f0[:, None]).transpose(1, 2)
-        sine_generator = self.hift.m_source.l_sin_gen
-        sine_waves, _ = deterministic_hift_source(
-            f0,
-            phase_noise,
-            source_noise,
-            sampling_rate=int(sine_generator.sampling_rate),
-            upsample_scale=int(sine_generator.upsample_scale),
-            sine_amp=float(sine_generator.sine_amp),
-            noise_std=float(sine_generator.noise_std),
-            voiced_threshold=float(sine_generator.voiced_threshold),
-        )
-        source = self.hift.m_source.l_tanh(self.hift.m_source.l_linear(sine_waves)).transpose(1, 2)
-        original_stft = getattr(self.hift, "_stft", None)
-        original_istft = getattr(self.hift, "_istft", None)
-        self.hift._stft = self._exportable_stft
-        self.hift._istft = self._exportable_istft
-        try:
-            return self.hift.decode(x=speech_feat, s=source)
-        finally:
-            if original_stft is not None:
-                self.hift._stft = original_stft
-            if original_istft is not None:
-                self.hift._istft = original_istft
-
-
-class DeterministicHiftPart1Wrapper(torch.nn.Module):
+class HiftF0Wrapper(torch.nn.Module):
     def __init__(self, hift_module: torch.nn.Module):
         super().__init__()
         self.hift = hift_module
 
-    def forward(
-        self,
-        speech_feat: torch.Tensor,
-        phase_noise: torch.Tensor,
-        source_noise: torch.Tensor,
-    ) -> torch.Tensor:
-        f0 = self.hift.f0_predictor(speech_feat)
-        f0 = self.hift.f0_upsamp(f0[:, None]).transpose(1, 2)
-        sine_generator = self.hift.m_source.l_sin_gen
-        sine_waves, _ = deterministic_hift_source(
-            f0,
-            phase_noise,
-            source_noise,
-            sampling_rate=int(sine_generator.sampling_rate),
-            upsample_scale=int(sine_generator.upsample_scale),
-            sine_amp=float(sine_generator.sine_amp),
-            noise_std=float(sine_generator.noise_std),
-            voiced_threshold=float(sine_generator.voiced_threshold),
-        )
-        return self.hift.m_source.l_tanh(self.hift.m_source.l_linear(sine_waves)).transpose(1, 2)
+    def forward(self, speech_feat: torch.Tensor) -> torch.Tensor:
+        return self.hift.f0_predictor(speech_feat)
 
 
 class HiftPart2Wrapper(HiftForwardWrapper):

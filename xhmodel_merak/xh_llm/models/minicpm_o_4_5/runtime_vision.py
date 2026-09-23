@@ -9,6 +9,7 @@ import torch
 from torch import Tensor
 
 from ...hmonnx.hmonnx_model import HMONNXModel
+from .minicpmo_vision_model import build_resampler_pos_embed, build_resampler_pos_embed_cache
 
 
 TensorSession = Callable[..., Tensor | Sequence[Tensor]]
@@ -71,7 +72,8 @@ def run_vision_slices(
     pixel_values: Tensor,
     position_ids: Tensor,
     attention_mask: Tensor,
-    target_sizes: Tensor,
+    resampler_pos_embed: Tensor,
+    resampler_key_padding_mask: Tensor,
 ) -> Tensor:
     outputs = [
         torch.as_tensor(
@@ -79,7 +81,8 @@ def run_vision_slices(
                 pixel_values[index : index + 1],
                 position_ids[index : index + 1].to(torch.int32),
                 attention_mask[index : index + 1],
-                target_sizes[index : index + 1].to(torch.int32),
+                resampler_pos_embed[:, index : index + 1],
+                resampler_key_padding_mask[index : index + 1],
             )
         )
         for index in range(pixel_values.shape[0])
@@ -101,6 +104,7 @@ class MiniCPMO45VisionHMONNXRuntime(HMONNXModel):
     ) -> None:
         self.graph = graph
         self.input_shapes = _input_shapes(graph)
+        self._resampler_pos_embed_cache: Tensor | None = None
         super().__init__(
             str(graph),
             enable_cuda_graph=enable_cuda_graph,
@@ -127,7 +131,35 @@ class MiniCPMO45VisionHMONNXRuntime(HMONNXModel):
     ) -> Tensor:
         # The per-slice loop is a MiniCPM graph-shape constraint.  Graph
         # ownership and device/golden/fast behaviour remain in HMONNXModel.
-        return run_vision_slices(super().forward, pixel_values, position_ids, attention_mask, target_sizes)
+        if self._resampler_pos_embed_cache is None:
+            self._resampler_pos_embed_cache = build_resampler_pos_embed_cache(self.input_shapes[3][-1], 70)
+        patch_capacity = self.input_shapes[3][0]
+        resampler_pos_embed = torch.cat(
+            [
+                build_resampler_pos_embed(
+                    (int(height), int(width)),
+                    patch_capacity,
+                    self._resampler_pos_embed_cache,
+                    pixel_values.dtype,
+                    device=pixel_values.device,
+                )
+                for height, width in target_sizes.tolist()
+            ],
+            dim=0,
+        ).permute(1, 0, 2)
+        resampler_key_padding_mask = torch.zeros(
+            (len(target_sizes), patch_capacity), dtype=pixel_values.dtype, device=pixel_values.device
+        )
+        for index, (height, width) in enumerate(target_sizes.tolist()):
+            resampler_key_padding_mask[index, int(height) * int(width) :] = -65504
+        return run_vision_slices(
+            super().forward,
+            pixel_values,
+            position_ids,
+            attention_mask,
+            resampler_pos_embed,
+            resampler_key_padding_mask,
+        )
 
 
 __all__ = ["MiniCPMO45VisionHMONNXRuntime", "prepare_vision_inputs", "run_vision_slices"]
