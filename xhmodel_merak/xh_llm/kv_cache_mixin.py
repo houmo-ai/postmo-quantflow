@@ -4,7 +4,7 @@ from typing import Generator
 import torch
 from torch import Tensor
 
-from xhquant.core import CacheTensor
+from xhmodel_merak.exec_backends import CacheTensor
 
 from .types import CacheList, KVCacheConfig, KVCacheWithLinearConfig
 
@@ -47,9 +47,10 @@ class KVCacheMixin:
         else:
             k_cache_shape = kv_cache_shape
             v_cache_shape = kv_cache_shape
+        cache_dtype = self.kvcache_config.cache_torch_dtype
         for _i in range(num_decoder_layers):
-            self.past_key_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(k_cache_shape, dtype=torch.float16)))
-            self.past_value_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(v_cache_shape, dtype=torch.float16)))
+            self.past_key_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(k_cache_shape, dtype=cache_dtype)))
+            self.past_value_caches.append(self.CACHCE_TENSOR_TYPE(torch.zeros(v_cache_shape, dtype=cache_dtype)))
         self._cache_initialized = True
 
     def clear_kv_cache(self):

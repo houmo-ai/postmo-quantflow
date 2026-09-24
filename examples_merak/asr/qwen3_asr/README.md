@@ -130,6 +130,31 @@ python examples_merak/asr/qwen3_asr/hmonnx_demo_chunk_prefix.py \
 
 `hmonnx_demo_chunk_prefix.py` 会基于累计音频重复推理，并在后续片段注入已识别文本作为 prefix。使用该模式时，导出时需要设置更大的 `max-audio-length` 和足够的 `prefix-token-budget`。
 
+## TCIM/HMM 推理
+
+HMM 与 HMONNX 不在同一目录时，先生成独立的 runtime metadata；该命令不创建软链接，也不修改
+原始 `export_meta_info.json`：
+
+```bash
+PYTHONPATH=$PWD python -m xhmodel_merak.exec_backends.link_hmm \
+  --hmm_path <compiled_hmm_dir> \
+  --hmonnx_path work_dirs/qwen3_asr_export \
+  --source-meta export_meta_info.json
+```
+
+然后仅通过 backend 环境变量和 `--config` 切换运行路径：
+
+```bash
+XHMODEL_INFERENCE_BACKEND=tcim PYTHONPATH=$PWD \
+python examples_merak/asr/qwen3_asr/hmonnx_demo.py \
+  --config work_dirs/qwen3_asr_export/hmm_meta_info.json \
+  --audio <audio_file>
+```
+
+未显式传 `--cache-len` 时，demo 使用 `hmm_meta_info.json` 中由 HMM 输入 ABI 更新后的 cache
+维度。TCIM runtime 要求 metadata 中模型路径明确指向 `.hmm`/`.hmms`，不会在运行时猜测或替换
+HMONNX 路径。
+
 ## Golden
 
 golden 生成与 quant/export 分离，由 workflow 的 `dump_golden(export_result, device)` 接口完成。需要同时导出并生成 golden 时，在 workflow 脚本中加入 `--dump-golden`：

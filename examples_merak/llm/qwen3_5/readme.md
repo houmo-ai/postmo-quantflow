@@ -316,6 +316,30 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_gener
   --use-v2
 ```
 
+首版 TCIM 适配用于 Qwen3.5-9B 普通 prefill/decode 与 visual gears，不包含 MTP、DFlash 或
+其他 speculative 路径。先用已编译 HMM 生成独立 metadata：
+
+```bash
+PYTHONPATH=$PWD python -m xhmodel_merak.exec_backends.link_hmm \
+  --hmm_path <qwen3_5_9b_compiled_hmm_dir> \
+  --hmonnx_path <directory_containing_golden_meta_info.json>
+```
+
+再使用同一个示例入口，显式传 HMM metadata：
+
+```bash
+XHMODEL_INFERENCE_BACKEND=tcim PYTHONPATH=$PWD \
+python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
+  --config <directory_containing_golden_meta_info.json>/hmm_meta_info.json \
+  --prompt "用中文介绍一下北京。" \
+  --no-sample \
+  --max-new-tokens 128
+```
+
+TCIM 不在运行时搜索或替换 ONNX/HMONNX 路径；`hmm_meta_info.json` 中 prefill、decode 和
+每个 `visual_m*` 必须明确指向 `.hmm`/`.hmms`。CUDA Graph、auto-offload 和 fast mode
+选项不会改变已经编译的 HMM；`--golden` 在 TCIM 后端明确不支持。
+
 `--dump-golden` 保存对齐用的中间结果，`--quick-test` 检查导出后的运行链路；
 两者都不能代替 PPL 和任务精度评测。视觉模型还需用真实图片跑端到端验证。
 `--dump-golden` 先为五档视觉图分别生成 `visual_m*/step_0`，再用真实图片

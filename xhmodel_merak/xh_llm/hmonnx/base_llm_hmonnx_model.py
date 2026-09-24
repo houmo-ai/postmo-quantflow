@@ -11,12 +11,12 @@ from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig, Ba
 from xhquant.api import get_xhquant_logger
 from xhquant.core.hmfp_kv_cache import HMFPPagedKVCache
 from xhquant.xhonnxruntime.convert_to_page_attention import convert_to_page_attention
-from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceV2
 from xhquant.xhonnxruntime.hmonnx_optimizer import (
     materialize_parallel_linear_fusion,
 )
-from xhquant.xhonnxruntime.llm_hmonnx_loader import LLMHMONNXLoader
 from xhquant.xhonnxruntime.parsers import PageAttention, PageAttentionContext
+
+from xhmodel_merak.exec_backends import HMONNXInferenceV2, LLMHMONNXLoader, get_inference_backend
 
 from ..base_llm_model import BaseLLMModel, XHLLMModelProcessor
 from ..kv_cache_mixin import KVCacheMixin
@@ -56,13 +56,21 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             str(getattr(meta, "attention_lowering", ""))
             == "full_flash_attention"
         )
-        prefill_hmonnx, decode_hmonnx = self._prepare_hmonnx_paths(
-            meta.prefill_hmonnx,
-            meta.decode_hmonnx,
-            enable_parallel_linear_fusion=enable_parallel_linear_fusion,
-            enable_page_attention=enable_page_attention,
-            convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
-        )
+        if get_inference_backend() == "tcim":
+            if enable_parallel_linear_fusion or enable_page_attention:
+                raise NotImplementedError(
+                    "TCIM requires HMMs compiled with the requested graph ABI; "
+                    "runtime HMONNX graph conversion is unsupported"
+                )
+            prefill_hmonnx, decode_hmonnx = str(meta.prefill_hmonnx), str(meta.decode_hmonnx)
+        else:
+            prefill_hmonnx, decode_hmonnx = self._prepare_hmonnx_paths(
+                meta.prefill_hmonnx,
+                meta.decode_hmonnx,
+                enable_parallel_linear_fusion=enable_parallel_linear_fusion,
+                enable_page_attention=enable_page_attention,
+                convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
+            )
         llm_loader = LLMHMONNXLoader(prefill_hmonnx, decode_hmonnx)
         prefill_graph = llm_loader.prefill_graph
         decode_graph = llm_loader.decode_graph

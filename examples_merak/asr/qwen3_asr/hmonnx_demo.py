@@ -19,10 +19,31 @@ def _first_tensor(output):
     return output
 
 
-def _load_artifacts(work_dir: Path) -> dict:
-    meta_path = work_dir / "export_meta_info.json"
+def _resolve_cache_len(meta: dict, override: int | None) -> int:
+    if override is not None:
+        return int(override)
+    kv_cache = meta.get("kv_cache") if isinstance(meta.get("kv_cache"), dict) else {}
+    shape = kv_cache.get("shape", meta.get("kv_cache_shape"))
+    if isinstance(shape, list) and shape and isinstance(shape[0], list):
+        shape = shape[0]
+    axis = int(kv_cache.get("cache_axis", 2))
+    if not isinstance(shape, list) or len(shape) <= axis:
+        raise ValueError("metadata must provide kv_cache_shape or kv_cache.shape when --cache-len is omitted")
+    return int(shape[axis])
+
+
+def _resolve_embedding_file(meta: dict) -> str:
+    embedding_file = meta.get("token_embedding_file") or meta.get("quant_embedding")
+    if not embedding_file:
+        raise ValueError("metadata must provide token_embedding_file or quant_embedding")
+    return str(embedding_file)
+
+
+def _load_artifacts(config_or_dir: Path) -> dict:
+    meta_path = config_or_dir if config_or_dir.is_file() else config_or_dir / "export_meta_info.json"
     if not meta_path.is_file():
         raise FileNotFoundError(meta_path)
+    work_dir = meta_path.parent
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     return {
         "meta": meta,
@@ -30,7 +51,7 @@ def _load_artifacts(work_dir: Path) -> dict:
         "prefill": work_dir / meta["prefill_onnx_file"],
         "decode": work_dir / meta["decode_onnx_file"],
         "config": work_dir / meta["hf_config"],
-        "embedding": work_dir / meta["token_embedding_file"],
+        "embedding": work_dir / _resolve_embedding_file(meta),
     }
 
 
@@ -41,24 +62,23 @@ class HMONNXQwen3ASRChunkRunner:
         work_dir: Path,
         device: str | None,
         max_audio_length: int | None,
-        cache_len: int,
+        cache_len: int | None,
         max_new_tokens: int,
     ):
         import torch
         import torch.nn as nn
         from qwen_asr.core.transformers_backend import Qwen3ASRProcessor
         from transformers import AutoConfig, AutoTokenizer
-        from xhquant.api import HMONNXInference as InferenceEngine
-        from xhquant.core import CacheTensor
+        from xhmodel_merak.exec_backends import CacheTensor, HMONNXInference as InferenceEngine
 
         self.torch = torch
         self.cache_tensor_cls = CacheTensor
         self.device = torch.device(device if device else ("cuda:0" if torch.cuda.is_available() else "cpu"))
-        self.cache_len = int(cache_len)
         self.max_new_tokens = int(max_new_tokens)
 
         artifacts = _load_artifacts(work_dir)
         meta = artifacts["meta"]
+        self.cache_len = _resolve_cache_len(meta, cache_len)
         self.max_audio_length = int(max_audio_length or meta["encoder"]["model_cfg"]["fixed_max_audio_length"])
         self.max_prefill = int(
             meta.get(
@@ -214,11 +234,12 @@ class HMONNXQwen3ASRChunkRunner:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run Qwen3-ASR HMONNX chunk inference.")
-    parser.add_argument("--work-dir", "--work_dir", dest="work_dir", required=True)
+    parser.add_argument("--work-dir", "--work_dir", dest="work_dir")
+    parser.add_argument("--config", help="Path to export_meta_info.json or hmm_meta_info.json")
     parser.add_argument("--audio", required=True)
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-audio-length", "--max_audio_length", dest="max_audio_length", type=int, default=None)
-    parser.add_argument("--cache-len", "--cache_len", dest="cache_len", type=int, default=2048)
+    parser.add_argument("--cache-len", "--cache_len", dest="cache_len", type=int)
     parser.add_argument("--max-new-tokens", "--max_new_tokens", dest="max_new_tokens", type=int, default=128)
     return parser.parse_args(argv)
 
@@ -232,8 +253,11 @@ def main(args=None) -> None:
     if not audio_path.exists():
         raise FileNotFoundError(audio_path)
 
+    config_or_dir = args.config or args.work_dir
+    if not config_or_dir:
+        raise ValueError("one of --config or --work-dir is required")
     runner = HMONNXQwen3ASRChunkRunner(
-        work_dir=Path(args.work_dir),
+        work_dir=Path(config_or_dir),
         device=args.device,
         max_audio_length=args.max_audio_length,
         cache_len=args.cache_len,

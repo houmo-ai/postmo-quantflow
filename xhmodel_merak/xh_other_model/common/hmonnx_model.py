@@ -3,7 +3,7 @@ from typing import Any, List, Optional, Union
 import torch
 import torch.nn as nn
 
-from xhquant.api import HMONNXGoldenInference as HMONNXInference
+from xhmodel_merak.exec_backends import HMONNXGoldenInference as HMONNXInference
 
 from ..builder import MODELS
 

@@ -21,13 +21,13 @@ import torch
 import torch.nn as nn
 from transformers import TextStreamer
 
-from xhquant.xhonnxruntime import (
-    AutoOffloadGraphModel,
+from xhmodel_merak.exec_backends import (
+    CacheTensor,
     HMONNXCUDAGraphInference,
     HMONNXGoldenInference,
     HMONNXGraphGoldenInference,
 )
-from xhquant.core import CacheTensor
+from xhquant.xhonnxruntime import AutoOffloadGraphModel
 
 
 def _build_linear_attn_mask(

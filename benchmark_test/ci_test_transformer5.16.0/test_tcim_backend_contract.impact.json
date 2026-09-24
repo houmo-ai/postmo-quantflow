@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "tcim-backend-contract",
+      "patterns": [
+        "xhmodel_merak/exec_backends/**",
+        "examples_merak/asr/qwen3_asr/hmonnx_demo.py",
+        "examples_merak/asr/qwen3_asr/hmonnx_demo_chunk_prefix.py",
+        "xhmodel_merak/xh_other_model/common/hmonnx_model.py",
+        "xhmodel_merak/xh_other_model/llm_onnx_model.py"
+      ]
+    }
+  ]
+}

@@ -12,27 +12,36 @@ from ...llm_onnx_model import LLMONNXModel
 
 from transformers.modeling_outputs import CausalLMOutputWithPast, BaseModelOutputWithPast
 
-from xhquant.api import HMONNXInference
+
+def _resolve_embedding_file(meta_info: ConfigDict) -> str:
+    embedding_file = meta_info.get("token_embedding_file") or meta_info.get("quant_embedding")
+    if not embedding_file:
+        raise ValueError("metadata must provide token_embedding_file or quant_embedding")
+    return str(embedding_file)
 
 
 @register_other_model("XHQwen3ASRHMONNXModel", master=False)
 class XHQwen3ASRHMONNXModel(LLMONNXModel):
     def __init__(self, model_dir: str):
-        meta_info_file = Path(model_dir) / "export_meta_info.json"
-        assert meta_info_file.exists(), f"export_meta_info.json not found in {model_dir}"
-        meta_info = json.load(open(meta_info_file, "r"))
+        model_path = Path(model_dir)
+        meta_info_file = model_path if model_path.is_file() else model_path / "export_meta_info.json"
+        if not meta_info_file.is_file():
+            raise FileNotFoundError(f"runtime metadata not found: {meta_info_file}")
+        model_root = meta_info_file.parent
+        with meta_info_file.open("r", encoding="utf-8") as file:
+            meta_info = json.load(file)
         meta_info = ConfigDict(meta_info)
         self.wrap_cfg = meta_info.wrap_cfg
         prefill = ConfigDict(
             dict(
-                onnx=str(Path(model_dir) / meta_info.prefill_onnx_file),
+                onnx=str(model_root / meta_info.prefill_onnx_file),
                 input_sequence_length=meta_info.wrap_cfg.input_sequence_length,
             )
         )
 
         decode = ConfigDict(
             dict(
-                onnx=str(Path(model_dir) / meta_info.decode_onnx_file),
+                onnx=str(model_root / meta_info.decode_onnx_file),
             )
         )
         kv_cache = ConfigDict(
@@ -46,7 +55,7 @@ class XHQwen3ASRHMONNXModel(LLMONNXModel):
 
         # token embedding
         token_embedding_state_dict = torch.load(
-            Path(model_dir) / meta_info["token_embedding_file"], map_location="cpu", weights_only=True
+            model_root / _resolve_embedding_file(meta_info), map_location="cpu", weights_only=True
         )
         token_embedding = nn.Embedding(
             token_embedding_state_dict["weight"].shape[0],

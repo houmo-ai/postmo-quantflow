@@ -4,9 +4,8 @@ from types import SimpleNamespace
 
 import torch
 
+from xhmodel_merak.exec_backends import CacheTensor, MultiHMONNXLoader
 from xhmodel_merak.xh_llm.kv_cache_mixin import KVCacheWithLinearMixin
-from xhquant.core import CacheTensor
-from xhquant.xhonnxruntime.llm_hmonnx_loader import MultiHMONNXLoader
 
 from ...hmonnx.hmonnx_model import HMONNXModel
 from ...hmonnx.vision_llm_hmonnx_model import VisonLLMHMONNXModel

@@ -9,8 +9,7 @@ from pathlib import Path
 
 import torch
 
-from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
-from xhquant.xhonnxruntime.llm_hmonnx_loader import MultiHMONNXLoader
+from xhmodel_merak.exec_backends import HMONNXInferenceConfig, HMONNXInferenceV2, MultiHMONNXLoader
 
 from .qwen3_5_spec_decode_onnx_model import Qwen3_5SpecDecodeONNXModel
 

@@ -4,9 +4,9 @@ import torch
 from tqdm import tqdm
 
 from xhquant.api import Config, Hook
-from xhquant.api import HMONNXGoldenInference as HMONNXInference
-from xhquant.api import HMONNXGraphGoldenInference as HMONNXGrapInference
-from xhquant.core import CacheTensor
+
+from xhmodel_merak.exec_backends import CacheTensor, HMONNXGoldenInference as HMONNXInference
+from xhmodel_merak.exec_backends import HMONNXGrapInference
 
 from .builder import MODELS
 from .device_dtype_mixin import DeviceDtypeMixin
