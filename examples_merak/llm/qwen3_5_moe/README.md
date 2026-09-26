@@ -10,7 +10,8 @@ Dense/MoE 已共用 [Qwen3.5 系列 workflow](../qwen3_5/readme.md)。
 
 - Qwen3.6-35B-A3B：`35b_a3b/qwen3_6_35b_a3b_full.yaml`；head W4/W5 分别选
   `qwen3_6_35b_a3b_full_head_w4.yaml` / `qwen3_6_35b_a3b_full_head_w5.yaml`，见下文。
-- Qwen3.5-122B-A10B：`122b_a10b/qwen3_5_122b_a10b_full.yaml`。
+- Qwen3.5-122B-A10B：普通版用 `122b_a10b/qwen3_5_122b_a10b_full.yaml`；
+  MTP 版用同目录的 `qwen3_5_122b_a10b_full_mtp.yaml`，沿用主模型 W5 head 权重，默认生成 3 个 draft token。
 - MTP/DFlash 选对应后缀；GPTQ 选 `*_gptq.yaml`。
 - `ornith-1.0-35b_full.yaml` 是独立命名配置，不要用它替代 Qwen3.6 的发布名。
 
@@ -218,6 +219,13 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
 都要够用。多卡 golden 另外传 `--golden-device-map cuda:0 cuda:1`，
 设备编号相对于 `CUDA_VISIBLE_DEVICES`。
 
+122B MTP 的 `num_draft_tokens: 3` 对应主图验证长度 4；主模型和 MTP draft
+从同一个补全 W5 head 与 W4 MTP 专家的 checkpoint 导出。已有主体量化目录若仍是
+浮点 head、浮点 MTP，先按下文的补量化流程产生新目录；unified 的
+`quant_checkpoint` 只接受完整产物，不会在复用时修改输入目录。
+122B MTP 校准把主模型权重留在主机内存，逐 block 使用 `--device` 指定的 GPU
+汇集校准样本的 hidden；主干回放结束后才把 MTP 层移到 GPU 做专家量化。
+
 维护 placeholder wrapper 时，attention、GDR、MoE 子图返回值只能是 tensor
 或扁平 tensor 容器，不能带 `None`，否则会破坏主图与子图的端口对应关系。
 
@@ -254,4 +262,4 @@ python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
 ```
 
 DFlash/DFlash2 保留各自 assistant 配置和导出 ABI，仅 head 继承目标模型。
-新产物的实际存储共享校验需要配套的 vLLM Merak shared-head 支持。
+各 HMONNX 图分别携带继承的 head 权重；运行时 session 独立加载，不要求底层存储共享。

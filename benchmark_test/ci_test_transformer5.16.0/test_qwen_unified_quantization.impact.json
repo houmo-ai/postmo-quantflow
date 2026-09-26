@@ -13,9 +13,11 @@
         "xhmodel_merak/model_build/recipe_config.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/workflow.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/quant_adapter.py",
+        "xhmodel_merak/xh_llm/big_hf_model_helper.py",
         "xhmodel_merak/model_build/manifest.py",
         "xhmodel_merak/model_build/executor.py",
-        "xhmodel_merak/model_build/checkpoint.py"
+        "xhmodel_merak/model_build/checkpoint.py",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b_full_mtp.yaml"
       ]
     }
   ]

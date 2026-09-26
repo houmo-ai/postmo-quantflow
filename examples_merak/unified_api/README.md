@@ -265,3 +265,8 @@ checkpoint 中的混合精度标记。复用旧 checkpoint 保留其已记录的
 不会因为 recipe 默认值变为 W5 而改写旧权重。默认临时量化目录会被清理；首次
 需要后续复用必须传 `quant_output_dir`。相同主模型权重是关闭/开启 MTP 确定性
 解码一致性的前提，实际 token 一致性与接收率仍需在部署 runtime 上验收。
+
+Qwen3.5-122B-A10B 的 MTP workflow 默认沿用主模型 W5 head 权重，生成 3 个 draft token。
+复用已补全 W5 head、W4 MTP 专家的量化目录时，使用
+`model_id="qwen3.5-122b-a10b"`、`speculative={"mode": "mtp", "num_draft_tokens": 3}`
+和 `low_memory=True`；单卡执行设置 `CUDA_VISIBLE_DEVICES=1`、`device="cuda:0"`。

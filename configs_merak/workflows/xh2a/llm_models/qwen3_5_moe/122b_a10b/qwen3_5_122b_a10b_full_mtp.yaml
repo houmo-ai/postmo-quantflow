@@ -22,9 +22,15 @@ quant:
   data_type: int_sym_xh
   iters: 400
   format: auto_round:gptqmodel
+  head:
+    bits: 5
   moe:
     attn_bits: 8
     shared_expert_bits: 8
+  mtp:
+    expert_bits: 4
+    group_size: 64
+    algorithm: inherit
 export:
   model:
     chip_arch: XH2a
@@ -57,7 +63,7 @@ export:
       quant_type: w8a8h1_sefp
       nodes:
         lm_head:
-          quant_type: w8a8h1_sefp
+          quant_type: w5a8h1_sefp
       ops: {}
     visual_config:
       visual_input_mode: patches
@@ -69,7 +75,7 @@ export:
         ops: {}
     only_first_block: false
     spec_decode_mode: mtp
-    num_draft_tokens: 4
+    num_draft_tokens: 3
     output_post_norm_hidden: true
     mtp_config:
       hidden_size: 3072

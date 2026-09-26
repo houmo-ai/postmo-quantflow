@@ -92,6 +92,81 @@ def test_qwen38_dflash2_unified_plan_reuses_w5_head(tmp_path, context, flash_att
     assert export["flash_attention"]["enable"] is flash_attention
 
 
+def test_122b_mtp_workflow_and_unified_plan_use_w5_and_three_drafts(tmp_path):
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import build_qwen35_spec_decode_contract
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe.xh_qwen3_5_moe_config import XHQwen3_5MoeModelConfig
+
+    source = source_for(tmp_path, "qwen3.5-122b-a10b")
+    plan = resolve_build_plan(
+        model_id="qwen3.5-122b-a10b",
+        model_dir=str(source),
+        output_dir=str(tmp_path / "out"),
+        device="cuda:0",
+        low_memory=True,
+        speculative={"mode": "mtp"},
+    )
+    workflow = effective(plan, tmp_path)
+    model = workflow.export["model"]
+    assert plan.variant == "mtp" and plan.low_memory
+    assert plan.environment["HUGE_MODEL_EXPORT_ENABLED"] == "1"
+    assert model["num_draft_tokens"] == 3
+    assert model["quant_scheme"]["nodes"]["lm_head"]["quant_type"] == "w5a8h1_sefp"
+    assert workflow.quant["head"] == {"bits": 5}
+    assert workflow.quant["mtp"] == {"expert_bits": 4, "group_size": 64, "algorithm": "inherit"}
+
+    config = XHQwen3_5MoeModelConfig(**model)
+    assert config.mtp_config.draft_head_weight_bits == 5
+    metadata = SimpleNamespace(
+        mtp_prefill_config=SimpleNamespace(hmonnx="mtp_draft_prefill/model.onnx"),
+        mtp_decode_config=SimpleNamespace(hmonnx="mtp_draft_decode/model.onnx"),
+    )
+    contract = build_qwen35_spec_decode_contract(config, metadata)
+    assert contract["num_draft_tokens"] == 3
+    assert contract["verify_length"] == 4
+    assert contract["shared_head"] == {"version": 1, "owner": "target", "logical_bits": 5}
+
+
+def test_streamed_main_preprocessor_excludes_separate_mtp_checkpoint_modules():
+    from types import SimpleNamespace
+
+    import torch
+
+    from xhmodel_merak.xh_llm.big_hf_model_helper import GPTQModelQuantizedModelPreprocessor
+
+    preprocessor = GPTQModelQuantizedModelPreprocessor.__new__(GPTQModelQuantizedModelPreprocessor)
+    preprocessor.model_definition = SimpleNamespace(before_model_load=lambda *a, **k: None)
+    preprocessor._defuser = SimpleNamespace(convert_model=lambda *a, **k: None)
+    preprocessor.quant_config = object()
+    observed = []
+    preprocessor._defuse_numbered_checkpoint_experts = (
+        lambda *a, **k: observed.append(("defuse", k["skip_module_prefixes"]))
+    )
+    preprocessor._replace_quant_linears = (
+        lambda *a, **k: observed.append(("replace", k["skip_module_prefixes"])) or [])
+
+    main = torch.nn.Module()
+    main.add_module("model", torch.nn.Module())
+    main.config = SimpleNamespace(mtp_quantization={"scope": "routed_experts"})
+    preprocessor.preprocess(main, skip_module_prefixes=["model.language_model.layers.0"])
+    assert observed == [
+        ("defuse", ["model.language_model.layers.0", "mtp"]),
+        ("replace", ["model.language_model.layers.0", "mtp"]),
+    ]
+
+    observed.clear()
+    main.add_module("mtp", torch.nn.Module())
+    preprocessor.preprocess(main)
+    assert observed == [("defuse", None), ("replace", None)]
+
+    observed.clear()
+    del main._modules["mtp"]
+    main.config.mtp_quantization = None
+    preprocessor.preprocess(main)
+    assert observed == [("defuse", None), ("replace", None)]
+
+
 @pytest.mark.parametrize("sidecar", [False, True])
 def test_mixed_checkpoint_and_lora_mtp_are_reused_without_search(tmp_path, sidecar):
     source = source_for(tmp_path, "qwen3.6-35b-a3b")

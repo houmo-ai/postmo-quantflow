@@ -223,6 +223,10 @@ class GPTQModelQuantizedModelPreprocessor:
         include_module_prefixes: Optional[list[str]] = None,
     ) -> tuple[str, ...]:
         """Mutate an already-empty HF model into GPTQModel's meta module tree."""
+        # A checkpoint with separately exported MTP weights has top-level
+        # ``mtp.*`` tensors that do not belong to the main HF model tree.
+        if getattr(hf_model.config, "mtp_quantization", None) and "mtp" not in hf_model._modules:
+            skip_module_prefixes = [*(skip_module_prefixes or []), "mtp"]
         with torch.device("meta"):
             if convert_model_structure:
                 self.model_definition.before_model_load(
