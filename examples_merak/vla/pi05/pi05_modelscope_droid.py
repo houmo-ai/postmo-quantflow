@@ -201,7 +201,9 @@ def run_demo(
 
     device = _resolve_device(device)
     config = _load_runtime_config(model_dir, runtime_config_dir, device, horizon)
-    policy = PI05Policy.from_pretrained(model_dir, config=config, strict=True).to(device).eval()
+    from xhmodel_merak.xh_other_model.models.pi05._export_utils import load_pi05_policy
+
+    policy = load_pi05_policy(str(model_dir), str(device), config=config)
     preprocessor, postprocessor = make_pre_post_processors(
         config,
         pretrained_path=str(runtime_config_dir),

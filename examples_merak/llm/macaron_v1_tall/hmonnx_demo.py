@@ -1,14 +1,10 @@
-"""Run Macaron-V1-Tall HMONNX generation for L0--L3.
-
-The compiler selects adapters by initializer-name replacement.  For this
-Python validation demo, each adapter is bound into a small overlay graph that
-symlinks the immutable export weights and replaces only LoRA references.
-"""
+"""Run Macaron adapters exported by the shared Qwen3.5 workflow."""
 
 from __future__ import annotations
 
 import argparse
 import gc
+import json
 import sys
 import time
 from pathlib import Path
@@ -103,20 +99,13 @@ def main():
         "--export-dir",
         type=str,
         required=True,
-        help="Path to LoRA-injected HMONNX export dir",
+        help="Path to a Qwen workflow export containing LoRA adapters",
     )
     parser.add_argument(
         "--adapters",
         nargs="+",
-        choices=("L0", "L1", "L2", "L3"),
-        default=("L0", "L1", "L2", "L3"),
-        help="Quantized LoRA adapters to bind and run.",
-    )
-    parser.add_argument(
-        "--adapter-work-dir",
-        type=str,
-        default="",
-        help="Optional directory for small adapter-bound graph overlays.",
+        default=None,
+        help="Exported adapter names; defaults to all entries in metadata.",
     )
     parser.add_argument(
         "--prompt",
@@ -144,9 +133,7 @@ def main():
 
     export_dir = Path(args.export_dir)
     from xhmodel_merak.xh_llm import AutoLLMHONNXModel
-    from xhmodel_merak.xh_llm.models.macaron_v1_tall.lora_adapter_overlay import (
-        create_macaron_lora_overlay,
-    )
+
 
     device_token = args.device.lower().removeprefix("cuda:")
     if device_token == "cpu":
@@ -158,20 +145,19 @@ def main():
         raise ValueError("--device must be 'cpu' or one GPU id")
     print(f"Device: {runtime_device} (device_map={device_map})")
 
-    overlay_root = (
-        Path(args.adapter_work_dir)
-        if args.adapter_work_dir
-        else export_dir.parent / f".{export_dir.name}_python_lora_overlays"
-    )
-    for adapter in args.adapters:
-        bound_export = create_macaron_lora_overlay(
-            export_dir,
-            adapter,
-            overlay_root / adapter,
-        )
-        meta_file = find_meta_file(bound_export)
+    root_meta = Path(find_meta_file(export_dir))
+    metadata = json.loads(root_meta.read_text())
+    entries = {item["name"]: item for item in metadata.get("lora_adapters", [])}
+    selected = args.adapters or list(entries)
+    if not selected:
+        raise ValueError("The export contains no LoRA adapters")
+    for adapter in selected:
+        if adapter not in entries:
+            raise ValueError(f"Unknown exported adapter {adapter!r}; available: {list(entries)}")
+        from xhmodel_merak.model_artifact.files import confined_file
+        meta_file = str(confined_file(root_meta.parent.resolve(), entries[adapter]["meta_file"], "lora.meta_file"))
         print(f"[{adapter}] Meta: {meta_file}")
-        print(f"[{adapter}] Loading XHMacaronV1TallHMONNXModel...")
+        print(f"[{adapter}] Loading Qwen3.5 MoE adapter...")
         t0 = time.time()
         model = AutoLLMHONNXModel.from_pretrained(
             meta_file,

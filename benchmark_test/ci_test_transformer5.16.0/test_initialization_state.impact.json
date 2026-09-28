@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "initialization-state-isolation",
+    "patterns": [
+      "benchmark_test/ci_test_transformer5.16.0/conftest.py"
+    ]
+  }]
+}

@@ -440,7 +440,13 @@ def _section(quant_cfg: Mapping[str, Any], name: str) -> Mapping[str, Any]:
 
 
 def _quant_output_path(output_dir: str, quant_cfg: Mapping[str, Any]) -> str:
-    return _normalize_path(quant_cfg.get("save_path") or quant_cfg.get("output_dir") or output_dir)
+    # GPTQModel recipes may replace their output directory while saving.
+    # When unified has already reserved the root, let the recipe own a child
+    # directory without replacing that root. Direct workflow callers retain
+    # the requested output path if it does not exist yet.
+    explicit = quant_cfg.get("save_path") or quant_cfg.get("output_dir")
+    requested = Path(output_dir)
+    return _normalize_path(explicit or (requested / "checkpoint" if requested.is_dir() else requested))
 
 
 def _resolve_calibration_value(value: Any) -> str:

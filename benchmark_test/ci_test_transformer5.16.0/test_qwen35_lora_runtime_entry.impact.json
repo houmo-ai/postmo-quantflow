@@ -2,6 +2,6 @@
   "version": 1,
   "rules": [{
     "id": "qwen35-lora-runtime-entry",
-    "patterns": ["xhmodel_merak/xh_llm/models/qwen3_5/workflow.py"]
+    "patterns": ["xhmodel_merak/xh_llm/models/qwen3_5/workflow.py", "xhmodel_merak/xh_llm/workflows/runtime_config.py"]
   }]
 }

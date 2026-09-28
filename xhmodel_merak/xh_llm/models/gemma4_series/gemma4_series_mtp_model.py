@@ -266,6 +266,28 @@ def _resolve_assistant_text_types(
     return Gemma4TextConfig, Gemma4TextModel, Gemma4RMSNorm
 
 
+def _cache_geometry_config(text: dict[str, Any]) -> dict[str, Any]:
+    """Resolve legacy and Transformers per-layer KV geometry for shared caches.
+
+    A shared cache has one geometry per attention type. Heterogeneous layers
+    of the same type cannot silently be represented by a global fallback.
+    """
+    result = dict(text)
+    overrides = text.get("per_layer_config") or {}
+    for kind, prefix in (("sliding_attention", ""), ("full_attention", "global_")):
+        indices = [i for i, value in enumerate(text.get("layer_types") or []) if value == kind]
+        for field in ("num_key_value_heads", "head_dim"):
+            output_field = ("num_global_key_value_heads" if field == "num_key_value_heads"
+                            else "global_head_dim") if prefix else field
+            fallback = text.get(output_field) or text.get(field) or 0
+            values = {int(overrides.get(str(i), {}).get(field, fallback)) for i in indices}
+            if len(values) > 1:
+                raise ValueError(f"Gemma4 MTP shared KV geometry varies within {kind}: {field}={sorted(values)}")
+            if values and any(field in overrides.get(str(i), {}) for i in indices):
+                result[output_field] = values.pop()
+    return result
+
+
 def validate_assistant_target_contract(
     assistant_model_dir: str | Path,
     target_model_dir: str | Path,
@@ -280,8 +302,8 @@ def validate_assistant_target_contract(
 
     assistant = load_json_file(Path(assistant_model_dir) / "config.json")
     target = load_json_file(Path(target_model_dir) / "config.json")
-    assistant_text = _nested_dict(assistant.get("text_config"))
-    target_text = _nested_dict(target.get("text_config"))
+    assistant_text = _cache_geometry_config(_nested_dict(assistant.get("text_config")))
+    target_text = _cache_geometry_config(_nested_dict(target.get("text_config")))
     assistant_type = str(assistant.get("model_type") or "")
     target_type = str(target.get("model_type") or "")
     expected_target_types = {
@@ -1042,7 +1064,7 @@ class XHGemma4SeriesAssistantDraftModel(BaseModel):
     def prepare_inputs(self, data=None):
         if self._wrap_model is None:
             self.init_wrap_model()
-        target_text_cfg = self._wrap_model.target_config_dict["text_config"]
+        target_text_cfg = _cache_geometry_config(self._wrap_model.target_config_dict["text_config"])
         input_sequence_length = int(self.wrap_cfg.get("input_sequence_length", 1))
         context_length = int(self.wrap_cfg.get("context_length", 2048))
         hidden_size = int(self._wrap_model.backbone_hidden_size)

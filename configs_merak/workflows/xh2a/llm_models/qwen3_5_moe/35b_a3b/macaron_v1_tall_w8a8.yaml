@@ -29,7 +29,7 @@ quant:
 export:
   model:
     chip_arch: XH2a
-    model_type: MacaronV1TallForConditionalGeneration
+    model_type: Qwen3_5MoeForConditionalGeneration
     hf_model: null
     model_name: macaron_v1_tall
     context_max_length: 2048
@@ -64,16 +64,3 @@ export:
 # Macaron-only deployment overlay. The Qwen quant and export sections above
 # intentionally remain its full baseline; this section is consumed only after
 # the base HMONNX graph has been exported.
-macaron_lora:
-  adapters:
-    available: [L0, L1, L2, L3]
-  quantization:
-    non_routed:
-      # Optional: inherit, or a standard XH2a quant_type such as
-      # w8a8h1_sefp. inherit uses each target Linear's weight format.
-      quant_scheme: inherit
-    routed_expert:
-      # Optional: inherit uses each MoeBlock expert projection's weight
-      # format. An explicit scheme overrides only routed LoRA A/B weights;
-      # LoRA activations continue to use the MoeBlock activation format.
-      quant_scheme: inherit

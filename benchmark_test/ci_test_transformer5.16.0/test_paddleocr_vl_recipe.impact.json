@@ -5,6 +5,7 @@
       "id": "paddleocr-vl-recipe",
       "patterns": [
         "recipes/**",
+        "xhmodel_merak/model_build/checkpoint.py",
         "xhmodel_merak/model_integrations/paddleocr_vl/**",
         "configs_merak/workflows/**/paddleocr_vl/**",
         "examples_merak/llm/paddleocr_vl/model_cards/**",

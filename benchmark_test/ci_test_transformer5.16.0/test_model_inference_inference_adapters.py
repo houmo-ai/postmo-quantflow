@@ -264,7 +264,7 @@ def test_gemma_video_frame_directory_has_deterministic_processor_metadata(tmp_pa
     Image.new("RGB", (12, 8), color="red").save(frames_dir / "02.png")
     Image.new("RGB", (12, 8), color="blue").save(frames_dir / "01.png")
 
-    frames, metadata = gemma4._load_video(frames_dir)
+    frames, metadata = gemma4._load_video(frames_dir, max_frames=32)
 
     assert [frame.getpixel((0, 0)) for frame in frames] == [(0, 0, 255), (255, 0, 0)]
     assert metadata == {

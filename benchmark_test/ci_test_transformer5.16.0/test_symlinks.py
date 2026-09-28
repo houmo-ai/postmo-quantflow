@@ -20,21 +20,24 @@ def get_gitignore_patterns(repo_root: Path):
 
 def matches_gitignore(path: Path, patterns: list, repo_root: Path) -> bool:
     rel_path = path.relative_to(repo_root)
-    path_str = str(rel_path)
-    for pattern in patterns:
-        if pattern.startswith('/'):
-            if path_str == pattern.lstrip('/') or path_str.startswith(pattern.lstrip('/')):
-                return True
-        elif '/' in pattern:
-            if pattern.endswith('/'):
-                if fnmatch.fnmatch(path_str, pattern) or fnmatch.fnmatch(path_str, pattern.rstrip('/')):
+    # A gitignore entry for a directory also ignores paths below it.
+    candidates = (rel_path, *(parent for parent in rel_path.parents if parent != Path('.')))
+    for candidate in candidates:
+        path_str = str(candidate)
+        for pattern in patterns:
+            if pattern.startswith('/'):
+                if path_str == pattern.lstrip('/') or path_str.startswith(pattern.lstrip('/')):
                     return True
+            elif '/' in pattern:
+                if pattern.endswith('/'):
+                    if fnmatch.fnmatch(path_str, pattern) or fnmatch.fnmatch(path_str, pattern.rstrip('/')):
+                        return True
+                else:
+                    if fnmatch.fnmatch(path_str, pattern):
+                        return True
             else:
-                if fnmatch.fnmatch(path_str, pattern):
+                if candidate.name == pattern or fnmatch.fnmatch(path_str, f"**/{pattern}"):
                     return True
-        else:
-            if rel_path.name == pattern or fnmatch.fnmatch(path_str, f"**/{pattern}"):
-                return True
     return False
 
 

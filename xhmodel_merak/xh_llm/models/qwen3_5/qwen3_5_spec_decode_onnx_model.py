@@ -58,7 +58,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
     """Speculative decoding runtime extending Qwen3_5ONNXModel with a draft model.
 
     Supports two speculative decoding modes:
-    - 'dflash': DFlash draft model with cross-attention to target hidden states
+    - 'dflash' / 'dflash2': distinct draft architectures sharing the block verification runtime
     - 'mtp': MTP (Multi-Token Prediction) head auto-regressive drafting
 
     Three-phase loop per round:
@@ -125,7 +125,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
             else None
         )
         self._dflash_noise_mask_token_id: Optional[int] = None
-        if self.spec_decode_mode == "dflash":
+        if self.spec_decode_mode in {"dflash", "dflash2"}:
             if dflash_noise_token_id is None or isinstance(
                 dflash_noise_token_id, bool
             ):
@@ -845,7 +845,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
             if prefill_hidden_all is not None:
                 prefill_hidden_all = prefill_hidden_all[:, :valid_len, :]
                 last_hidden = self._select_hidden_step(prefill_hidden_all, valid_len - 1)
-                if self.spec_decode_mode == "dflash":
+                if self.spec_decode_mode in {"dflash", "dflash2"}:
                     self._append_dflash_context(prefill_hidden_all, past_seq_len)
                 elif self.spec_decode_mode == "mtp":
                     hidden_parts = []
@@ -904,7 +904,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
                 streamer.end()
             return ""
         mtp_past_seq_len = mtp_prefill_seq_len
-        num_drafts = self.block_size - 1 if self.spec_decode_mode == "dflash" else self.block_size
+        num_drafts = self.block_size - 1 if self.spec_decode_mode in {"dflash", "dflash2"} else self.block_size
 
         def _on_token(token_id: int) -> None:
             history_token_ids.append(token_id)
@@ -919,7 +919,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
             round_num_drafts: int,
         ) -> List[int]:
             current_token = torch.tensor([[current_token_id]], dtype=torch.long, device=self.device)
-            if self.spec_decode_mode == "dflash":
+            if self.spec_decode_mode in {"dflash", "dflash2"}:
                 return [int(tok[0, 0].item()) for tok in self._run_draft_dflash(current_token, round_past_seq_len)]
             if round_last_hidden is None:
                 return []
@@ -981,7 +981,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
             accepted_hidden = (
                 verify_result.verify_hidden[:, :accepted_steps, :] if verify_result.verify_hidden is not None else None
             )
-            if self.spec_decode_mode == "dflash":
+            if self.spec_decode_mode in {"dflash", "dflash2"}:
                 assert accepted_hidden is not None, "DFlash mode requires hidden states from the verify step."
                 self._append_dflash_context(accepted_hidden, verify_result.initial_seq_len, decode_step=True)
                 return next_hidden, round_mtp_past_seq_len

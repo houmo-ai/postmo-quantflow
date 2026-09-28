@@ -432,7 +432,7 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
         self.use_manual_depthwise_conv1d = use_manual_depthwise_conv1d
         self.cumsum_matmul_quant_config = cumsum_matmul_quant_config
 
-        if spec_decode_mode in {"mtp", "dflash"} and int(batch_size) != 1:
+        if spec_decode_mode in {"mtp", "dflash", "dflash2"} and int(batch_size) != 1:
             raise ValueError(
                 "Qwen3.5 multi-batch export does not support "
                 f"spec_decode_mode={spec_decode_mode!r}; use batch_size=1 for MTP/DFlash "
@@ -445,11 +445,11 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             # MTP historically drafts four tokens. DFlash checkpoints are
             # trained/exported with nine draft tokens unless a workflow run
             # explicitly overrides the target verify width.
-            num_draft_tokens = 9 if spec_decode_mode == "dflash" else 4
+            num_draft_tokens = 9 if spec_decode_mode in {"dflash", "dflash2"} else 4
         if int(num_draft_tokens) <= 0:
             raise ValueError("Qwen3.5 num_draft_tokens must be positive")
         self.num_draft_tokens = int(num_draft_tokens)
-        if spec_decode_mode in {"mtp", "dflash"} or mtp_config is not None or dflash_config is not None:
+        if spec_decode_mode in {"mtp", "dflash", "dflash2"} or mtp_config is not None or dflash_config is not None:
             from ...shared_head import inherit_head_config, resolve_shared_head_bits
 
             spec_draft_head_weight_bits = resolve_shared_head_bits(

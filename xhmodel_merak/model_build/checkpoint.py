@@ -32,6 +32,7 @@ _QUANT_METADATA_NAMES = (
     "qwen35_autoround_recipe_provenance.json",
     "gemma4_quant_recipe_provenance.json",
     "ling3_flash_quant_recipe_provenance.json",
+    "paddleocr_vl_recipe_result.json",
 )
 
 
@@ -247,7 +248,12 @@ def verify_quant_model_identity(
             path=str(source_config_path),
         )
 
-    expected = _model_config_identity(source_config)
+    comparison_source = (
+        _canonicalize_legacy_paddleocr_vl_config(source_config)
+        if plan.model_id == "paddleocr-vl-1.6"
+        else source_config
+    )
+    expected = _model_config_identity(comparison_source)
     if not expected:
         raise ModelError(
             ErrorCode.QUANT_ARTIFACT_MISMATCH,
@@ -280,8 +286,20 @@ def verify_quant_model_identity(
                 source_constraint_mismatches=constraint_mismatches,
             )
         config_mismatches = _behavior_config_mismatches(
-            source_config, checkpoint_config, type_aliases=get_recipe(plan.model_id).config_type_aliases
+            comparison_source, checkpoint_config, type_aliases=get_recipe(plan.model_id).config_type_aliases
         )
+        if _has_separately_quantized_lm_head(artifact_path, checkpoint_config):
+            # GPTQModel unties a shared LM head when it saves a separately
+            # quantized head. This is an intentional checkpoint transform,
+            # evidenced by its weight index and quantization declaration.
+            config_mismatches = [
+                mismatch for mismatch in config_mismatches
+                if not (
+                    mismatch["field"] in {"tie_word_embeddings", "text_config.tie_word_embeddings"}
+                    and mismatch["expected"] is True
+                    and mismatch["actual"] is False
+                )
+            ]
         if config_mismatches:
             raise ModelError(
                 ErrorCode.QUANT_ARTIFACT_MISMATCH,
@@ -290,6 +308,58 @@ def verify_quant_model_identity(
                 path=str(artifact_path),
                 config_mismatches=config_mismatches,
             )
+
+
+def _canonicalize_legacy_paddleocr_vl_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Compare the official flat config with Transformers 5.16's nested form.
+
+    The checkpoint must still prove every explicitly supplied source value.
+    Only the documented PaddleOCR-VL text and vision type split is accepted.
+    """
+    if config.get("model_type") != "paddleocr_vl" or "text_config" in config:
+        return config
+    normalized = dict(config)
+    text_fields = {
+        "head_dim", "hidden_act", "hidden_size", "intermediate_size",
+        "max_position_embeddings", "num_attention_heads", "num_hidden_layers",
+        "num_key_value_heads", "pad_token_id", "rms_norm_eps", "use_bias",
+        "use_cache", "vocab_size",
+    }
+    text_config = {field: normalized.pop(field) for field in text_fields if field in normalized}
+    text_config["model_type"] = "paddleocr_vl_text"
+    if "tie_word_embeddings" in normalized:
+        text_config["tie_word_embeddings"] = normalized["tie_word_embeddings"]
+    rope_scaling = normalized.get("rope_scaling")
+    rope_theta = normalized.get("rope_theta")
+    if isinstance(rope_scaling, Mapping) and isinstance(rope_theta, (int, float)) and not isinstance(rope_theta, bool):
+        text_config["rope_parameters"] = {**rope_scaling, "rope_theta": rope_theta}
+        normalized.pop("rope_scaling")
+        normalized.pop("rope_theta")
+    normalized["text_config"] = text_config
+    vision_config = normalized.get("vision_config")
+    if isinstance(vision_config, Mapping) and vision_config.get("model_type") == "paddleocr_vl":
+        normalized["vision_config"] = {**vision_config, "model_type": "paddleocr_vl_vision"}
+    return normalized
+
+
+def _has_separately_quantized_lm_head(path: Path, config: Mapping[str, Any]) -> bool:
+    quant_config = config.get("quantization_config")
+    if not isinstance(quant_config, Mapping) or quant_config.get("lm_head") is not True:
+        return False
+    metadata = quant_config.get("meta")
+    if not isinstance(metadata, Mapping) or not isinstance(metadata.get("lm_head_quantization"), Mapping):
+        return False
+    index_path = path / "model.safetensors.index.json"
+    if not index_path.is_file():
+        return False
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    weights = index.get("weight_map") if isinstance(index, Mapping) else None
+    return isinstance(weights, Mapping) and any(
+        name.startswith("lm_head.") and name.endswith(".qweight") for name in weights
+    )
 
 
 def _model_config_identity(value: Mapping[str, Any]) -> dict[str, Any]:

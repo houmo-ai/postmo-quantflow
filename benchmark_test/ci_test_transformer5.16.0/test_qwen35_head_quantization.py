@@ -163,11 +163,18 @@ def test_head_yaml_to_recipe(bits, algorithm, tmp_path):
     recipe = quantize_qwen35 if algorithm == "gptq" else quantize_qwen35_autoround
     kwargs = builder(hf_model_dir=str(source), output_dir=str(tmp_path / "out"),
         device="cpu", quant_cfg=config["quant"], export_model_cfg=config["export"]["model"], workflow_seed=42)
+    assert kwargs["output_dir"] == str((tmp_path / "out").resolve())
     result = recipe(**kwargs, dry_run=True)
     assert "scope" not in kwargs
     assert result.provenance["head_stage"]["head"]["algorithm"] == algorithm
     assert result.provenance["head_stage"]["head"]["bits"] == bits
     assert not (tmp_path / "out").exists()
+    (tmp_path / "out").mkdir()
+    reserved_kwargs = builder(
+        hf_model_dir=str(source), output_dir=str(tmp_path / "out"), device="cpu",
+        quant_cfg=config["quant"], export_model_cfg=config["export"]["model"], workflow_seed=42,
+    )
+    assert reserved_kwargs["output_dir"] == str((tmp_path / "out" / "checkpoint").resolve())
     config["export"]["model"]["quant_scheme"]["nodes"]["lm_head"]["quant_type"] = "w8a8h1_sefp"
     with pytest.raises(ValueError, match="conflicts"):
         builder(hf_model_dir=str(source), output_dir=str(tmp_path / "out"),

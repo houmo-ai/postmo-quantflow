@@ -12,6 +12,7 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
 from xhquant.utils.registry import DynamicModule, _DMRegistryCls
 
 from ...big_hf_model_helper import BigHFModelExportHelper
+from ..qwen3_5.lora_moe import QwenLoRAPlaceholderMixin
 from ..qwen3_5._hybrid_placeholder import HybridGatedDeltaNetPlaceholderMixin
 
 
@@ -151,7 +152,7 @@ def _runtime_aliases(hf_model: Optional[torch.nn.Module], type_name: str) -> dic
     return {type(module): type_name for module in hf_model.modules() if type(module).__name__ == type_name}
 
 
-class Qwen3_5_MOE_BigHFModel(BigHFModelExportHelper):  # noqa: N801
+class Qwen3_5_MOE_BigHFModel(QwenLoRAPlaceholderMixin, BigHFModelExportHelper):  # noqa: N801
     RUNTIME_PLACEHOLDER_REPLACEMENTS = {
         "LinearQwen3_5MoeSparseMoeBlock": _Qwen3_5MoeSparseMoeBlock_PlaceHolder,
     }

@@ -29,7 +29,7 @@ quant:
 export:
   model:
     chip_arch: XH2a
-    model_type: MacaronV1TallForConditionalGeneration
+    model_type: Qwen3_5MoeForConditionalGeneration
     hf_model: null
     model_name: macaron_v1_tall
     context_max_length: 2048
@@ -67,14 +67,3 @@ export:
         quant_type: w8a8h1_sefp
         ops: {}
     only_first_block: false
-
-# The backbone uses W4A8 SSFP. Both non-routed and routed-expert LoRA use
-# W8A8 SSFP; LoRA activations continue to use their parent operator format.
-macaron_lora:
-  adapters:
-    available: [L0, L1, L2, L3]
-  quantization:
-    non_routed:
-      quant_scheme: w8a8h0_ssfp
-    routed_expert:
-      quant_scheme: w8a8h0_ssfp

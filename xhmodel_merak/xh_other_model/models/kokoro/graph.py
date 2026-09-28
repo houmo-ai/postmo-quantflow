@@ -57,6 +57,10 @@ def load_official_model(assets: KokoroAssets) -> nn.Module:
     root = str(assets.source_root.resolve())
     if root not in sys.path:
         sys.path.insert(0, root)
+    # The pinned checkout is a build input. Import caches must not change its
+    # fingerprint on the first build (or require a writable source directory).
+    previous_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
         import kokoro
         from kokoro.model import KModel
@@ -65,6 +69,8 @@ def load_official_model(assets: KokoroAssets) -> nn.Module:
             "Kokoro export requires the pinned upstream package and its dependencies. "
             "Install it with `pip install <model-dir>/source/kokoro`."
         ) from error
+    finally:
+        sys.dont_write_bytecode = previous_bytecode
     version = getattr(kokoro, "__version__", None)
     if version != "0.9.4":
         raise RuntimeError(f"Kokoro 0.9.4 is required, found {version!r}")

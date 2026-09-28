@@ -1,0 +1,297 @@
+{
+  "config": {
+    "architectures": [
+      "Gemma4ForConditionalGeneration"
+    ],
+    "audio_config": {
+      "_name_or_path": "",
+      "architectures": null,
+      "attention_chunk_size": 12,
+      "attention_context_left": 13,
+      "attention_context_right": 0,
+      "attention_invalid_logits_value": -1000000000.0,
+      "attention_logit_cap": 50.0,
+      "chunk_size_feed_forward": 0,
+      "conv_kernel_size": 5,
+      "dtype": "bfloat16",
+      "gradient_clipping": 10000000000.0,
+      "hidden_act": "silu",
+      "hidden_size": 64,
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "initializer_range": 0.02,
+      "is_encoder_decoder": false,
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "model_type": "gemma4_audio",
+      "num_attention_heads": 4,
+      "num_hidden_layers": 1,
+      "output_attentions": false,
+      "output_hidden_states": false,
+      "output_proj_dims": 64,
+      "problem_type": null,
+      "residual_weight": 0.5,
+      "return_dict": true,
+      "rms_norm_eps": 1e-06,
+      "subsampling_conv_channels": [
+        128,
+        32
+      ],
+      "use_clipped_linears": true
+    },
+    "audio_token_id": 20,
+    "boa_token_id": 18,
+    "boi_token_id": 17,
+    "dtype": "bfloat16",
+    "eoa_token_id": 22,
+    "eoa_token_index": 22,
+    "eoi_token_id": 21,
+    "eos_token_id": [
+      1,
+      16
+    ],
+    "image_token_id": 19,
+    "initializer_range": 0.02,
+    "model_type": "gemma4",
+    "text_config": {
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "attention_k_eq_v": false,
+      "bos_token_id": 2,
+      "dtype": "bfloat16",
+      "enable_moe_block": false,
+      "eos_token_id": 1,
+      "expert_intermediate_size": null,
+      "final_logit_softcapping": 30.0,
+      "head_dim": 16,
+      "hidden_activation": "gelu_pytorch_tanh",
+      "hidden_size": 64,
+      "hidden_size_per_layer_input": 16,
+      "initializer_range": 0.02,
+      "intermediate_size": 128,
+      "layer_types": [
+        "sliding_attention",
+        "full_attention"
+      ],
+      "max_position_embeddings": 512,
+      "model_type": "gemma4_text",
+      "moe_intermediate_size": null,
+      "num_attention_heads": 4,
+      "num_experts": null,
+      "num_hidden_layers": 2,
+      "num_key_value_heads": 1,
+      "num_kv_shared_layers": 0,
+      "pad_token_id": 0,
+      "per_layer_config": {},
+      "rms_norm_eps": 1e-06,
+      "rope_parameters": {
+        "full_attention": {
+          "partial_rotary_factor": 0.25,
+          "rope_theta": 1000000.0,
+          "rope_type": "proportional"
+        },
+        "sliding_attention": {
+          "rope_theta": 10000.0,
+          "rope_type": "default"
+        }
+      },
+      "sliding_window": 64,
+      "tie_word_embeddings": true,
+      "top_k_experts": null,
+      "use_bidirectional_attention": null,
+      "use_cache": true,
+      "use_double_wide_mlp": true,
+      "vocab_size": 512,
+      "vocab_size_per_layer_input": 512
+    },
+    "tie_word_embeddings": true,
+    "transformers_version": "5.16.1",
+    "video_token_id": 23,
+    "vision_config": {
+      "_name_or_path": "",
+      "architectures": null,
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "chunk_size_feed_forward": 0,
+      "default_output_length": 280,
+      "dtype": "bfloat16",
+      "global_head_dim": 16,
+      "head_dim": 16,
+      "hidden_activation": "gelu_pytorch_tanh",
+      "hidden_size": 64,
+      "id2label": {
+        "0": "LABEL_0",
+        "1": "LABEL_1"
+      },
+      "initializer_range": 0.02,
+      "intermediate_size": 128,
+      "is_encoder_decoder": false,
+      "label2id": {
+        "LABEL_0": 0,
+        "LABEL_1": 1
+      },
+      "max_position_embeddings": 131072,
+      "model_type": "gemma4_vision",
+      "num_attention_heads": 4,
+      "num_hidden_layers": 1,
+      "num_key_value_heads": 4,
+      "output_attentions": false,
+      "output_hidden_states": false,
+      "patch_size": 16,
+      "pooling_kernel_size": 3,
+      "position_embedding_size": 10240,
+      "problem_type": null,
+      "return_dict": true,
+      "rms_norm_eps": 1e-06,
+      "rope_parameters": {
+        "rope_theta": 100.0,
+        "rope_type": "default"
+      },
+      "standardize": false,
+      "use_clipped_linears": true
+    },
+    "vision_soft_tokens_per_image": 280
+  },
+  "tokenizer": {
+    "vocab": {
+      "<bos>": 2,
+      "<eos>": 1,
+      "<unk>": 3,
+      "<pad>": 0,
+      "<mask>": 4,
+      "<|audio|>": 20,
+      "<|audio>": 18,
+      "<|image>": 17,
+      "<audio|>": 22,
+      "<channel|>": 14,
+      "<image|>": 21,
+      "<turn|>": 16,
+      "<|\"|>": 11,
+      "<tool_call|>": 8,
+      "<tool|>": 6,
+      "<tool_response|>": 10,
+      "<|image|>": 19,
+      "<|channel>": 13,
+      "<|turn>": 15,
+      "<|tool_call>": 7,
+      "<|tool>": 5,
+      "<|tool_response>": 9,
+      "<|think|>": 12,
+      "<|video|>": 23,
+      "[UNK]": 24,
+      "hello": 25,
+      "world": 26,
+      "test": 27,
+      "calibration": 28,
+      "OCR:": 29,
+      "42": 30,
+      "你好": 31
+    },
+    "special_tokens": {
+      "bos_token": "<bos>",
+      "eos_token": "<eos>",
+      "unk_token": "<unk>",
+      "pad_token": "<pad>",
+      "mask_token": "<mask>",
+      "audio_token": "<|audio|>",
+      "boa_token": "<|audio>",
+      "boi_token": "<|image>",
+      "eoa_token": "<audio|>",
+      "eoc_token": "<channel|>",
+      "eoi_token": "<image|>",
+      "eot_token": "<turn|>",
+      "escape_token": "<|\"|>",
+      "etc_token": "<tool_call|>",
+      "etd_token": "<tool|>",
+      "etr_token": "<tool_response|>",
+      "image_token": "<|image|>",
+      "soc_token": "<|channel>",
+      "sot_token": "<|turn>",
+      "stc_token": "<|tool_call>",
+      "std_token": "<|tool>",
+      "str_token": "<|tool_response>",
+      "think_token": "<|think|>"
+    }
+  },
+  "processor_files": {
+    "processor_config.json": {
+      "audio_ms_per_token": 40,
+      "audio_seq_length": 750,
+      "feature_extractor": {
+        "dither": 0.0,
+        "feature_extractor_type": "Gemma4AudioFeatureExtractor",
+        "feature_size": 128,
+        "fft_length": 512,
+        "fft_overdrive": false,
+        "frame_length": 320,
+        "hop_length": 160,
+        "input_scale_factor": 1.0,
+        "max_frequency": 8000.0,
+        "mel_floor": 0.001,
+        "min_frequency": 0.0,
+        "padding_side": "right",
+        "padding_value": 0.0,
+        "per_bin_mean": null,
+        "per_bin_stddev": null,
+        "preemphasis": 0.0,
+        "preemphasis_htk_flavor": true,
+        "return_attention_mask": true,
+        "sampling_rate": 16000
+      },
+      "image_processor": {
+        "do_convert_rgb": true,
+        "do_normalize": false,
+        "do_rescale": true,
+        "do_resize": true,
+        "image_mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "image_processor_type": "Gemma4ImageProcessor",
+        "image_seq_length": 280,
+        "image_std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "max_soft_tokens": 280,
+        "patch_size": 16,
+        "pooling_kernel_size": 3,
+        "resample": 3,
+        "rescale_factor": 0.00392156862745098
+      },
+      "image_seq_length": 280,
+      "processor_class": "Gemma4Processor",
+      "video_processor": {
+        "do_convert_rgb": true,
+        "do_normalize": true,
+        "do_rescale": true,
+        "do_resize": true,
+        "do_sample_frames": true,
+        "image_mean": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "image_std": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "max_soft_tokens": 70,
+        "num_frames": 32,
+        "patch_size": 16,
+        "pooling_kernel_size": 3,
+        "resample": 3,
+        "rescale_factor": 0.00392156862745098,
+        "return_metadata": false,
+        "video_processor_type": "Gemma4VideoProcessor"
+      }
+    }
+  }
+}

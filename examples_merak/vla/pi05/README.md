@@ -14,6 +14,47 @@ Run every command from the repository root. Generated assets stay under
 
 ## Delivery Snapshot
 
+The current unified environment is Python 3.12.13, PyTorch 2.8.0,
+Transformers 5.16.1 and base LeRobot 0.6.0. Pi0.5 does not require a separate
+CI environment. The 2026-09-28 rerun uses strictly loaded local checkpoints,
+instance-local adaptation of the native 4D-mask API, unscaled projected visual
+features, and exactly one language-embedding scale.
+
+| Current numerical validation | Samples | Mean cosine | Mean MAE |
+| --- | --- | --- | --- |
+| Customer DROID H50, HMONNX vs FP32 | 100 fixed inputs/noise | 0.994276 | 0.016587 |
+| LIBERO H50, HMONNX vs FP32, postprocessed | 10 observations × 10 tasks | 0.999177 | 0.003651 |
+| Old vs current native reference, FP32 | Same 100 DROID inputs/noise | 0.999999999992 | 4.90e-7 |
+| Old vs current native reference, BF16 | Same 100 DROID inputs/noise | 0.999801 | 0.002837 |
+
+The Docker `libero_object` closed-loop rerun completed all 10 tasks × 20
+episodes for each runtime: **FP 179/200 (89.5%), HMONNX 179/200 (89.5%),
+delta 0.0 percentage points**. Both use seed 1000, batch size 1, synchronous
+environments and matching process partitions `[0,1] [2,3] [4,5] [6] [7] [8] [9]`.
+Each runtime persisted 100 rollout videos. Per-task success counts differ;
+equal aggregate scores do not imply identical trajectories. The old 187/200
+FP and 185/200 HMONNX results below have not been reproduced in this environment;
+the cause of that historical difference is not established by this rerun.
+
+Local evidence is under
+`/data01/home/yujy/work/unified_regression_runs/pi05_accuracy_20260928/`:
+`accuracy_report.json`, `closed_loop_comparison.{json,csv,png,md}`,
+`video_manifest.json` and `provenance.json`. The `closed_loop_v1` directory
+contains every invocation (`*.command.json`), log, per-episode result and video.
+Source hashes, model hashes, environment versions and the scene-asset commit
+are recorded alongside the metrics. This run used the existing CUDA 12.8.1
+Docker container and the shared conda environment; no separate Pi0.5 model
+environment was used for the current results.
+
+The numerical gate is mean cosine >= 0.99 and mean MAE <= 0.02; it is not a
+per-sample guarantee. Minimum cosines are 0.902708 (DROID) and 0.972373
+(LIBERO). The old reference uses LeRobot 0.5.1 / Transformers 5.3.0 only for
+comparison. BF16 outputs are not bit-identical across versions. These are
+CUDA software-HMONNX results, not measurements on an NPU board.
+
+The following table and published comparison video are **historical LeRobot
+0.5.1 results**, retained separately from the current rerun:
+
 | Track | Validation protocol | Result | What it proves |
 | --- | --- | --- | --- |
 | Official DROID H15 | Public ModelScope checkpoint, fixed sample 0, fixed flow noise | cosine `0.999705`, MAE `0.008121` | One-sample public-checkpoint conversion smoke test |
@@ -62,16 +103,17 @@ episodes 0 through 9 of each task.
 
 ## 1. Environment
 
-The validated environment uses Python 3.12, PyTorch 2.8, LeRobot 0.5.1,
-TorchCodec 0.7.0, and FFmpeg with `libx264` and `drawtext` support.
+Use the shared Python 3.12 / PyTorch 2.8 / Transformers 5.16.1 environment.
+Install base LeRobot 0.6.0; the `pi` extra constrains Transformers to another
+version and must not be used. LIBERO simulation also needs the packages below
+and its scene assets. Video reports need FFmpeg with `libx264` and `drawtext`.
 
 ```bash
-conda create -n pi05 python=3.12
-conda activate pi05
+conda activate xhquant_55_tf_latest_20260828
 
 pip install -v -e . --no-build-isolation
-pip install lerobot==0.5.1 modelscope torchcodec==0.7.0 matplotlib
-pip install "lerobot[libero]==0.5.1" cmake==3.31.6
+pip install lerobot==0.6.0 transformers==5.16.1 modelscope torchcodec==0.7.0 matplotlib
+pip install hf-libero==0.1.4 mujoco==3.2.7 robosuite==1.4.0 opencv-python==4.11.0.86 cmake==3.31.6
 
 ffmpeg -version
 ffprobe -version
@@ -113,7 +155,6 @@ modelscope download \
 For LIBERO, keep runtime configuration under `work_dirs`:
 
 ```bash
-export HOME="$PWD/work_dirs/pi05_libero_runtime/home"
 export LIBERO_CONFIG_PATH="$PWD/work_dirs/pi05_libero_runtime/config"
 ```
 

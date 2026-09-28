@@ -6,14 +6,52 @@ from types import SimpleNamespace
 
 import onnx
 import pytest
-from onnx import helper, TensorProto
+from onnx import TensorProto, helper
 
 from xhmodel_merak.model_build.resolver import resolve_build_plan
 from xhmodel_merak.model_build.workflow import materialize_workflow_config
 from xhmodel_merak.model_catalog import get_recipe
 from xhmodel_merak.model_integrations.gemma4.artifact import validate_mtp
 
+
 MODELS = ["gemma4-e2b", "gemma4-e4b", "gemma4-12b-unified", "gemma4-31b", "gemma4-26b-a4b"]
+
+
+@pytest.mark.parametrize("per_layer", [False, True])
+def test_shared_kv_contract_preserves_full_attention_heads(tmp_path, per_layer):
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import validate_assistant_target_contract
+
+    target, assistant = sources(tmp_path, "gemma4-31b")
+    for root in (target, assistant):
+        path = root / "config.json"
+        config = json.loads(path.read_text())
+        text = config["text_config"]
+        if per_layer:
+            text.pop("num_global_key_value_heads", None)
+            text["per_layer_config"] = {"1": {"num_key_value_heads": 4, "head_dim": 64}}
+        else:
+            text.update(num_global_key_value_heads=4, global_head_dim=64)
+        path.write_text(json.dumps(config))
+    result = validate_assistant_target_contract(assistant, target, {"assistant_num_global_key_value_heads": 4})
+    assert result["shared_cache_geometry"]["full_attention"] == {"num_key_value_heads": 4, "head_dim": 64}
+    assert result["shared_cache_geometry"]["sliding_attention"] == {"num_key_value_heads": 1, "head_dim": 32}
+    path = assistant / "config.json"
+    config = json.loads(path.read_text())
+    config["text_config"]["per_layer_config"] = {"1": {"num_key_value_heads": 2}}
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="shared KV geometry mismatch"):
+        validate_assistant_target_contract(assistant, target)
+
+
+def test_shared_kv_rejects_heterogeneous_full_attention_layers():
+    from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import _cache_geometry_config
+
+    with pytest.raises(ValueError, match="varies within full_attention"):
+        _cache_geometry_config({
+            "num_key_value_heads": 1, "head_dim": 32,
+            "layer_types": ["sliding_attention", "full_attention", "full_attention"],
+            "per_layer_config": {"1": {"num_key_value_heads": 2}, "2": {"num_key_value_heads": 4}},
+        })
 
 
 def sources(tmp_path, model):
@@ -53,7 +91,8 @@ def test_mtp_reuses_public_model_identity_and_binds_sources(tmp_path, model):
     assert plan.variant == "mtp" and base.variant == "full"
     assert plan.quant_method == base.quant_method
     assert plan.precision == base.precision
-    assert plan.low_memory is False
+    assert plan.low_memory is (model == "gemma4-31b")
+    assert base.low_memory is plan.low_memory
     assert plan.config_replacements["export.model.mtp_config.target_hf_model"] == str(target)
     assert plan.config_replacements["export.model.mtp_config.assistant_hf_model"] == str(assistant)
     output = tmp_path / "effective.yaml"
@@ -67,8 +106,14 @@ def test_mtp_reuses_public_model_identity_and_binds_sources(tmp_path, model):
     assert cfg["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8h1_sefp"
     with pytest.raises(ValueError):
         resolve_build_plan(**kwargs, speculative={"mode": "mtp"})
-    with pytest.raises(ValueError):
-        resolve_build_plan(**kwargs, sources={"mtp": str(assistant)}, speculative={"mode": "mtp"}, low_memory=True)
+    if model == "gemma4-31b":
+        standard = resolve_build_plan(
+            **kwargs, sources={"mtp": str(assistant)}, speculative={"mode": "mtp"}, low_memory=False
+        )
+        assert standard.low_memory is False
+    else:
+        with pytest.raises(ValueError):
+            resolve_build_plan(**kwargs, sources={"mtp": str(assistant)}, speculative={"mode": "mtp"}, low_memory=True)
 
 
 @pytest.mark.parametrize(
@@ -164,6 +209,7 @@ def test_build_load_share_decode_only_contract_and_inventory(tmp_path):
 
 def test_draft_runtime_uses_target_embedding_and_leaves_cache_untouched():
     import torch
+
     from xhmodel_merak.xh_llm.models.gemma4_series.mtp_runtime import _build_assistant_inputs
 
     embedding = torch.nn.Embedding(16, 8)
@@ -198,13 +244,14 @@ def test_real_assistant_export_and_v2_readonly_decode(tmp_path, family, ordered)
     """Keep both attention types and the actual ordered/full head in a tiny export."""
     import torch
     from safetensors.torch import save_file
-    from xhquant.api import ConfigDict, PrecisionMode, ptq_quantize
+
     from xhmodel_merak.xh_llm.models.gemma4_series.gemma4_series_mtp_model import (
-        _resolve_assistant_text_types,
         XHGemma4SeriesAssistantDraftModel,
+        _resolve_assistant_text_types,
     )
     from xhmodel_merak.xh_llm.models.gemma4_series.mtp_runtime import AssistantDraftSession
     from xhmodel_merak.xh_llm.models.gemma4_series.mtp_workflow import draft_quant_config
+    from xhquant.api import ConfigDict, PrecisionMode, ptq_quantize
 
     torch.manual_seed(52)
     config_cls, model_cls, _ = _resolve_assistant_text_types({"model_type": family + "_assistant"})

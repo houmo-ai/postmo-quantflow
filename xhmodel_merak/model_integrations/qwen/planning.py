@@ -7,6 +7,7 @@ resolving a build only reads local JSON/YAML, without loading model runtimes.
 from __future__ import annotations
 
 import json
+import struct
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -31,14 +32,42 @@ def resolve_config(
         _validate_visual_workflow(recipe, workflow)
     from .quantization import resolve_quantization
     replacements = resolve_quantization(recipe, variant, workflow, quant_checkpoint, precision)
-    if variant.speculative_mode != "dflash":
+    if recipe.model_id == "qwen3-next-80b-a3b" and variant.speculative_mode == "mtp" and quant_checkpoint:
+        # The draft must share the checkpoint's hidden-state basis. A raw
+        # source is not evidence of compatibility with a rotated target.
+        if not _has_mtp_decoder_weights(Path(quant_checkpoint)):
+            raise invalid_parameter(
+                recipe.model_id, "quant_checkpoint", str(quant_checkpoint),
+                "MTP weights are missing from quant_checkpoint; cannot combine a potentially "
+                "rotated target with raw-source MTP weights. Use full or a complete MTP checkpoint.",
+            )
+    if variant.speculative_mode not in {"dflash", "dflash2"}:
         return replacements
-    source = sources["dflash"]
+    source = sources[variant.speculative_mode]
     return {
         **replacements,
         "export.model.dflash_config.hf_model": source.path,
-        "export.model.dflash_config.noise_token_id": _validate_dflash_source(recipe, source, model_dir),
+        "export.model.dflash_config.noise_token_id": _validate_dflash_source(recipe, source, model_dir, mode=variant.speculative_mode),
     }
+
+
+def _has_mtp_decoder_weights(model_dir: Path) -> bool:
+    index_path = model_dir / "model.safetensors.index.json"
+    if index_path.is_file():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        return any(name.startswith("mtp.layers.") for name in index.get("weight_map", {}))
+    for path in model_dir.glob("*.safetensors"):
+        with path.open("rb") as checkpoint_file:
+            header_size_bytes = checkpoint_file.read(8)
+            if len(header_size_bytes) != 8:
+                continue
+            header_size = struct.unpack("<Q", header_size_bytes)[0]
+            if header_size > 100_000_000:
+                raise ValueError(f"Invalid safetensors header size: {path}")
+            header = json.loads(checkpoint_file.read(header_size))
+            if any(name.startswith("mtp.layers.") for name in header):
+                return True
+    return False
 
 
 def _validate_visual_workflow(recipe: ModelRecipe, workflow: Mapping[str, Any]) -> None:
@@ -69,29 +98,36 @@ def _validate_visual_workflow(recipe: ModelRecipe, workflow: Mapping[str, Any]) 
         )
 
 
-def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: Path) -> int:
+def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: Path, *, mode: str = "dflash") -> int:
     config_path = Path(source.path) / "config.json"
     try:
         assistant_config = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise invalid_parameter(
             recipe.model_id,
-            "sources.dflash",
+            f"sources.{mode}",
             source.path,
             f"requires a readable assistant config.json: {exc}",
         ) from exc
     if not isinstance(assistant_config, Mapping):
         raise invalid_parameter(
             recipe.model_id,
-            "sources.dflash",
+            f"sources.{mode}",
             source.path,
             "assistant config.json must contain a mapping",
+        )
+    architecture = (assistant_config.get("architectures") or ["DFlashDraftModel"])[0]
+    is_dflash2 = architecture == "DFlash2DraftModel"
+    if (mode == "dflash2") != is_dflash2:
+        raise invalid_parameter(
+            recipe.model_id, f"sources.{mode}.architectures", architecture,
+            f"draft architecture does not match requested {mode}",
         )
     dflash_config = assistant_config.get("dflash_config")
     if not isinstance(dflash_config, Mapping):
         raise invalid_parameter(
             recipe.model_id,
-            "sources.dflash",
+            f"sources.{mode}",
             source.path,
             "assistant config.json must declare a dflash_config mapping",
         )
@@ -101,7 +137,7 @@ def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: 
     if mask_token_id is not None and noise_token_id is not None and mask_token_id != noise_token_id:
         raise invalid_parameter(
             recipe.model_id,
-            "sources.dflash.dflash_config",
+            f"sources.{mode}.dflash_config",
             dict(dflash_config),
             "mask_token_id and noise_token_id must agree when both are present",
         )
@@ -109,7 +145,7 @@ def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: 
     if isinstance(token_id, bool) or not isinstance(token_id, int) or token_id < 0:
         raise invalid_parameter(
             recipe.model_id,
-            "sources.dflash.dflash_config.mask_token_id",
+            f"sources.{mode}.dflash_config.mask_token_id",
             token_id,
             "must provide a non-negative integer mask_token_id or noise_token_id",
         )
@@ -146,7 +182,7 @@ def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: 
     ):
         raise invalid_parameter(
             recipe.model_id,
-            "sources.dflash.hidden_size",
+            f"sources.{mode}.hidden_size",
             assistant_hidden_size,
             f"must match target hidden_size={target_hidden_size!r}",
         )
@@ -154,7 +190,7 @@ def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: 
     if assistant_vocab_size is not None and target_vocab_size is not None and assistant_vocab_size != target_vocab_size:
         raise invalid_parameter(
             recipe.model_id,
-            "sources.dflash.vocab_size",
+            f"sources.{mode}.vocab_size",
             assistant_vocab_size,
             f"must match target vocab_size={target_vocab_size!r}",
         )
@@ -164,14 +200,14 @@ def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: 
         if isinstance(num_target_layers, bool) or not isinstance(num_target_layers, int) or num_target_layers <= 0:
             raise invalid_parameter(
                 recipe.model_id,
-                "sources.dflash.num_target_layers",
+                f"sources.{mode}.num_target_layers",
                 num_target_layers,
                 "must be a positive integer",
             )
         if isinstance(target_num_layers, int) and num_target_layers != target_num_layers:
             raise invalid_parameter(
                 recipe.model_id,
-                "sources.dflash.num_target_layers",
+                f"sources.{mode}.num_target_layers",
                 num_target_layers,
                 f"must match target num_hidden_layers={target_num_layers!r}",
             )
@@ -191,7 +227,7 @@ def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: 
         if not valid_target_layers:
             raise invalid_parameter(
                 recipe.model_id,
-                "sources.dflash.dflash_config.target_layer_ids",
+                f"sources.{mode}.dflash_config.target_layer_ids",
                 target_layer_ids,
                 "must be unique non-negative target layer IDs inside the target model",
             )
@@ -208,7 +244,7 @@ def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: 
         if value is not None and expected is not None and value != expected:
             raise invalid_parameter(
                 recipe.model_id,
-                f"sources.dflash.{field}",
+                f"sources.{mode}.{field}",
                 value,
                 f"must match target identity {expected!r}",
             )

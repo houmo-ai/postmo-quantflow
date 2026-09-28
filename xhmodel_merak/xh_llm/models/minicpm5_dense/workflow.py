@@ -2,11 +2,24 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..qwen3.workflow import XHQwen3HMONNXWorkflow
+from ...workflows.result import ExportResult, QuantResult
+from ...workflows.runtime_config import finalize_merak_runtime_config
 
 
 class XHMiniCPM5Workflow(XHQwen3HMONNXWorkflow):
     expected_model_config_cls_name = "XHMiniCPM5ModelConfig"
     expected_model_cls_name = "XHMiniCPM5Model"
+
+    def export(
+        self,
+        quant_result: QuantResult,
+        output_dir: str,
+        device: str,
+        config_overrides: Mapping[str, Any] | None = None,
+    ) -> ExportResult:
+        result = super().export(quant_result, output_dir, device, config_overrides)
+        finalize_merak_runtime_config(result)
+        return result
 
     def build_input_message(self, input_messages: Any) -> list[dict[str, Any]]:
         if isinstance(input_messages, str):

@@ -4,6 +4,7 @@ Only the producer's real dry-run path is used. A tiny safetensors fixture
 exercises MTP detection without running calibration or quantization.
 """
 
+import json
 from copy import deepcopy
 from inspect import signature
 
@@ -47,3 +48,31 @@ def test_registered_qwen_next_workflow_matches_gptq_58_producer(tmp_path, varian
     assert provenance["dry_run"] is True
     assert "--calibration-jsonl" in provenance["command"]
     assert not {"--sym", "--iters", "--dataset"} & set(provenance["command"])
+
+
+def test_reused_next_target_requires_mtp_in_same_checkpoint(tmp_path):
+    from xhmodel_merak.model_integrations.qwen.planning import resolve_config
+
+    recipe = get_recipe("qwen3-next-80b-a3b")
+    variant = recipe.get_variant("mtp")
+    workflow = yaml.safe_load(resolve_workflow_config(variant.workflow_config).read_text())
+    raw, packed = tmp_path / "raw", tmp_path / "packed"
+    raw.mkdir()
+    packed.mkdir()
+    (raw / "model.safetensors.index.json").write_text(json.dumps({
+        "weight_map": {"mtp.layers.0.input_layernorm.weight": "raw.safetensors"},
+    }))
+    (packed / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {}}))
+    with pytest.raises(ValueError, match="cannot combine a potentially rotated target"):
+        resolve_config(
+            recipe=recipe, variant=variant, model_dir=raw, sources={},
+            workflow=workflow, quant_checkpoint=str(packed),
+        )
+    (packed / "model.safetensors.index.json").write_text(json.dumps({
+        "weight_map": {"mtp.layers.0.input_layernorm.weight": "packed.safetensors"},
+    }))
+    replacements = resolve_config(
+        recipe=recipe, variant=variant, model_dir=raw, sources={},
+        workflow=workflow, quant_checkpoint=str(packed),
+    )
+    assert "export.model.mtp_config.hf_model" not in replacements

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "pi05-adaptive-norm-geometry",
+    "patterns": [
+      "xhmodel_merak/xh_other_model/models/pi05/_llm_model_impl_cond.py",
+      "xhmodel_merak/model_integrations/pi05/plugin.py"
+    ]
+  }]
+}

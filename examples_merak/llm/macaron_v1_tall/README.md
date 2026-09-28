@@ -1,79 +1,39 @@
 # Macaron-V1-Tall
 
-Macaron-V1-Tall reuses the Qwen3.5-MoE quantization and base-export
-workflow. `MacaronV1TallWorkflow` injects one LoRA bundle containing four
-adapter ONNX files after the Qwen graph export:
+Macaron 使用 Qwen3.5-MoE 的量化、导出和加载流程，模型类型为
+`Qwen3_5MoeForConditionalGeneration`。不再使用导出后按 ONNX 节点名注入 LoRA
+的私有流程。普通 Linear LoRA 沿用 Qwen3.5 实现；PEFT 的
+`experts.gate_up_proj`、`experts.down_proj` 在模型包装后绑定到 MoeBlock，
+由 SDK 量化并导出专家 A/B 权重。
 
-- `L0`–`L3` have one shared initializer schema.
-- Prefill and Decode bind canonical `L0` initializers.
-- The compiler selects `L1`–`L3` by initializer-name replacement before a
-  request is built.
-- Routed experts use the 27-input `MoeBlock` ABI.
+配置位于 `configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/`：
 
-Two Macaron workflow YAMLs are available under
-`configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/`:
+- `macaron_v1_tall_w4a8.yaml`：不带 LoRA 的 W4A8 主模型。
+- `macaron_v1_tall_w8a8.yaml`：不带 LoRA 的 W8A8 主模型。
+- `macaron_v1_tall_lora.yaml`：W4A8 主模型、W8 LoRA 权重。
 
-- `macaron_v1_tall_w8a8.yaml`: W8A8 backbone; all LoRA weights inherit
-  their target projection format.
-- `macaron_v1_tall_w4a8.yaml`: W4A8 backbone with W8A8 non-routed and
-  routed-expert LoRA weights.
+LoRA 使用通用的 `export.model.lora.path` 列表；需要三个 adapter 时填三个目录，
+没有固定 L0–L3 数量限制。每个目录提供 `adapter_config.json` 和 safetensors 权重。
+专家 LoRA 的激活精度继承 MoeBlock；当前执行使用 ALIGNED 模式。
 
-Each YAML retains its corresponding Qwen quantization and calibration
-settings. The `macaron_lora` section configures only LoRA extraction and
-quantization.
-
-## Supported entry points
-
-- `macaron_workflow.py`: standard quantize/export/Golden workflow.
-- `hmonnx_demo.py`: HMONNX generation demo for L0--L3.
-- `hf_demo.py`: Hugging Face + PEFT reference demo for L0–L3.
-
-The workflow wrapper uses `AutoLLMWorkflow.from_config(...)`; the YAML model
-type selects `MacaronV1TallWorkflow` without a Macaron-specific registry.
-
-Golden generation reuses `Qwen35Workflow.dump_golden()` instead of carrying
-a second implementation. Like the Qwen backbone, a full-model run executes
-every visual token gear before language Prefill/Decode.
-
-The public workflow keeps the same `export(...)` interface as Qwen. It creates
-a derived sibling Qwen export only as an internal intermediate and removes it
-after the final Macaron export has been assembled. Before changing a graph, it
-builds one immutable plan and requires Prefill and Decode to contain the same
-LoRA targets and quantization formats. It then writes the complete L0–L3
-bundle, appends L0 to each normal Qwen stage external-data file, and binds
-non-routed and routed LoRA in one graph load/save per stage.
-
-Like the Qwen3.5/Qwen3.6 example, `--export-from-quanted-model` applies
-`config_overrides={"quant": None}` to skip quantization. Without the flag, the
-workflow follows the YAML `quant` section. An already quantized Macaron
-checkpoint must still contain `loras/L0` through `loras/L3` for injection.
-
-The final directory is first assembled in a sibling temporary directory and
-is renamed to the requested path only after bundle, initializer-order, and
-27-input `MoeBlock` validation succeeds. A failed injection therefore does
-not leave a deliverable-looking partial directory. The workflow does not
-write extracted adapter `.pt` files, per-layer packs, or a non-routed
-intermediate export. Do not run individual injection stages by hand.
-
-Both LoRA groups accept `inherit` or a standard XH2a quantization type such
-as `w8a8h1_sefp`. `inherit` uses the target Linear or MoeBlock projection
-weight format. An explicit routed-expert scheme overrides only LoRA A/B
-weights; its activation and partial-sum formats remain those of MoeBlock.
-All L0--L3 adapters in one export use the same quantization schema.
-
-The final export retains the normal Qwen layout plus:
-
-```text
-runtime_lora/
-  manifest.json
-  L0.onnx, L0.onnx.data
-  L1.onnx, L1.onnx.data
-  L2.onnx, L2.onnx.data
-  L3.onnx, L3.onnx.data
+```yaml
+export:
+  model:
+    model_type: Qwen3_5MoeForConditionalGeneration
+    lora:
+      path: [/models/loras/L0, /models/loras/L1, /models/loras/L2]
+      w_schema: {bits: 8, fp_mode: ssfp, hidden_bit: false}
 ```
 
-The compiler/runtime selects L1–L3 by replacing matching initializer values
-from the selected bundle. For Python HMONNX validation, the generation demo
-creates small, test-only L0–L3 overlay graphs. They symlink immutable base
-weights and point LoRA initializer references at the selected quantized pack;
-the deliverable export remains unchanged.
+`macaron_workflow.py --lora-paths /models/loras/L0 /models/loras/L1 /models/loras/L2`
+通过 `AutoLLMWorkflow` 执行公共工作流。`--export-from-quanted-model` 可以复用已有
+量化 checkpoint；adapter 路径独立传入，不要求保存在 checkpoint 内。
+
+产物遵循 Qwen3.5 的布局：根目录是基础模型，`lora/<adapter-name>/` 中保存每个
+adapter 的完整 Prefill/Decode 视图，根 metadata 的 `lora_adapters` 记录各视图。
+`hmonnx_demo.py --export-dir <产物目录>` 加载全部已导出 adapter，
+`--adapters L0 L2` 可选择其中几个。加载不依赖原始 adapter 或 checkpoint 目录。
+`hf_demo.py` 提供 Transformers + PEFT 参考推理。
+
+小模型 CI 覆盖真实 AutoRound 量化、三个 adapter、产物搬迁和加载推理。
+专家 LoRA 的独立测试覆盖单 token/多 token、PEFT 权重布局和 W4/W8 量化传递。

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision, VariantRecipe
 from xhmodel_merak.model_catalog.registry import ModelCatalog
-from xhmodel_merak.model_integrations._shared import (
-    AUTOREGRESSIVE_BUILD,
+from xhmodel_merak.model_integrations._dependencies import (
     AUTOROUND_REQUIREMENTS,
     GPTQ_REQUIREMENTS,
+    WEMM_MEDIA,
+    runtime_dependencies,
+)
+from xhmodel_merak.model_integrations._shared import (
+    AUTOREGRESSIVE_BUILD,
 )
 
 
@@ -43,6 +47,12 @@ def _recipe(size: str, hidden_size: int, num_layers: int) -> ModelRecipe:
     name = f"wemm_embedding_{size}"
     root = f"{_CONFIG_ROOT}/{size}"
     return ModelRecipe(
+        dependencies=runtime_dependencies(
+            common=WEMM_MEDIA,
+            system=("FFmpeg shared libraries",),
+            quantization=(("autoround", AUTOROUND_REQUIREMENTS),),
+            checkpoint_build=GPTQ_REQUIREMENTS,
+        ),
         model_id=f"wemm-embedding-{size}",
         display_name=f"WeMM-Embedding {size.upper()}",
         family="wemm-embedding",
@@ -78,10 +88,7 @@ def _recipe(size: str, hidden_size: int, num_layers: int) -> ModelRecipe:
             ("text_config.hidden_size", hidden_size),
             ("text_config.num_hidden_layers", num_layers),
         ),
-        worker_requirements=("xhquant", "transformers>=5.5.0,<5.17.0"),
-        quant_requirements=(("autoround", AUTOROUND_REQUIREMENTS),),
         quant_capabilities=(("autoround", ("gptqmodel.recipes.qwen35_autoround:quantize_qwen35_autoround",)),),
-        quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
     )
 
 

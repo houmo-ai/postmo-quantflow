@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision
 from xhmodel_merak.model_catalog.registry import ModelCatalog
+from xhmodel_merak.model_integrations._dependencies import (
+    GPTQ_REQUIREMENTS,
+    runtime_dependencies,
+)
 from xhmodel_merak.model_integrations._shared import (
     AUTOREGRESSIVE_BUILD,
-    GPTQ_REQUIREMENTS,
     text_media_input_schema,
     text_output_schema,
     variant,
@@ -22,6 +25,9 @@ _CONFIG = (
 
 def _recipe() -> ModelRecipe:
     return ModelRecipe(
+        dependencies=runtime_dependencies(
+            checkpoint_build=GPTQ_REQUIREMENTS,
+        ),
         model_id="minicpm5-2.6b",
         display_name="MiniCPM5 2.6B",
         family="minicpm5-dense",
@@ -53,8 +59,6 @@ def _recipe() -> ModelRecipe:
             ("hidden_size", 2048),
             ("num_hidden_layers", 42),
         ),
-        worker_requirements=("xhquant", "transformers>=4.51.0"),
-        quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
     )
 
 

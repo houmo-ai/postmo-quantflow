@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "ling-small-fixture",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_unified_special_fixtures.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_e2e_worker.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_small_model.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_cases.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/ling3_flash/**",
+        "xhmodel_merak/model_integrations/ling/plugin.py",
+        "xhmodel_merak/xh_llm/models/ling_3_flash/_compat.py",
+        "configs_merak/workflows/xh2a/llm_models/ling_3_flash/*.yaml"
+      ]
+    }
+  ]
+}

@@ -7,6 +7,7 @@ from typing import Any
 
 from xhmodel_merak._requirements import validate_worker_capabilities, validate_worker_requirements
 from xhmodel_merak.errors import ErrorCode, ModelError, invalid_parameter
+from xhmodel_merak.model_catalog.dependencies import dependency_profile
 from xhmodel_merak.model_artifact.files import artifact_file
 from xhmodel_merak.model_artifact.validation import (
     read_manifest,
@@ -98,7 +99,10 @@ def inference_model(
     selected_golden = _resolve_golden(recipe, components, golden, golden_artifacts)
     adapter = load_adapter("inference", recipe.inference_adapter)
     _validate_adapter_artifact(adapter, recipe, root, manifest, meta_file)
-    validate_worker_requirements(recipe.worker_requirements, model=recipe.model_id, operation="inference")
+    validate_worker_requirements(
+        dependency_profile(recipe, variant)["inference"]["pip"],
+        model=recipe.model_id, operation="inference",
+    )
     validate_worker_capabilities(recipe.worker_capabilities, model=recipe.model_id, operation="inference")
     try:
         result = adapter.run(

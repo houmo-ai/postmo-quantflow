@@ -313,6 +313,56 @@ def test_pi05_adapter_rejects_sentencepiece_only_tokenizer(tmp_path: Path) -> No
         pi05._validate_tokenizer_snapshot(tokenizer, 48, plan)
 
 
+@pytest.mark.parametrize("entry", ["export", "golden"])
+def test_pi05_llm_registry_receives_constructor_options_without_release_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entry: str
+) -> None:
+    from xhmodel_merak.xh_other_model import builder
+    from xhmodel_merak.xh_other_model.models.pi05 import workflow
+
+    class RegistryObservedError(Exception):
+        pass
+
+    captured = []
+
+    def capture_constructor(config):
+        captured.append(dict(config))
+        raise RegistryObservedError
+
+    monkeypatch.setattr(builder.MODELS, "build", capture_constructor)
+    model_cfg = {
+        "type": "XHGemmaLLMModel",
+        "hf_model": "/local/pi05",
+        "model_name": "pi0_5_libero",
+        "wrap_cfg": {},
+        "quant_config": {},
+    }
+    with pytest.raises(RegistryObservedError):
+        if entry == "export":
+            workflow.export_pi05_llm_component(
+                model_cfg=model_cfg,
+                runtime_cfg={"device": "cpu"},
+                component_dir=tmp_path / "gemma",
+                target_device="XH2a",
+                quant_type="w8a8h1_sefp",
+                component_name="pi05_gemma",
+                kind="gemma",
+            )
+        else:
+            workflow._build_pi05_llm_golden_inputs(
+                model_cfg=model_cfg,
+                config_dir=str(tmp_path),
+                prompt="pick up object",
+                kind="gemma",
+                device="cpu",
+                comp_meta={},
+                selected_image_indices=(0, 1),
+                text_max_length=48,
+            )
+    assert captured == [{key: value for key, value in model_cfg.items() if key != "model_name"}]
+    assert model_cfg["model_name"] == "pi0_5_libero"
+
+
 def test_pi05_adapter_rejects_symlinked_source_root_and_policy_child(tmp_path: Path) -> None:
     outside = tmp_path / "outside-policy"
     _write_pi05_policy(outside)

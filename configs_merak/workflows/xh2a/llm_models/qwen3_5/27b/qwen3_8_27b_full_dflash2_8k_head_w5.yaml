@@ -63,7 +63,7 @@ export:
         quant_type: w8a8h1_sefp
         ops: {}
     only_first_block: false
-    spec_decode_mode: dflash
+    spec_decode_mode: dflash2
     num_draft_tokens: 7
     dflash_config:
       hf_model: weights/Qwen3.8-27B-DFlash2

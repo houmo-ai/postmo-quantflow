@@ -11,6 +11,7 @@ from .contracts import (
     SpeculativeRequest,
     VisionRequest,
 )
+from .dependencies import export_model_dependencies
 
 
 __all__ = [
@@ -26,5 +27,6 @@ __all__ = [
     "VisionRequest",
     "build_model",
     "describe_model",
+    "export_model_dependencies",
     "list_models",
 ]

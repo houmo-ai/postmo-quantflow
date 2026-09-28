@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from xhmodel_merak.errors import ErrorCode, ModelError, invalid_parameter, unsupported_combination
+from xhmodel_merak.model_catalog.dependencies import dependency_profile
 from xhmodel_merak.model_catalog.contracts import ModelRecipe, VariantRecipe
 from xhmodel_merak.model_catalog.identity import (
     build_artifact_name as _build_artifact_name,
@@ -190,12 +191,13 @@ def resolve_build_plan(
     _verify_source_bindings_during_resolution(recipe.model_id, source_dir, source_refs, source_bindings)
     lora_paths = lora_request.paths if lora_request is not None else ()
     lora_sha256 = tuple(_resource_sha256(Path(path)) for path in lora_paths)
-    worker_requirements = list(recipe.worker_requirements)
+    dependencies = dependency_profile(recipe, variant)
+    worker_requirements = dependencies["build"]["pip"]
     worker_capabilities = list(recipe.worker_capabilities)
     if checkpoint_path is not None:
-        worker_requirements.extend(recipe.quant_checkpoint_requirements)
+        worker_requirements = dependencies["checkpoint_build"]["pip"]
     elif resolved_method is not None:
-        worker_requirements.extend(dict(recipe.quant_requirements).get(resolved_method, ()))
+        worker_requirements = dependencies["quantization"][resolved_method]["pip"]
         worker_capabilities.extend(dict(recipe.quant_capabilities).get(resolved_method, ()))
 
     field_sources = {
@@ -924,8 +926,8 @@ def _coerce_speculative(
         if not isinstance(value, Mapping):
             raise invalid_parameter(model, "speculative", value, "must be a SpeculativeRequest or mapping")
         unknown = sorted(set(value) - {"mode", "num_draft_tokens"})
-        if unknown or value.get("mode") not in {"mtp", "dflash"}:
-            raise invalid_parameter(model, "speculative", value, "requires mode='mtp' or mode='dflash'")
+        if unknown or value.get("mode") not in {"mtp", "dflash", "dflash2"}:
+            raise invalid_parameter(model, "speculative", value, "requires mode='mtp', mode='dflash' or mode='dflash2'")
         request = SpeculativeRequest(mode=value["mode"], num_draft_tokens=value.get("num_draft_tokens"))
     num_draft_tokens = request.num_draft_tokens
     if num_draft_tokens is not None and (

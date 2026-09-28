@@ -18,7 +18,8 @@
         "pyproject.toml",
         "benchmark_test/ci_test_transformer5.16.0/test_model_inference_inference_adapters.py",
         "xhmodel_merak/errors.py",
-        "xhmodel_merak/model_artifact/**"
+        "xhmodel_merak/model_artifact/**",
+        "xhmodel_merak/model_integrations/_dependencies.py"
       ]
     }
   ]

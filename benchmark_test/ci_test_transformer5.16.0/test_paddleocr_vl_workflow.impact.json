@@ -4,6 +4,9 @@
     "id": "paddleocr-vl-workflow",
     "patterns": [
       "xhmodel_merak/xh_llm/models/paddleocr_vl/*",
+      "xhmodel_merak/model_integrations/autoregressive/vision.py",
+      "xhmodel_merak/model_integrations/autoregressive/build.py",
+      "xhmodel_merak/xh_llm/workflows/runtime_config.py",
       "configs_merak/workflows/**/paddleocr_vl/**",
       "examples_merak/llm/paddleocr_vl/prepare_calibration.py",
       "examples_merak/llm/paddleocr_vl/paddleocr_vl_workflow.py"

@@ -315,10 +315,9 @@ class CompactHMONNX:
 
         tokens = batch["observation.language.tokens"]
         token_masks = batch["observation.language.attention_mask"]
-        language_embs = (
-            self.policy.model.paligemma_with_expert.embed_language_tokens(tokens)
-            * math.sqrt(self.policy.model.paligemma_with_expert.paligemma.config.text_config.hidden_size)
-        ).half()
+        from xhmodel_merak.xh_other_model.models.pi05._lerobot_compat import language_prefix_embeddings
+
+        language_embs = language_prefix_embeddings(self.policy, tokens).half()
         prefix_embs = torch.cat([*vision_outputs, language_embs], dim=1)
         prefix_pad_masks = torch.cat(
             [
@@ -484,7 +483,9 @@ def main() -> None:
     export_meta = json.loads((export_dir / "export_meta_info.json").read_text(encoding="utf-8"))
     action_horizon = int(export_meta["compact_prefix"]["action_horizon"])
     config = load_config(model_dir, device_name, action_horizon, runtime_config_dir)
-    policy = PI05Policy.from_pretrained(model_dir, config=config, strict=True).to(device).eval()
+    from xhmodel_merak.xh_other_model.models.pi05._export_utils import load_pi05_policy
+
+    policy = load_pi05_policy(str(model_dir), str(device), config=config)
     preprocessor, postprocessor = make_pre_post_processors(
         config,
         pretrained_path=str(runtime_config_dir),

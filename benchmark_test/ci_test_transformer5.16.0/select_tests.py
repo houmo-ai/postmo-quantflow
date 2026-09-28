@@ -351,6 +351,16 @@ def select_for_changes(
         if _matches(changed_file, policy["guarded_patterns"]) and not covered:
             uncovered.append(changed_file)
 
+    # Whole-file/function selections supersede individual nodes; otherwise pytest
+    # could collect and run the same expensive parameter more than once.
+    for test in tuple(selected):
+        owner = test.partition("::")[0]
+        if owner not in selected:
+            owner = test.partition("[")[0]
+        if owner != test and owner in selected:
+            selected.remove(test)
+            reasons[owner].update(reasons.pop(test))
+
     result = Selection(
         changed,
         tuple(sorted(selected)),
@@ -419,7 +429,7 @@ def discover_changed_files(repo_root: Path, base_ref: str | None, head_ref: str)
 def _report(selection: Selection, *, detailed: bool = True) -> str:
     lines = ["CI impact selection:"]
     mode = "full" if selection.full_suite else "incremental"
-    lines.append(f"  mode: {mode}; {len(selection.changed_files)} changed paths; {len(selection.tests)} test files")
+    lines.append(f"  mode: {mode}; {len(selection.changed_files)} changed paths; {len(selection.tests)} test targets")
     for reason in selection.full_suite_reasons:
         lines.append(f"  full-suite reason: {reason}")
     if detailed:

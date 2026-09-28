@@ -1,12 +1,16 @@
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ArtifactFormatSpec, ModelRecipe, ResolvedPrecision
-from xhmodel_merak.model_integrations._shared import (
+from xhmodel_merak.model_integrations._dependencies import (
     AUTOROUND_REQUIREMENTS,
     GPTQ_REQUIREMENTS,
+    runtime_dependencies,
+)
+from xhmodel_merak.model_integrations._shared import (
     PILE10K_RESOURCE,
     text_media_input_schema,
     text_output_schema,
     variant,
 )
+
 
 PROVIDER_ID = "glm53"
 __all__ = ["PROVIDER_ID", "register"]
@@ -38,6 +42,11 @@ def register(catalog):
     )
     catalog.register_recipe(
         ModelRecipe(
+            dependencies=runtime_dependencies(
+                build=("Defuser==0.0.25",),
+                quantization=(("autoround", AUTOROUND_REQUIREMENTS),),
+                checkpoint_build=GPTQ_REQUIREMENTS,
+            ),
             model_id="glm-5.3-flash",
             display_name="GLM 5.3 Flash",
             family="glm-5.3",
@@ -87,12 +96,9 @@ def register(catalog):
                 ("text_config.hidden_size", 4096),
                 ("text_config.num_hidden_layers", 45),
             ),
-            worker_requirements=("xhquant", "transformers>=5.16.1,<5.17.0"),
-            quant_requirements=(("autoround", AUTOROUND_REQUIREMENTS),),
             quant_capabilities=(("autoround", (
                 "gptqmodel.recipes.glm5_3_flash_autoround:quantize_glm5_3_flash_autoround",
             )),),
-            quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
             environment={"ENABLE_HMINFERENCE_V2": "1", "XHQUANT_PACKED_W4": "1"},
         ),
         provider=PROVIDER_ID,

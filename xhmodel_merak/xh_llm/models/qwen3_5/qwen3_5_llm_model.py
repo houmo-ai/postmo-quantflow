@@ -94,8 +94,8 @@ def build_qwen35_spec_decode_contract(
     """Build the deployment ABI consumed by the Merak vLLM proposer."""
 
     mode = str(getattr(config, "spec_decode_mode", "") or "").lower()
-    if mode not in {"mtp", "dflash"}:
-        raise ValueError(f"Qwen3.5 speculative contract requires mtp/dflash, got {mode!r}")
+    if mode not in {"mtp", "dflash", "dflash2"}:
+        raise ValueError(f"Qwen3.5 speculative contract requires mtp/dflash/dflash2, got {mode!r}")
     num_draft_tokens = int(getattr(config, "num_draft_tokens", 0))
     if num_draft_tokens <= 0:
         raise ValueError("Qwen3.5 num_draft_tokens must be positive")
@@ -107,12 +107,12 @@ def build_qwen35_spec_decode_contract(
         getattr(config, "spec_draft_head_weight_bits", None),
         draft_config,
     )
-    hidden_output_name = "target_hidden" if mode == "dflash" else "post_norm_hidden"
+    hidden_output_name = "target_hidden" if mode in {"dflash", "dflash2"} else "post_norm_hidden"
     contract: dict[str, Any] = {
         "runtime_contract_version": 2,
         "mode": mode,
         # Retain the legacy DFlash block-size convention for old tools.
-        "block_size": (num_draft_tokens + 1 if mode == "dflash" else num_draft_tokens),
+        "block_size": (num_draft_tokens + 1 if mode in {"dflash", "dflash2"} else num_draft_tokens),
         "num_draft_tokens": num_draft_tokens,
         "verify_length": num_draft_tokens + 1,
         "draft_head_weight_bits": draft_head_weight_bits,
@@ -737,7 +737,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         self.wrap_cfg["split_conv_cache"] = self.config.split_conv_cache
         self.wrap_cfg["use_manual_depthwise_conv1d"] = self.config.use_manual_depthwise_conv1d
         self._set_recurrent_state_output_contract(prefill=True)
-        if self.config.spec_decode_mode == "dflash":
+        if self.config.spec_decode_mode in {"dflash", "dflash2"}:
             self.wrap_cfg["output_hidden_state_indices"] = self._get_dflash_target_layer_ids()
 
     def create_export_metadata(self, output_dir: str) -> VLLMModelMeta:
@@ -970,11 +970,11 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         self.set_decode()
 
         spec_decode_mode = self.config.spec_decode_mode
-        if spec_decode_mode in ("mtp", "dflash"):
+        if spec_decode_mode in ("mtp", "dflash", "dflash2"):
             spec_seq_len = self.config.num_draft_tokens + 1
             self.set_input_sequence_length(spec_seq_len)
 
-        share_head = spec_decode_mode in ("mtp", "dflash") and state != LLMModelState.QUANTED_DISABLE
+        share_head = spec_decode_mode in ("mtp", "dflash", "dflash2") and state != LLMModelState.QUANTED_DISABLE
         if share_head:
             self.bind_target_head(quantized_head(prefill_quanted_model))
         try:
@@ -982,7 +982,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         finally:
             if share_head:
                 del self._shared_target_head
-        if spec_decode_mode in ("mtp", "dflash"):
+        if spec_decode_mode in ("mtp", "dflash", "dflash2"):
             self._restore_prefill_wrap_cfg()
         self.set_prefill()
 
@@ -1003,7 +1003,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
 
     def _configure_verify_decode(self):
         """Use the same multi-token/cache ABI for main and streamed decode graphs."""
-        if self.config.spec_decode_mode not in ("mtp", "dflash"):
+        if self.config.spec_decode_mode not in ("mtp", "dflash", "dflash2"):
             return
         self.wrap_cfg["verify_output_intermediates"] = True
         self.wrap_cfg["num_logits_to_keep"] = 0
@@ -1034,7 +1034,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         self._sync_split_conv_cache_state()
 
         spec_decode_mode = self.config.spec_decode_mode
-        if spec_decode_mode in ("mtp", "dflash"):
+        if spec_decode_mode in ("mtp", "dflash", "dflash2"):
             self._configure_verify_decode()
 
             def _apply_spec_flags(module):
@@ -1047,7 +1047,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
 
         decode_frontend_model = super()._to_fronted(decode_wrap_model)
 
-        if spec_decode_mode in ("mtp", "dflash"):
+        if spec_decode_mode in ("mtp", "dflash", "dflash2"):
             self._restore_prefill_wrap_cfg()
 
         self._wrap_model = prefill_wrap_model
@@ -1379,7 +1379,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
 
     def _configure_spec_decode_target_export(self) -> None:
         spec_decode_mode = self.config.spec_decode_mode
-        if spec_decode_mode not in ("mtp", "dflash"):
+        if spec_decode_mode not in ("mtp", "dflash", "dflash2"):
             return
 
         self._decode_input_sequence_length = self.config.num_draft_tokens + 1
@@ -1444,6 +1444,32 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
             logger.info(f"Finished exporting Qwen3.5 LoRA adapter {adapter.name!r} to {adapter_dir}")
 
         return exported_adapters
+
+    def _export_big_lora_variants(self, exported_info, adapters):
+        """Stream each adapter through the same placeholder pipeline as the base."""
+        exported = []
+        root = Path(exported_info.exported_dir)
+        for adapter in adapters:
+            self._quanted_model = None
+            self._frontend_model = None
+            self._wrap_model = None
+            self._state = LLMModelState.NONE
+            self._restore_prefill_wrap_cfg()
+            self.config.model_name = exported_info.model_name
+            gc.collect()
+            child = ExportData()
+            child.exported_dir = str(root / "lora" / adapter.name)
+            Path(child.exported_dir).mkdir(parents=True, exist_ok=False)
+            child.meta = copy.deepcopy(exported_info.meta)
+            child.model_name = f"{exported_info.model_name}_{adapter.name}"
+            child.str_datetime = exported_info.str_datetime
+            self._export_big_language_hmonnx(child, adapter)
+            # This intermediate metadata belongs to the new, private child;
+            # finalize_lora_metadata writes the complete adapter view once.
+            (Path(child.exported_dir) / "golden_meta_info.json").unlink()
+            exported.append((adapter, child))
+        finalize_lora_metadata(exported_info.meta, exported_info, exported, self.config.lora)
+        (root / "golden_meta_info.json").write_text(json.dumps(exported_info.meta.to_dict(), indent=4))
 
     def _export_visual_hmonnx_impl(self, exported_info: ExportData) -> None:
         """导出视觉子模型并将相对路径写入统一的 VLLM 元数据。"""
@@ -1520,7 +1546,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         big_hf_model.register_layer_as_place_holder(self._frontend_model.decode)
         return prefill_wrap_cfg, decode_wrap_cfg
 
-    def _export_big_language_hmonnx(self, exported_info: ExportData) -> VLLMModelMeta:
+    def _export_big_language_hmonnx(self, exported_info: ExportData, adapter: LoRAAdapterSpec | None = None) -> VLLMModelMeta:
         """使用 placeholder 分层导出 Qwen3.5 文本模型，降低峰值内存占用。
 
         主图仅保留 attention、GatedDeltaNet、MLP/MoE 等大模块的输入输出契约；
@@ -1589,9 +1615,18 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
 
         # wrap 会把原生模块转换为 DynamicModule/XH 模块，因此需要再次解析并注册
         # 转换后的实际类型，确保 frontend tracing 仍保留相同的模块边界。
+        main_adapter = None
+        if adapter is not None:
+            from .lora_moe import select_adapter
+            main_adapter = select_adapter(adapter, exclude=main_placeholder_prefixes)
+            if main_adapter is not None:
+                attach_lora_buffers(self._wrap_model, main_adapter)
         big_hf_model.strip_unwrapped_placeholder_members(empty_hf_model)
         big_hf_model.register_layer_as_placeholder(empty_hf_model)
         self.to_fronted()
+        if main_adapter is not None:
+            apply_lora_to_frontend(self._frontend_model, main_adapter,
+                                   self.config.lora.w_schema, self.config.lora.a_schema)
 
         # 先创建统一导出目录和元数据；placeholder 子图分别存放在 prefill/decode
         # 主图目录下，文件名由完整 module target 唯一确定。
@@ -1608,6 +1643,11 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         # 模式下保存 wrap 配置，并将两张前端图中的目标模块替换为 PlaceHolderModule。
         prefill_wrap_cfg, decode_wrap_cfg = self._prepare_placeholder_graphs(big_hf_model)
         decode_placeholder_exported_dir = str(Path(exported_dir) / "decode" / "placeholders")
+        if adapter is not None:
+            for cfg in (prefill_wrap_cfg, decode_wrap_cfg):
+                cfg["_lora_adapter_path"] = adapter.source_path
+                cfg["_lora_w_schema"] = self.config.lora.w_schema
+                cfg["_lora_a_schema"] = self.config.lora.a_schema
 
         # 同一 module target 的真实权重只加载一次，再分别按 prefill/decode 配置导出；
         # 每个模块完成后立即释放，控制 CPU/GPU 峰值内存。外层 MemoryTracker 会递归
@@ -1657,6 +1697,8 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         # rejects unsupported PEFT features and visual/VIT tensors before any
         # partial LoRA artifacts are created.
         lora_adapters = inspect_lora_adapters(getattr(self.config, "lora", None))
+        if lora_adapters and is_huge_model_export_enabled() and self.config.spec_decode_mode:
+            raise NotImplementedError("Streamed LoRA export does not yet support speculative decoding")
 
         exported_info = self.get_export_info(output_dir)
         self._export_visual_hmonnx_impl(exported_info)
@@ -1669,9 +1711,9 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
             get_xhquant_logger().info(f"CPU memory usage after releasing visual model: {str(memory_info)}")
 
         if is_huge_model_export_enabled():
-            if lora_adapters:
-                raise NotImplementedError("Qwen3.5 LoRA export is not supported with big-model placeholder export.")
             meta_info = self._export_big_language_hmonnx(exported_info)
+            if lora_adapters:
+                self._export_big_lora_variants(exported_info, lora_adapters)
         else:
             self.to_wrap()
             meta_info = self._export_language_hmonnx_impl(exported_info, lora_adapters=lora_adapters)
@@ -1711,7 +1753,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         spec_decode_mode = self.config.spec_decode_mode
         self._configure_spec_decode_target_export()
 
-        shared_head = quantized_head(self._quanted_model.decode) if spec_decode_mode in {"mtp", "dflash"} else None
+        shared_head = quantized_head(self._quanted_model.decode) if spec_decode_mode in {"mtp", "dflash", "dflash2"} else None
         self._export_hmonnx(exported_info)
 
         exported_lora_adapters: list[tuple[LoRAAdapterSpec, ExportData]] = []
@@ -1760,7 +1802,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
             meta_info.mtp_decode_config = mtp_decode_meta
             logger.info(f"MTP draft models exported to: {mtp_prefill_cfg.work_dir}, {mtp_decode_cfg.work_dir}")
 
-        elif spec_decode_mode == "dflash" and self.config.dflash_config is not None:
+        elif spec_decode_mode in {"dflash", "dflash2"} and self.config.dflash_config is not None:
             from .qwen3_5_dflash_model import XHQwen3_5DFlashDraftModel
 
             dflash_base_cfg = self.config.dflash_config
@@ -1811,7 +1853,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         meta_info.decode_onnx = meta_info.decode_hmonnx
         meta_info.token_embedding_file = meta_info.quant_embedding
         meta_info.max_context_tokens = self.config.context_max_length
-        if spec_decode_mode in ("mtp", "dflash"):
+        if spec_decode_mode in ("mtp", "dflash", "dflash2"):
             spec_decode_section = build_qwen35_spec_decode_contract(
                 self.config,
                 meta_info,

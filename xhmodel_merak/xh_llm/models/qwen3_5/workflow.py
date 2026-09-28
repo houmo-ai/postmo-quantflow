@@ -11,6 +11,7 @@ from xhmodel_merak._environment import scoped_environment
 
 from ...workflows.base import BaseLLMWorkflow
 from ...workflows.result import ExportResult, QuantResult
+from ...workflows.runtime_config import finalize_merak_runtime_config
 
 
 _QWEN35_MODEL_CLS_NAMES = {
@@ -36,56 +37,7 @@ def finalize_qwen35_merak_runtime_config(export_result: ExportResult) -> Path:
     point instead of relying on a later manual copy.
     """
 
-    meta_path = Path(BaseLLMWorkflow._find_golden_meta_file(export_result))
-    config_path = _write_qwen35_merak_runtime_config(meta_path)
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    root_dir = meta_path.parent.resolve()
-    for adapter in meta.get("lora_adapters") or []:
-        adapter_meta = (root_dir / adapter["meta_file"]).resolve()
-        if not adapter_meta.is_relative_to(root_dir) or adapter_meta == meta_path.resolve():
-            raise ValueError("LoRA runtime metadata must refer to a child of the exported model")
-        _write_qwen35_merak_runtime_config(adapter_meta)
-    return config_path
-
-
-def _write_qwen35_merak_runtime_config(meta_path: Path) -> Path:
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    if not isinstance(meta, dict):
-        raise TypeError(f"Qwen3.5 golden metadata must be an object: {meta_path}")
-
-    model_config = meta.get("model_config")
-    if not isinstance(model_config, dict):
-        raise TypeError(f"Qwen3.5 golden metadata must contain an object field 'model_config': {meta_path}")
-
-    # Page attention is a runtime capability of the exported target graph.
-    # Derive it from the finalized metadata (which includes CLI overrides),
-    # rather than from the workflow's original YAML.
-    explicit_page_attention = model_config.get("enable_page_attention")
-    if isinstance(explicit_page_attention, bool):
-        enable_page_attention = explicit_page_attention
-    else:
-        flash_attention = model_config.get("flash_attention")
-        enable_page_attention = bool(isinstance(flash_attention, dict) and flash_attention.get("enable") is True)
-
-    config = {
-        "architectures": ["MerakForCausalLM"],
-        "config_format": "merak_llm",
-        "load_format": "merak_llm",
-        "xh_model": {
-            "model_type": "hmonnx",
-            "meta_info": meta_path.name,
-        },
-        "enable_page_attention": enable_page_attention,
-        "model_type": "merak_llm",
-    }
-    config_path = meta_path.parent / "merak_config.json"
-    temporary_path = config_path.with_name(f".{config_path.name}.tmp")
-    temporary_path.write_text(
-        json.dumps(config, ensure_ascii=False, indent=4) + "\n",
-        encoding="utf-8",
-    )
-    temporary_path.replace(config_path)
-    return config_path
+    return finalize_merak_runtime_config(export_result)
 
 
 class Qwen35Workflow(BaseLLMWorkflow):
@@ -249,7 +201,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
                 "under export.model.lora only"
             )
         adapters = inspect_lora_adapters(lora_cfg)
-        if model_cfg.get("spec_decode_mode") in {"mtp", "dflash"}:
+        if model_cfg.get("spec_decode_mode") in {"mtp", "dflash", "dflash2"}:
             for adapter in adapters:
                 for pair in adapter.pairs:
                     if set(pair.module_path.split(".")) & {"lm_head", "embed_tokens", "mtp"}:
@@ -646,7 +598,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
         resource_tight_mode: bool = False,
     ) -> None:
         mode = self._spec_decode_mode(meta_file)
-        if mode not in {"mtp", "dflash"}:
+        if mode not in {"mtp", "dflash", "dflash2"}:
             return
 
         from .hmonnx_validation import spec_decode_generate
@@ -718,7 +670,7 @@ class Qwen35Workflow(BaseLLMWorkflow):
 
     @staticmethod
     def _spec_decode_golden_max_new_tokens(meta_file: str, mode: str) -> int:
-        if mode != "dflash":
+        if mode not in {"dflash", "dflash2"}:
             return 2
 
         meta = json.loads(Path(meta_file).read_text(encoding="utf-8"))

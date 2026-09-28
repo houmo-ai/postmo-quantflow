@@ -100,7 +100,7 @@ def quick_test_hmonnx(
             and meta_info.get("gears")
         ):
             return visual_hmonnx_smoke_test(meta_file=meta_file, device=device)
-        if spec_mode in {"mtp", "dflash"}:
+        if spec_mode in {"mtp", "dflash", "dflash2"}:
             return spec_decode_generate(
                 meta_file=meta_file,
                 prompt=prompt,
@@ -575,7 +575,7 @@ def _spec_decode_from_meta(
     block_size = int(spec_decode.get("block_size", 4))
     hidden_output_name = spec_decode.get(
         "hidden_output_name",
-        "target_hidden" if spec_mode == "dflash" else "post_norm_hidden",
+        "target_hidden" if spec_mode in {"dflash", "dflash2"} else "post_norm_hidden",
     )
 
     draft: dict[str, dict[str, str]] = {}
@@ -586,7 +586,7 @@ def _spec_decode_from_meta(
             raise ValueError("MTP spec_decode requires draft_prefill_onnx/draft_decode_onnx or draft_onnx")
         draft["prefill"] = {"onnx": str(_resolve_path(model_dir, draft_prefill))}
         draft["decode"] = {"onnx": str(_resolve_path(model_dir, draft_decode))}
-    elif spec_mode == "dflash":
+    elif spec_mode in {"dflash", "dflash2"}:
         draft["context"] = {"onnx": str(_resolve_path(model_dir, spec_decode["draft_context_onnx"]))}
         draft_context_decode = spec_decode.get("draft_context_decode_onnx")
         if draft_context_decode:
@@ -613,7 +613,7 @@ def _dflash_noise_token_from_meta(
     as a narrowly-scoped compatibility fallback.
     """
 
-    if spec_mode != "dflash":
+    if spec_mode not in {"dflash", "dflash2"}:
         return None
 
     spec_decode = meta_info.get("spec_decode")
@@ -723,7 +723,7 @@ def _load_merak_spec_runtime(
     draft_contract = spec_decode_contract.get("draft") or {}
     dflash_sliding_window = (
         draft_contract.get("sliding_window")
-        if spec_mode == "dflash"
+        if spec_mode in {"dflash", "dflash2"}
         else None
     )
 

@@ -65,7 +65,7 @@ def describe_export(root: Path, meta: Mapping[str, Any], *, base: Path = Path())
             standalone = spec.get("standalone_draft_decode_onnx")
             if standalone and standalone != dict((phase, value) for phase, value, _ in phases).get("decode"):
                 phases += (("standalone_decode", standalone, "decode"),)
-        elif mode == "dflash":
+        elif mode in {"dflash", "dflash2"}:
             phases = (
                 ("context", spec.get("draft_context_onnx"), "prefill"),
                 ("context_decode", spec.get("draft_context_decode_onnx"), "decode"),

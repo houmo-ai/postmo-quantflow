@@ -5,6 +5,7 @@
       "id": "minicpm5-2-6b-workflow-contract",
       "patterns": [
         "xhmodel_merak/xh_llm/models/minicpm5_dense/**",
+        "xhmodel_merak/xh_llm/workflows/runtime_config.py",
         "xhmodel_merak/model_integrations/minicpm5_dense/**",
         "configs_merak/workflows/xh2a/llm_models/minicpm5/2_6b/**",
         "examples_merak/llm/minicpm5_dense/**"

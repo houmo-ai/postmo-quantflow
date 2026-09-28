@@ -387,7 +387,7 @@ def _validate_local_runtime_assets(stage_path: Path, meta: Mapping[str, Any], pl
 
 
 def _validate_speculative_assets(stage_path: Path, meta: Mapping[str, Any], plan: BuildPlan) -> None:
-    modes = [component for component in plan.components if component in {"mtp", "dflash"}]
+    modes = [component for component in plan.components if component in {"mtp", "dflash", "dflash2"}]
     if not modes:
         return
     expected_mode = modes[0]
@@ -536,6 +536,16 @@ def _validate_tokenizer_snapshot(path: Path, plan: BuildPlan) -> None:
             text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         encoded = tokenizer(text, return_token_type_ids=False)
         input_ids = encoded.get("input_ids")
+        if (not isinstance(input_ids, list) or not input_ids) and plan.task in {
+            "vision-language-generation", "document-understanding",
+        }:
+            # Some multimodal templates require typed content items; a plain
+            # string renders to an empty prompt even though text is supported.
+            multimodal_messages = [{"role": "user", "content": [{"type": "text", "text": "runtime validation"}]}]
+            text = tokenizer.apply_chat_template(
+                multimodal_messages, tokenize=False, add_generation_prompt=True
+            )
+            input_ids = tokenizer(text, return_token_type_ids=False).get("input_ids")
         if not isinstance(input_ids, list) or not input_ids:
             raise ValueError("tokenizer produced no input_ids")
     except Exception as exc:

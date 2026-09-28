@@ -5,6 +5,8 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal, TypeAlias
 
+from .dependencies import DependencySpec, dependency_profile, describe_dependencies
+
 
 JSONValue: TypeAlias = None | bool | int | float | str | list["JSONValue"] | dict[str, "JSONValue"]
 AdapterKind: TypeAlias = Literal["build", "inference"]
@@ -31,6 +33,7 @@ class VariantRecipe:
     context_workflows: tuple[tuple[int, str], ...] = ()
     # First entry is the default; only list modes implemented by this variant.
     export_modes: tuple[str, ...] = ("standard",)
+    dependencies: DependencySpec = field(default_factory=DependencySpec)
 
     def __post_init__(self) -> None:
         if (
@@ -108,11 +111,8 @@ class ModelRecipe:
     resource_config_bindings: tuple[tuple[str, str], ...] = ()
     config_replacements: tuple[tuple[str, Any], ...] = ()
     source_constraints: tuple[tuple[str, Any], ...] = ()
-    worker_requirements: tuple[str, ...] = ()
     worker_capabilities: tuple[str, ...] = ()
-    quant_requirements: tuple[tuple[str, tuple[str, ...]], ...] = ()
     quant_capabilities: tuple[tuple[str, tuple[str, ...]], ...] = ()
-    quant_checkpoint_requirements: tuple[str, ...] = ()
     environment: dict[str, str] = field(default_factory=dict)
     fixed_artifact_name: str | None = None
     recipe_version: str = "2"
@@ -125,6 +125,7 @@ class ModelRecipe:
     checkpoint_auxiliary_layers_field: str | None = None
     # Exact upstream sub-config type renames, owned by the model family.
     config_type_aliases: tuple[tuple[str, str, str], ...] = ()
+    dependencies: DependencySpec = field(default_factory=DependencySpec)
 
     def __post_init__(self) -> None:
         alias_keys: set[tuple[str, str]] = set()
@@ -190,8 +191,14 @@ class ModelRecipe:
             "default_precision": self.default_precision.to_dict(),
             "deployment_precision": dict(self.deployment_precision),
             "quant_methods": list(self.quant_methods),
-            "worker_requirements": list(self.worker_requirements),
             "worker_capabilities": list(self.worker_capabilities),
+            "dependencies": {
+                "schema_version": 1,
+                "profiles": {
+                    variant.name: {"status": dependency_profile(self, variant)["status"]}
+                    for variant in self.variants
+                },
+            },
         }
 
     def to_description(self) -> dict[str, Any]:
@@ -208,7 +215,11 @@ class ModelRecipe:
             **self.to_summary(),
             "recipe_version": self.recipe_version,
             "artifact_format": self.artifact_format,
-            "workflow_variants": [variant.to_dict() for variant in self.variants],
+            "dependencies": describe_dependencies(self),
+            "workflow_variants": [
+                {**variant.to_dict(), "dependencies": dependency_profile(self, variant)}
+                for variant in self.variants
+            ],
             "supported_precisions": [
                 {"weight": weight, "activation": activation} for weight, activation in self.supported_precisions
             ],
@@ -233,9 +244,7 @@ class ModelRecipe:
             ),
             "input_schema": deepcopy(self.input_schema),
             "output_schema": deepcopy(self.output_schema),
-            "quant_requirements": {method: list(values) for method, values in self.quant_requirements},
             "quant_capabilities": {method: list(values) for method, values in self.quant_capabilities},
-            "quant_checkpoint_requirements": list(self.quant_checkpoint_requirements),
             "quant_checkpoint_methods": list(self.quant_checkpoint_methods),
             "required_resources": list(self.required_resources),
             "bundled_resources": {name: path for name, path in self.bundled_resources},

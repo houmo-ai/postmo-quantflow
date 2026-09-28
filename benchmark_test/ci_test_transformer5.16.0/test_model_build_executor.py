@@ -458,6 +458,12 @@ def test_executor_materializes_dynamic_vit_flattens_legacy_root_and_writes_manif
     export_info = json.loads((output / "export_meta_info.json").read_text(encoding="utf-8"))
     assert export_info["quant_embedding"] == {"path": "quant_embedding.pt", "type": "embedding"}
     assert export_info["quant_embedding_bin"] == {"path": "quant_embedding.bin", "type": "embedding"}
+    assert export_info["environment"] == {"path": "environment.json", "type": "json"}
+    environment = json.loads((output / "environment.json").read_text())
+    assert environment["model_id"] == plan.model_id
+    assert environment["variant"] == plan.variant
+    files = {item["path"] for item in manifest["artifact"]["files"]}
+    assert {"environment.json", "environments/build.txt", "environments/inference.txt"} <= files
     assert "model_build_manifest.json" not in {item["path"] for item in manifest["artifact"]["files"]}
     published_text = "\n".join(
         path.read_text(encoding="utf-8")
@@ -1824,6 +1830,98 @@ def test_quant_checkpoint_config_must_satisfy_installed_recipe_source_constraint
             "actual": replacement,
         }
     ]
+
+
+@pytest.mark.parametrize("head_evidence", [True, False])
+def test_quant_checkpoint_allows_only_proven_lm_head_untying(tmp_path, monkeypatch, head_evidence):
+    source = tmp_path / "source"
+    source.mkdir()
+    config = {
+        "model_type": "qwen3_5",
+        "tie_word_embeddings": True,
+        "text_config": {"tie_word_embeddings": True, "hidden_size": 64},
+    }
+    (source / "config.json").write_text(json.dumps(config))
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    quantized = json.loads(json.dumps(config))
+    quantized["tie_word_embeddings"] = False
+    quantized["text_config"]["tie_word_embeddings"] = False
+    quantized["quantization_config"] = {
+        "lm_head": head_evidence,
+        "meta": {"lm_head_quantization": {"bits": 8}},
+    }
+    config_path = checkpoint / "config.json"
+    config_path.write_text(json.dumps(quantized))
+    (checkpoint / "model.safetensors.index.json").write_text(json.dumps({
+        "weight_map": {"lm_head.qweight": "model-lm-head.safetensors"},
+    }))
+    monkeypatch.setattr("xhmodel_merak.model_build.checkpoint.get_recipe", lambda *_: SimpleNamespace(
+        source_constraints=(), config_type_aliases=(),
+    ))
+    plan = SimpleNamespace(model_id="qwen3.5-4b", model_dir=str(source))
+
+    if head_evidence:
+        verify_quant_model_identity(checkpoint, [(config_path, quantized)], plan)
+    else:
+        with pytest.raises(ModelError, match="does not match the source model config"):
+            verify_quant_model_identity(checkpoint, [(config_path, quantized)], plan)
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "expected_field"),
+    [
+        (None, None),
+        (("text_config", "hidden_size"), "hidden_size"),
+        (("text_config", "rope_parameters", "rope_theta"), "rope_theta"),
+        (("vision_config", "patch_size"), "vision_config.patch_size"),
+        (("vision_config", "model_type"), "vision_config.model_type"),
+    ],
+)
+def test_paddleocr_legacy_flat_config_validates_nested_quant_checkpoint(tmp_path, changed_path, expected_field):
+    source = tmp_path / "source"
+    source.mkdir()
+    legacy = {
+        "model_type": "paddleocr_vl",
+        "architectures": ["PaddleOCRVLForConditionalGeneration"],
+        "hidden_size": 64,
+        "num_hidden_layers": 2,
+        "rope_scaling": {"rope_type": "default", "mrope_section": [2, 2, 2]},
+        "rope_theta": 500000,
+        "vision_config": {"model_type": "paddleocr_vl", "patch_size": 14},
+    }
+    (source / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    quantized = {
+        "model_type": "paddleocr_vl",
+        "architectures": legacy["architectures"],
+        "text_config": {
+            "model_type": "paddleocr_vl_text",
+            "hidden_size": 64,
+            "num_hidden_layers": 2,
+            "rope_parameters": {**legacy["rope_scaling"], "rope_theta": 500000},
+        },
+        "vision_config": {"model_type": "paddleocr_vl_vision", "patch_size": 14},
+    }
+    if changed_path is not None:
+        target = quantized
+        for key in changed_path[:-1]:
+            target = target[key]
+        target[changed_path[-1]] = 42
+    config_path = checkpoint / "config.json"
+    config_path.write_text(json.dumps(quantized), encoding="utf-8")
+    plan = SimpleNamespace(model_id="paddleocr-vl-1.6", model_dir=str(source))
+
+    if expected_field is None:
+        verify_quant_model_identity(checkpoint, [(config_path, quantized)], plan)
+    else:
+        with pytest.raises(ModelError, match="does not match the source model config") as exc_info:
+            verify_quant_model_identity(checkpoint, [(config_path, quantized)], plan)
+        mismatches = exc_info.value.details.get("identity_mismatches", exc_info.value.details.get("config_mismatches"))
+        assert expected_field in (
+            mismatches if isinstance(mismatches, dict) else [item["field"] for item in mismatches]
+        )
 
 
 def test_quant_inspection_requires_a_checkpoint_model_config(source_and_quant):

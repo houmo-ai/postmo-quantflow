@@ -192,6 +192,10 @@ def quantize_paddleocr_vl(
     precision = {
         "scope": "language_model+vision_encoder" if quantize_vision else "language_model",
         "bits": int(bits),
+        "components": {
+            "language_model": {"bits": int(bits)},
+            **({"vision_encoder": {"bits": resolved_vision_bits}} if quantize_vision else {}),
+        },
         "group_size": int(group_size),
         "symmetric": bool(sym),
         "desc_act": bool(desc_act),
@@ -301,7 +305,6 @@ def quantize_paddleocr_vl(
             calibration_data_min_length=1,
             **quantize_kwargs,
         )
-        _pad_symmetric_qzeros(model.model)
         model.save(str(language_dir if quantize_vision else output_path))
 
         if quantize_vision:
@@ -347,7 +350,6 @@ def quantize_paddleocr_vl(
                 calibration_data_min_length=1,
                 **quantize_kwargs,
             )
-            _pad_symmetric_qzeros(model.model)
             model.save(str(vision_dir))
             del model
             gc.collect()
@@ -355,9 +357,7 @@ def quantize_paddleocr_vl(
                 torch.cuda.empty_cache()
             merged_dir = Path(temp_root) / "merged"
             _merge_quantized_stages(language_dir, vision_dir, merged_dir)
-            if output_path.exists():
-                output_path.rmdir()
-            merged_dir.rename(output_path)
+            _publish_quantized_stages(merged_dir, output_path)
 
     register_paddleocr_vl_gptqmodel(stage="combined")
     result.provenance["processor_assets"] = _copy_processor_assets(model_path, output_path)
@@ -365,39 +365,16 @@ def quantize_paddleocr_vl(
     return result
 
 
-def _pad_symmetric_qzeros(model: Any) -> int:
-    """Preserve trailing output channels in GPTQ's packed zero points.
-
-    GPTQModel's CPU packer currently floors the packed qzeros width. For a
-    symmetric layer whose output width is not divisible by the pack factor
-    (PaddleOCR Vision ``fc1`` has 4304 outputs), this drops the final packed
-    word even though qweight and scales retain those channels. Symmetric
-    quantization has one repeated zero point, so extending the final packed
-    word is exact and makes the checkpoint reloadable/dequantizable.
-    """
-
-    import torch
-
-    padded = 0
-    for module in model.modules():
-        qzeros = getattr(module, "qzeros", None)
-        scales = getattr(module, "scales", None)
-        pack_factor = int(getattr(module, "pack_factor", 0) or 0)
-        if not torch.is_tensor(qzeros) or not torch.is_tensor(scales) or pack_factor <= 0:
-            continue
-        required_words = (int(scales.shape[1]) + pack_factor - 1) // pack_factor
-        missing_words = required_words - int(qzeros.shape[1])
-        if missing_words <= 0:
-            continue
-        if not bool(getattr(module, "sym", False)) or qzeros.shape[1] == 0:
-            raise ValueError(
-                "GPTQ qzeros packing dropped trailing asymmetric output channels; "
-                "this recipe can repair only symmetric quantization"
-            )
-        extension = qzeros[:, -1:].expand(-1, missing_words).clone()
-        module.qzeros = torch.cat((qzeros, extension), dim=1)
-        padded += 1
-    return padded
+def _publish_quantized_stages(merged_dir: Path, output_path: Path) -> None:
+    """Publish a merged checkpoint without replacing a reserved output root."""
+    if output_path.exists():
+        if any(output_path.iterdir()):
+            raise FileExistsError(f"Quant output directory is not empty: {output_path}")
+        for entry in merged_dir.iterdir():
+            entry.rename(output_path / entry.name)
+        merged_dir.rmdir()
+    else:
+        merged_dir.rename(output_path)
 
 
 class PaddleOCRVLQModel(_base_qmodel()):

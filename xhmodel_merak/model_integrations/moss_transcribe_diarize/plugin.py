@@ -4,6 +4,7 @@ from typing import Any
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ArtifactFormatSpec, ModelRecipe, ResolvedPrecision
 from xhmodel_merak.model_catalog.registry import ModelCatalog
+from xhmodel_merak.model_integrations._dependencies import AUDIO, runtime_dependencies
 from xhmodel_merak.model_integrations._shared import (
     MOSS_TRANSCRIBE_DIARIZE_BUILD,
     MOSS_TRANSCRIBE_DIARIZE_INFERENCE,
@@ -64,6 +65,7 @@ def _output_schema() -> dict[str, Any]:
 
 def _recipe() -> ModelRecipe:
     return ModelRecipe(
+        dependencies=runtime_dependencies(common=(*AUDIO, "ninja==1.13.0")),
         model_id="moss-transcribe-diarize-0.9b",
         display_name="MOSS-Transcribe-Diarize 0.9B",
         family="moss-transcribe-diarize",
@@ -101,7 +103,6 @@ def _recipe() -> ModelRecipe:
         default_context_length=2048,
         default_prefill_chunk_length=512,
         max_pe_length=262144,
-        worker_requirements=("xhquant", "ninja", "transformers==5.16.1"),
         config_resolver="xhmodel_merak.model_integrations.moss_transcribe_diarize.resources:resolve_config",
     )
 

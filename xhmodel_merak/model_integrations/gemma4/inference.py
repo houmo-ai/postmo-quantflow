@@ -101,8 +101,6 @@ def _run_multimodal(
     max_new_tokens: int,
     device: str,
 ) -> tuple[str, int, float, float, dict[str, Any]]:
-    loaded_video = _load_video(media_path) if modality == "video" else None
-
     import torch
     from PIL import Image
 
@@ -111,10 +109,19 @@ def _run_multimodal(
     with device_context, scoped_environment({"ENABLE_HMINFERENCE_V2": "1", "XHQUANT_PACKED_W4": "1"}):
         from xhmodel_merak.xh_llm import AutoLLMHONNXModel, LLMInferenceContextManager
 
+        # A frame directory needs no processor to validate or load its frames.
+        # Reject an empty/invalid directory before opening the model runtime.
+        loaded_video = (
+            _load_video(media_path, max_frames=1)
+            if modality == "video" and media_path.is_dir()
+            else None
+        )
         runtime_meta = load_json(meta_file)
         loader_kwargs = {"device_map": [resolved_device]} if resolved_device.type == "cuda" else {}
         model = AutoLLMHONNXModel.from_pretrained(str(meta_file), **loader_kwargs)
         processor = model.get_tf_processor()
+        if modality == "video" and loaded_video is None:
+            loaded_video = _load_video(media_path, max_frames=int(processor.video_processor.num_frames))
         content: list[dict[str, Any]] = []
         if modality == "image":
             content.append({"type": "image", "image": Image.open(media_path).convert("RGB")})
@@ -167,9 +174,11 @@ def _run_multimodal(
         )
 
 
-def _load_video(path: Path) -> tuple[Any, dict[str, Any] | None]:
+def _load_video(path: Path, *, max_frames: int) -> tuple[Any, Any]:
     from PIL import Image
 
+    if max_frames < 1:
+        raise ValueError("Gemma4 video processor must allow at least one frame")
     if path.is_dir():
         suffixes = {".bmp", ".jpeg", ".jpg", ".png", ".webp"}
         frame_paths = [frame for frame in sorted(path.iterdir()) if frame.suffix.lower() in suffixes]
@@ -202,7 +211,16 @@ def _load_video(path: Path) -> tuple[Any, dict[str, Any] | None]:
             "frames_indices": list(range(num_frames)),
             "video_backend": "image_directory",
         }
-    return str(path), None
+    import numpy as np
+    from transformers.video_utils import load_video
+
+    def sample_indices(metadata: Any, **_kwargs: Any) -> Any:
+        total = int(metadata.total_num_frames)
+        if total < 1:
+            raise ValueError(f"video contains no frames: {path}")
+        return np.linspace(0, total - 1, min(max_frames, total), dtype=np.int64)
+
+    return load_video(str(path), backend="torchcodec", sample_indices_fn=sample_indices)
 
 
 def _synchronize(device: str) -> None:

@@ -12,11 +12,8 @@ from test_glm53_multimodal import save_tiny_processor, tiny_multimodal_config
 from transformers.models.glm5_next import Glm5NextForConditionalGeneration
 
 
-def write_packed_glm53(source_dir, checkpoint_dir, *, autoround_format=False):
-    from defuser.modeling.moe_experts_interface import prepare_model_for_moe_quantization
-    from gptqmodel import QuantizeConfig
-    from gptqmodel.recipes.glm5_3_flash import EXPERT_PATTERN
-
+def write_native_glm53(source_dir):
+    """Save the unquantized native model for real recipe calibration/export."""
     torch.manual_seed(53464)
     config = tiny_multimodal_config()
     config.text_config.update(
@@ -39,6 +36,24 @@ def write_packed_glm53(source_dir, checkpoint_dir, *, autoround_format=False):
     source = Glm5NextForConditionalGeneration(config).eval().half()
     source.save_pretrained(source_dir)
     save_tiny_processor(source_dir)
+    # The multimodal format fixture originally tokenized whole strings. Real
+    # calibration needs distinct in-vocabulary tokens and full-length rows.
+    from tokenizers.pre_tokenizers import WhitespaceSplit
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(source_dir, local_files_only=True)
+    tokenizer.backend_tokenizer.pre_tokenizer = WhitespaceSplit()
+    tokenizer.save_pretrained(source_dir)
+    return source
+
+
+def write_packed_glm53(source_dir, checkpoint_dir, *, autoround_format=False):
+    from defuser.modeling.moe_experts_interface import prepare_model_for_moe_quantization
+    from gptqmodel import QuantizeConfig
+    from gptqmodel.recipes.glm5_3_flash import EXPERT_PATTERN
+
+    source = write_native_glm53(source_dir)
+    config = source.config
     prepare_model_for_moe_quantization(source)
     weights = dict(source.state_dict())
     packed_names = []

@@ -31,14 +31,14 @@ def _write_graph(path: Path):
     return {"onnx": str(path)}
 
 
-@pytest.mark.parametrize("mode", ["mtp", "dflash"])
+@pytest.mark.parametrize("mode", ["mtp", "dflash", "dflash2"])
 def test_real_v2_shared_target_and_draft_sessions(tmp_path, mode):
     files = {name: _write_graph(tmp_path / f"{name}.onnx")
              for name in ("prefill", "decode", "draft_a", "draft_b")}
     draft = {"prefill" if mode == "mtp" else "context": files["draft_a"], "decode": files["draft_b"]}
     runtime = Qwen3_5SpecDecodeV2Model(
         prefill=files["prefill"], decode=files["decode"], draft=draft,
-        spec_decode_mode=mode, dflash_noise_token_id=0 if mode == "dflash" else None,
+        spec_decode_mode=mode, dflash_noise_token_id=0 if mode in {"dflash", "dflash2"} else None,
         session_device="cpu", auto_offload=False,
     )
     runtime.to("cpu").set_exec_device("cpu")
@@ -61,7 +61,7 @@ def test_real_v2_shared_target_and_draft_sessions(tmp_path, mode):
     weights = [s.constants["shared_weight"] for s in sessions]
     assert len({w.data_ptr() for w in weights}) == 1
     assert not runtime._v2_graphs
-    if mode == "dflash":
+    if mode in {"dflash", "dflash2"}:
         assert runtime.draft_context_decode_session is runtime.draft_context_session
     assert all(s["backend"] == "HMONNXInferenceV2" for s in runtime.get_cuda_graph_status().values()
                if s["backend"] is not None)

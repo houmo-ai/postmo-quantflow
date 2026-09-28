@@ -4,10 +4,14 @@ from typing import Any
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision
 from xhmodel_merak.model_catalog.registry import ModelCatalog
-from xhmodel_merak.model_integrations._shared import (
-    AUTOREGRESSIVE_BUILD,
+from xhmodel_merak.model_integrations._dependencies import (
     AUTOROUND_REQUIREMENTS,
     GPTQ_REQUIREMENTS,
+    IMAGE,
+    runtime_dependencies,
+)
+from xhmodel_merak.model_integrations._shared import (
+    AUTOREGRESSIVE_BUILD,
     text_output_schema,
     variant,
 )
@@ -40,6 +44,11 @@ def _input_schema() -> dict[str, Any]:
 def _recipe() -> ModelRecipe:
     components = ("visual", "prefill", "decode")
     return ModelRecipe(
+        dependencies=runtime_dependencies(
+            common=IMAGE,
+            quantization=(("autoround", AUTOROUND_REQUIREMENTS),),
+            checkpoint_build=GPTQ_REQUIREMENTS,
+        ),
         model_id="paddleocr-vl-1.6",
         display_name="PaddleOCR-VL 1.6",
         family="paddleocr-vl",
@@ -85,10 +94,7 @@ def _recipe() -> ModelRecipe:
             ("model_type", "paddleocr_vl"),
             ("architectures.0", "PaddleOCRVLForConditionalGeneration"),
         ),
-        worker_requirements=("xhquant", "transformers>=5.16.0,<5.17.0"),
-        quant_requirements=(("autoround", AUTOROUND_REQUIREMENTS),),
         quant_capabilities=(("autoround", ("recipes.paddleocr_vl:quantize_paddleocr_vl",)),),
-        quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
     )
 
 

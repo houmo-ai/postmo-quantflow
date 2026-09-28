@@ -613,6 +613,21 @@ class XHGemma4SeriesProcessor(Gemma4Processor):
 
     def apply_chat_template(self, messages: list[dict[str, Any]], add_generation_prompt: bool = True, **kwargs):
         messages = self._normalize_local_wav_audio(messages)
+        video_metadata = []
+        normalized_messages = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                normalized_messages.append(message)
+                continue
+            normalized_content = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "video" and item.get("video_metadata") is not None:
+                    video_metadata.append(item["video_metadata"])
+                    item = {key: value for key, value in item.items() if key != "video_metadata"}
+                normalized_content.append(item)
+            normalized_messages.append({**message, "content": normalized_content})
+        messages = normalized_messages
         text, images, videos, audios, sampling_rate = self._render_messages(messages, add_generation_prompt)
 
         nested_processor_kwargs = kwargs.pop("processor_kwargs", None)
@@ -624,6 +639,9 @@ class XHGemma4SeriesProcessor(Gemma4Processor):
         if isinstance(nested_processor_kwargs, dict):
             processor_kwargs.update(nested_processor_kwargs)
         processor_kwargs.update(kwargs)
+        if video_metadata:
+            processor_kwargs.setdefault("video_metadata", video_metadata)
+            processor_kwargs.setdefault("do_sample_frames", False)
         if images:
             processor_kwargs["images"] = images[0] if len(images) == 1 else images
         if videos:

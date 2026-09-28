@@ -133,7 +133,7 @@ class XHPaddleOCRVLModel(PaddleOCRGenerationMixin, VisionLLMModel):
         self._quanted_model.fixed()
         self.visual.quanted_model.fixed()
         info = self.get_export_info(output_dir)
-        visual_meta = self.visual.export_hmonnx(str(Path(info.exported_dir) / "visual"))
+        visual_meta = self.visual.export_hmonnx(str(info.exported_dir))
         visual_meta.hmonnx = Path(visual_meta.hmonnx).relative_to(info.exported_dir).as_posix()
         info.meta.visual_config = visual_meta
         self._export_hmonnx(info)

@@ -4,12 +4,18 @@
 from pathlib import Path
 
 from ...workflows.base import BaseLLMWorkflow
-from ...workflows.result import QuantResult
+from ...workflows.result import ExportResult, QuantResult
+from ...workflows.runtime_config import finalize_merak_runtime_config
 
 
 class XHPaddleOCRVLWorkflow(BaseLLMWorkflow):
     expected_model_config_cls_name = "XHPaddleOCRVLModelConfig"
     expected_model_cls_name = "XHPaddleOCRVLModel"
+
+    def export(self, quant_result, output_dir, device, config_overrides=None) -> ExportResult:
+        result = super().export(quant_result, output_dir, device, config_overrides)
+        finalize_merak_runtime_config(result)
+        return result
 
     def quant(self, output_dir, device, config_overrides=None):
         config = self.workflow_config.with_overrides(config_overrides)

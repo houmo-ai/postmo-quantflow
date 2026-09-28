@@ -3,11 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision, VariantRecipe
+from xhmodel_merak.model_catalog.dependencies import DependencySpec
 from xhmodel_merak.model_catalog.registry import ModelCatalog
-from xhmodel_merak.model_integrations._shared import (
+from xhmodel_merak.model_integrations._dependencies import (
     AUTOROUND_REQUIREMENTS,
-    GEMMA4_INFERENCE,
     GPTQ_REQUIREMENTS,
+    AUDIO,
+    GEMMA_VIDEO,
+    runtime_dependencies,
+)
+from xhmodel_merak.model_integrations._shared import (
+    GEMMA4_INFERENCE,
     autoregressive_precision_bindings,
     llm_deployment_precision,
     text_media_input_schema,
@@ -43,6 +49,7 @@ def _recipe(
     media_components = ("visual", "video_visual", "audio") if audio else ("visual", "video_visual")
     components = (*media_components, "prefill", "decode")
     unified = model_id == "gemma4-12b-unified"
+    export_modes = ("low_memory", "standard") if model_id == "gemma4-31b" else ("standard",)
     constraints: tuple[tuple[str, Any], ...] = (
         ("model_type", "gemma4_unified" if unified else "gemma4"),
         (
@@ -54,6 +61,13 @@ def _recipe(
         ("text_config.enable_moe_block", moe),
     )
     return ModelRecipe(
+        dependencies=runtime_dependencies(
+            build=GEMMA_VIDEO + (AUDIO if audio else ()),
+            quantization=(
+                (method, AUTOROUND_REQUIREMENTS if method == "autoround" else GPTQ_REQUIREMENTS),
+            ),
+            checkpoint_build=GPTQ_REQUIREMENTS,
+        ),
         model_id=model_id,
         display_name=display_name,
         family="gemma4-series",
@@ -61,10 +75,14 @@ def _recipe(
         task="multimodal-generation",
         modalities=modalities,
         variants=(
-            variant("full", config),
+            variant("full", config, export_modes=export_modes, dependencies=DependencySpec(
+                inference=GEMMA_VIDEO + (AUDIO if audio else ()),
+                system=("FFmpeg shared libraries compatible with TorchCodec 0.7",),
+            )),
             VariantRecipe(
                 name="mtp", workflow_config=config.removesuffix(".yaml") + "_mtp.yaml",
                 speculative_mode="mtp", required_sources=("mtp",), extra_components=("mtp",),
+                export_modes=export_modes,
             ),
         ),
         config_resolver="xhmodel_merak.model_integrations.gemma4.planning:resolve_config",
@@ -90,23 +108,12 @@ def _recipe(
         bundled_resources=bundled_resources,
         resource_config_bindings=((("calibration", "quant.calibration.jsonl"),) if bundled_resources else ()),
         source_constraints=constraints,
-        worker_requirements=(
-            "xhquant",
-            "transformers>=5.13.0,<5.17.0" if unified else "transformers>=5.5.0,<5.17.0",
-        ),
-        quant_requirements=(
-            (
-                method,
-                AUTOROUND_REQUIREMENTS if method == "autoround" else GPTQ_REQUIREMENTS,
-            ),
-        ),
         quant_capabilities=(
             (
                 method,
                 (_GEMMA4_AUTOROUND_CAPABILITY,) if method == "autoround" else (_GEMMA4_RECIPE_CAPABILITY,),
             ),
         ),
-        quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
         required_runtime_files=("per_layer_input_embedding",) if model_id in {"gemma4-e2b", "gemma4-e4b"} else (),
     )
 

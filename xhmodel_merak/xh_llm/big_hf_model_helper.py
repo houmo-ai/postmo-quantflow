@@ -1866,6 +1866,14 @@ class BigHFModelExportHelper:
         get_xhquant_logger().info(f"Replaced {replaced} fused runtime modules with lightweight placeholders.")
         return replaced
 
+    def prepare_wrapped_placeholder_module(self, module, module_target, wrap_cfg):
+        """Bind family-specific operands after semantic wrapping, before tracing."""
+        return module
+
+    def prepare_placeholder_frontend(self, frontend, module_target, wrap_cfg):
+        """Apply family graph rewrites before quantization."""
+        return frontend
+
     def prepare_loaded_placeholder_module(self, module: nn.Module, wrap_cfg) -> nn.Module:
         """Adapt a materialized third-party placeholder before tracing its subgraph."""
         return module
@@ -2569,8 +2577,12 @@ class BigHFModelExportHelper:
         with _without_fx_placeholder_module_type(type(placeholder_m)):
             # 主图需要把该类型视为叶子，而子图恰好相反：必须临时展开模块内部计算。
             wrap_llm_model(placeholder_m, wrap_cfg)
+            placeholder_m = self.prepare_wrapped_placeholder_module(placeholder_m, module_target, wrap_cfg)
             adapted_placeholder_m = _make_flattened_input_adapter(placeholder_m, args_template, expected_outputs)
             placeholder_fronted_graph_module = to_frontend_graph(adapted_placeholder_m, "TorchFX", input_fake_tensors)
+        placeholder_fronted_graph_module = self.prepare_placeholder_frontend(
+            placeholder_fronted_graph_module, module_target, wrap_cfg
+        )
         placeholder_quanted_model = to_quant_graph(placeholder_fronted_graph_module, target_device, quant_cfg)
 
         # 使用 fake tensor 的 shape/dtype 创建零值校准数据，避免执行完整主图收集样本。

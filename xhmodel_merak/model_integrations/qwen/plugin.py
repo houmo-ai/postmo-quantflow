@@ -5,10 +5,14 @@ from typing import Any
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision, VariantRecipe
 from xhmodel_merak.model_catalog.registry import ModelCatalog
-from xhmodel_merak.model_integrations._shared import (
-    AUTOREGRESSIVE_BUILD,
+from xhmodel_merak.model_integrations._dependencies import (
     AUTOROUND_REQUIREMENTS,
     GPTQ_REQUIREMENTS,
+    QWEN_MEDIA,
+    runtime_dependencies,
+)
+from xhmodel_merak.model_integrations._shared import (
+    AUTOREGRESSIVE_BUILD,
     PILE10K_RESOURCE,
     QWEN_INFERENCE,
     autoregressive_precision_bindings,
@@ -43,6 +47,11 @@ def _dense_recipe(
 ) -> ModelRecipe:
     components = ("visual", "prefill", "decode")
     return ModelRecipe(
+        dependencies=runtime_dependencies(
+            common=QWEN_MEDIA,
+            quantization=(("autoround", AUTOROUND_REQUIREMENTS),),
+            checkpoint_build=GPTQ_REQUIREMENTS,
+        ),
         model_id=model_id,
         display_name=display_name,
         family="qwen3.5",
@@ -84,10 +93,7 @@ def _dense_recipe(
             ("text_config.hidden_size", hidden_size),
             ("text_config.num_hidden_layers", num_hidden_layers),
         ),
-        worker_requirements=("xhquant", "transformers>=5.5.0,<5.17.0"),
-        quant_requirements=(("autoround", AUTOROUND_REQUIREMENTS),),
         quant_capabilities=(("autoround", (_QWEN35_AUTOROUND_CAPABILITY,)),),
-        quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
     )
 
 
@@ -122,6 +128,14 @@ def _moe_recipe(
     if router_aux_loss_coef is not None:
         constraints.append((f"{prefix}router_aux_loss_coef", router_aux_loss_coef))
     return ModelRecipe(
+        dependencies=runtime_dependencies(
+            common=QWEN_MEDIA if vision else (),
+            build=("Defuser==0.0.25",) if quant_method == "gptq" else (),
+            quantization=(
+                (quant_method, AUTOROUND_REQUIREMENTS if quant_method == "autoround" else GPTQ_REQUIREMENTS),
+            ),
+            checkpoint_build=GPTQ_REQUIREMENTS,
+        ),
         model_id=model_id,
         display_name=display_name,
         family="qwen3-next" if not vision else "qwen3.5-moe",
@@ -156,23 +170,12 @@ def _moe_recipe(
         resource_config_bindings=((("calibration", "quant.calibration.jsonl"),) if quant_method == "autoround" else ()),
         config_replacements=replacements,
         source_constraints=tuple(constraints),
-        worker_requirements=(
-            "xhquant",
-            "transformers>=5.5.0,<5.17.0" if vision else "transformers>=4.57.0,<5.17.0",
-        ),
-        quant_requirements=(
-            (
-                quant_method,
-                AUTOROUND_REQUIREMENTS if quant_method == "autoround" else GPTQ_REQUIREMENTS,
-            ),
-        ),
         quant_capabilities=(
             (
                 quant_method,
                 (_QWEN35_AUTOROUND_CAPABILITY,) if quant_method == "autoround" else (_QWEN3_NEXT_GPTQ_CAPABILITY,),
             ),
         ),
-        quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
     )
 
 
@@ -186,6 +189,7 @@ def _macaron_recipe() -> ModelRecipe:
                 "full",
                 f"{_QWEN35_MOE}/35b_a3b/macaron_v1_tall_w4a8.yaml",
             ),
+            variant("lora", f"{_QWEN35_MOE}/35b_a3b/macaron_v1_tall_lora.yaml", requires_lora=True),
         ),
         hidden_size=2048,
         num_hidden_layers=40,
@@ -203,10 +207,6 @@ def _macaron_recipe() -> ModelRecipe:
             else binding
             for binding in recipe.deployment_precision_bindings
         ),
-        config_replacements=(
-            ("export.model.fuse_gdr_ops", False),
-            ("export.model.fuse_gdr_block_recurrent_ops", False),
-        ),
         source_constraints=(
             ("architectures.0", "Qwen3_5MoeForConditionalGeneration"),
             *recipe.source_constraints,
@@ -215,9 +215,10 @@ def _macaron_recipe() -> ModelRecipe:
 
 
 def _export_modes(variants: tuple[VariantRecipe, ...]) -> tuple[VariantRecipe, ...]:
-    # The Qwen placeholder exporter shares base/MTP/DFLASH export, but rejects LoRA.
+    # Non-speculative LoRA uses the streamed frontend binding; LoRA + MTP
+    # retains its existing standard-only contract.
     return tuple(
-        replace(item, export_modes=("standard",) if item.requires_lora else ("standard", "low_memory"))
+        replace(item, export_modes=("standard",) if item.requires_lora and item.speculative_mode else ("standard", "low_memory"))
         for item in variants
     )
 
@@ -287,9 +288,9 @@ def _recipes() -> tuple[ModelRecipe, ...]:
                 variant("full", f"{_QWEN35}/27b/qwen3_8_27b_full.yaml"),
                 variant("mtp", f"{_QWEN35}/27b/qwen3_8_27b_full_mtp.yaml", speculative_mode="mtp"),
                 variant(
-                    "dflash",
+                    "dflash2",
                     f"{_QWEN35}/27b/qwen3_8_27b_full_dflash2_8k.yaml",
-                    speculative_mode="dflash",
+                    speculative_mode="dflash2",
                     context_workflows=(
                         (8192, f"{_QWEN35}/27b/qwen3_8_27b_full_dflash2_8k.yaml"),
                         (262144, f"{_QWEN35}/27b/qwen3_8_27b_full_dflash2_256k_fa.yaml"),

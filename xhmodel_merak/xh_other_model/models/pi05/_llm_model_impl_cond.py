@@ -32,7 +32,7 @@ class _GemmaRMSNorm(DynamicModule):
         modulation = self.dense(cond) #* scale
         modulation = modulation.unsqueeze(1)
         # scale, shift, gate = torch.chunk(modulation, 3, -1)
-        scale, shift, gate = torch.split(modulation, [1024, 1024, 1024], dim=-1)
+        scale, shift, gate = torch.split(modulation, [self.modulation_hidden_size] * 3, dim=-1)
         # scale = torch.load("/data01/home/she.gao/xhquant_llm/examples/scale.pt")
         # hidden_states = torch.load("/data01/home/she.gao/xhquant_llm/examples/x.pt")
         weight = 1.0 + scale.to(torch.float32)
@@ -42,7 +42,10 @@ class _GemmaRMSNorm(DynamicModule):
 
     def _setup(self, cfg: Optional[Dict] = None):
         # self.dense = nn.Linear(self.cond_dim, self.dim * 3, bias=True)
-        hidden_size = self.dense.weight.shape[1]
+        if self.dense.weight.shape[0] % 3:
+            raise ValueError("PI05 adaptive norm must project scale, shift and gate")
+        hidden_size = self.dense.weight.shape[0] // 3
+        self.modulation_hidden_size = hidden_size
         self.norm = AdaRMSNorm(hidden_size, self.eps)
         return self
 

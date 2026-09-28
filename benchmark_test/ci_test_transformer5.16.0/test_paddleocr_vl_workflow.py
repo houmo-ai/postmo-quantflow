@@ -8,6 +8,7 @@ import json
 import sys
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -25,10 +26,94 @@ from examples_merak.llm.paddleocr_vl import paddleocr_vl_workflow, prepare_calib
 from xhmodel_merak.workflows import AutoWorkflow
 from xhmodel_merak.xh_llm.models.paddleocr_vl.calibration import load_calibration_inputs
 from xhmodel_merak.xh_llm.models.paddleocr_vl.processing import prepare_inputs
+from xhmodel_merak.xh_llm.models.paddleocr_vl.workflow import XHPaddleOCRVLWorkflow
+from xhmodel_merak.xh_llm.models.paddleocr_vl.model import XHPaddleOCRVLModel
+from xhmodel_merak.xh_llm.workflows.base import BaseLLMWorkflow
+from xhmodel_merak.xh_llm.workflows.result import ExportResult, QuantResult
+from xhmodel_merak.model_integrations.autoregressive.vision import validate_dynamic_vision
+from xhmodel_merak.model_integrations.autoregressive.build import _validate_tokenizer_snapshot
 
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / "configs_merak/workflows/xh2a/llm_models/paddleocr_vl/paddleocr_vl_1_6.yaml"
+
+
+def test_paddleocr_export_writes_merak_runtime_entry(tmp_path, monkeypatch):
+    model = tmp_path / "hmquant_paddleocr"
+    model.mkdir()
+    (model / "golden_meta_info.json").write_text(json.dumps({"model_config": {}}))
+    result = ExportResult(str(tmp_path), "unused.yaml")
+    monkeypatch.setattr(BaseLLMWorkflow, "export", lambda *_args, **_kwargs: result)
+    workflow = object.__new__(XHPaddleOCRVLWorkflow)
+
+    assert workflow.export(QuantResult(raw_model_dir=str(tmp_path)), str(tmp_path), "cpu") is result
+    config = json.loads((model / "merak_config.json").read_text())
+    assert config["xh_model"] == {"model_type": "hmonnx", "meta_info": "golden_meta_info.json"}
+
+
+def test_paddleocr_full_export_places_visual_gears_at_model_root(tmp_path):
+    output = tmp_path / "hmquant_paddleocr"
+    output.mkdir()
+    calls = []
+    visual_meta = SimpleNamespace(hmonnx=str(output / "visual_m4" / "graph.onnx"),
+                                  gear_manifest="visual_gears.json")
+    visual = SimpleNamespace(quanted_model=SimpleNamespace(fixed=lambda: None),
+                             export_hmonnx=lambda path: calls.append(path) or visual_meta)
+    meta = SimpleNamespace(visual_config=None)
+    meta.to_dict = lambda: {"visual_config": vars(meta.visual_config)}
+    info = SimpleNamespace(exported_dir=str(output), meta=meta)
+    fake = SimpleNamespace(
+        _state=None,
+        to_quanted_aligned=lambda: None,
+        _quanted_model=SimpleNamespace(fixed=lambda: None),
+        visual=visual,
+        get_export_info=lambda _path: info,
+        _export_hmonnx=lambda _info: None,
+    )
+
+    XHPaddleOCRVLModel.export_hmonnx(fake, str(output))
+
+    assert calls == [str(output)]
+    assert visual_meta.hmonnx == "visual_m4/graph.onnx"
+    assert json.loads((output / "golden_meta_info.json").read_text())["visual_config"]["gear_manifest"] == "visual_gears.json"
+
+
+def test_paddleocr_schema2_visual_manifest_passes_unified_validation(tmp_path):
+    gears = []
+    for count in (1, 2):
+        path = tmp_path / f"visual_m{count}" / "graph.onnx"
+        path.parent.mkdir()
+        path.write_bytes(b"graph")
+        gears.append({"image_token_capacity": count, "patch_token_capacity": count * 4,
+                      "hmonnx": f"visual_m{count}/graph.onnx"})
+    visual = {
+        "image_token_gears": [1, 2], "gears": gears, "visual_input_mode": "patches",
+        "image_token_capacity": 2, "routing_policy": "smallest_fit",
+        "gear_manifest": "visual_gears.json", "spatial_merge_size": 2,
+        "position_format": "bilinear_interpolation_ids_weights",
+        "rotary_position_format": "height_width_2d_ids",
+        "attention_mask_format": "additive_key_padding_bias",
+        "attention_mask_shape": "[1,1,1,patch_token_capacity]",
+        "attention_mask_operator": "xhquant.nn.MaskedAdd+Softmax",
+        "rotary_cache_length": 16, "hmonnx": "visual_m2/graph.onnx",
+    }
+    manifest = {"schema_version": 2, "token_unit": "post_spatial_merge",
+                "overflow_policy": "reject", **visual}
+    (tmp_path / "visual_gears.json").write_text(json.dumps(manifest))
+
+    checked = validate_dynamic_vision(
+        tmp_path, visual, model_id="paddleocr-vl-1.6",
+        vision_profile="fixture", vision_gears=(1, 2),
+    )
+
+    assert checked["profile"] == "fixture"
+
+
+def test_paddleocr_multimodal_chat_template_passes_tokenizer_validation(tmp_path):
+    _save_processor(tmp_path)
+    plan = SimpleNamespace(model_id="paddleocr-vl-1.6", task="document-understanding")
+
+    _validate_tokenizer_snapshot(tmp_path, plan)
 
 
 def _save_processor(path):

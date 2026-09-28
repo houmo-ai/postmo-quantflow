@@ -80,12 +80,27 @@ def load_manifests(repo_root: Path, suite_relative: str, candidates: set[str]) -
             raise ValueError(f"Impact declaration {relative} must have non-empty rules")
         seen = set()
         for entry in entries:
-            if not isinstance(entry, dict) or set(entry) != {"id", "patterns"}:
-                raise ValueError(f"Each rule in {relative} must contain only id and patterns")
+            if not isinstance(entry, dict) or not {"id", "patterns"} <= set(entry) <= {"id", "patterns", "nodes"}:
+                raise ValueError(f"Each rule in {relative} must contain id, patterns and optional nodes")
             name = entry["id"]
             if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name) or name in seen:
                 raise ValueError(f"Invalid/duplicate rule id in {relative}: {name!r}")
             seen.add(name)
             patterns = validate_paths(entry["patterns"], field=f"{relative}:{name}.patterns")
-            rules.append(ImpactRule(name, patterns, test))
+            nodes = entry.get("nodes")
+            if nodes is None:
+                if "nodes" in entry:
+                    raise ValueError(f"nodes must be a non-empty list in {relative}")
+                rules.append(ImpactRule(name, patterns, test))
+                continue
+            if not isinstance(nodes, list) or not nodes or not all(isinstance(n, str) for n in nodes) or len(set(nodes)) != len(nodes):
+                raise ValueError(f"nodes must be a non-empty unique list in {relative}")
+            for node in nodes:
+                # Only local functions/parameter instances: never redirect to
+                # another file or interpret shell/pytest option syntax.
+                if not isinstance(node, str) or not re.fullmatch(
+                    r"test_[A-Za-z0-9_]+(?:\[[A-Za-z0-9_./-]+\])?", node
+                ):
+                    raise ValueError(f"Invalid local pytest node in {relative}: {node!r}")
+                rules.append(ImpactRule(name, patterns, f"{test}::{node}"))
     return tuple(rules)

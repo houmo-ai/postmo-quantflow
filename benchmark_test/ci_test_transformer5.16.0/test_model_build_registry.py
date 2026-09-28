@@ -14,14 +14,14 @@ from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_
 
 
 EXPECTED_VARIANTS = {
-    "macaron-v1-tall": ["full"],
+    "macaron-v1-tall": ["full", "lora"],
     "minicpm5-2.6b": ["full"],
     "qwen3.5-0.8b": ["full"],
     "qwen3.5-2b": ["full"],
     "qwen3.5-4b": ["full"],
     "qwen3.5-9b": ["full", "mtp", "dflash"],
     "qwen3.6-27b": ["full", "mtp", "dflash"],
-    "qwen3.8-27b": ["full", "mtp", "dflash"],
+    "qwen3.8-27b": ["full", "mtp", "dflash2"],
     "qwen3.6-35b-a3b": ["full", "mtp", "dflash", "lora", "lora_mtp"],
     "ornith-1.0-35b-a3b": ["full"],
     "qwen3.5-122b-a10b": ["full", "mtp", "dflash"],
@@ -232,6 +232,7 @@ def test_paddleocr_vl_description_exposes_document_runtime_contract():
 
     assert description["workflow_variants"] == [
         {
+            "dependencies": description["dependencies"]["profiles"]["full"],
             "name": "full",
             "workflow_config": (
                 "configs_merak/workflows/xh2a/llm_models/paddleocr_vl/paddleocr_vl_1_6_r1_autoround_w8_token_gears.yaml"
@@ -458,7 +459,7 @@ def test_qwen3_next_public_variants_use_the_pinned_gptq_recipe():
     assert full["workflow_config"].endswith("qwen3_next_80b_a3b_full_gptq.yaml")
     assert mtp["workflow_config"].endswith("qwen3_next_80b_a3b_full_mtp_gptq.yaml")
     assert description["quant_methods"] == ["gptq"]
-    assert description["quant_requirements"] == {"gptq": ["gptqmodel>=5.8,<5.9"]}
+    assert "gptqmodel==5.8.0" in description["dependencies"]["profiles"]["full"]["quantization"]["gptq"]["pip"]
     assert description["quant_capabilities"] == {"gptq": ["gptqmodel.recipes.qwen3_next:quantize_qwen3_next"]}
 
     for model in ("qwen3.6-35b-a3b", "ornith-1.0-35b-a3b", "qwen3.5-122b-a10b"):
@@ -483,37 +484,28 @@ def test_registry_listing_does_not_import_model_runtime_dependencies():
 
 
 def test_registry_exposes_executable_worker_dependency_profiles(monkeypatch):
-    assert "transformers>=5.13.0,<5.17.0" in describe_model("gemma4-12b-unified", full=True)["worker_requirements"]
-    assert "transformers>=5.5.0,<5.17.0" in describe_model("qwen3.5-4b", full=True)["worker_requirements"]
-    assert describe_model("qwen3.5-4b", full=True)["quant_requirements"]["autoround"] == [
-        "auto-round>=0.12.0.dev0,<0.13.0",
-        "gptqmodel>=5.8,<5.9",
-    ]
+    def profile(model):
+        description = describe_model(model, full=True)
+        return next(iter(description["dependencies"]["profiles"].values()))
+
+    assert "transformers==5.16.1" in profile("gemma4-12b-unified")["inference"]["pip"]
+    assert "transformers==5.16.1" in profile("qwen3.5-4b")["inference"]["pip"]
+    assert "qwen-vl-utils==0.0.14" in profile("qwen3.5-4b")["inference"]["pip"]
+    assert "qwen-vl-utils==0.0.14" in profile("wemm-embedding-2b")["inference"]["pip"]
+    assert "torchvision==0.23.0" in profile("wemm-embedding-2b")["inference"]["pip"]
+    assert "qwen-vl-utils==0.0.14" not in profile("qwen3-next-80b-a3b")["inference"]["pip"]
+    assert {"auto-round==0.12.0", "gptqmodel==5.8.0"} <= set(profile("qwen3.5-4b")["quantization"]["autoround"]["pip"])
     assert describe_model("qwen3.5-4b", full=True)["quant_capabilities"]["autoround"] == [
         "gptqmodel.recipes.qwen35_autoround:quantize_qwen35_autoround"
     ]
-    assert describe_model("qwen3.5-4b", full=True)["quant_checkpoint_requirements"] == ["gptqmodel>=5.8,<5.9"]
-    assert describe_model("gemma4-31b", full=True)["quant_requirements"]["gptq"] == [
-        "gptqmodel>=5.8,<5.9",
-    ]
+    assert "gptqmodel==5.8.0" in profile("qwen3.5-4b")["checkpoint_build"]["pip"]
+    assert "gptqmodel==5.8.0" in profile("gemma4-31b")["quantization"]["gptq"]["pip"]
     assert describe_model("gemma4-31b", full=True)["quant_capabilities"]["gptq"] == [
         "gptqmodel.recipes.gemma4:quantize_gemma4"
     ]
-    assert describe_model("kokoro-82m-v1.1-zh", full=True)["worker_requirements"] == [
-        "xhquant",
-        "misaki==0.9.4",
-        "cn2an",
-        "jieba",
-        "ordered-set",
-        "pypinyin",
-        "pypinyin-dict",
-    ]
+    assert "misaki[en,zh]==0.9.4" in profile("kokoro-82m-v1.1-zh")["inference"]["pip"]
     assert describe_model("pi0.5-libero", full=True)["required_resources"] == ["tokenizer"]
-    assert describe_model("pi0.5-libero", full=True)["worker_requirements"] == [
-        "xhquant",
-        "transformers>=5.3.0,<5.4.0",
-        "lerobot==0.5.1",
-    ]
+    assert {"xhquanttool==0.9.2", "transformers==5.16.1", "lerobot==0.6.0"} <= set(profile("pi0.5-libero")["inference"]["pip"])
     assert describe_model("qwen3.5-4b", full=True)["worker_capabilities"] == []
     assert describe_model("gemma4-e2b", full=True)["worker_capabilities"] == []
     assert describe_model("ling-3.0-flash", full=True)["worker_capabilities"] == []
@@ -541,7 +533,7 @@ def test_registry_exposes_executable_worker_dependency_profiles(monkeypatch):
     monkeypatch.setattr("xhmodel_merak._requirements._module_available", lambda _name: True)
     with pytest.raises(ModelError, match="dependency profile"):
         validate_worker_requirements(
-            ("xhquant", "transformers>=5.5.0,<5.17.0"),
+            ("xhquant", "transformers==5.16.1"),
             model="qwen3.5-4b",
             operation="build",
         )

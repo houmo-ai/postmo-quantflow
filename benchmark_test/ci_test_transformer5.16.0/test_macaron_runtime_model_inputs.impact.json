@@ -4,14 +4,12 @@
     {
       "id": "macaron-v1-tall-runtime-workflow-contract",
       "patterns": [
-        "xhmodel_merak/xh_llm/models/macaron_v1_tall/__init__.py",
-        "xhmodel_merak/xh_llm/models/macaron_v1_tall/workflow.py",
-        "xhmodel_merak/xh_llm/models/macaron_v1_tall/macaron_v1_tall_model.py",
-        "xhmodel_merak/xh_llm/models/macaron_v1_tall/macaron_v1_tall_hmonnx_inference.py",
-        "xhmodel_merak/xh_llm/models/macaron_v1_tall/lora_export_config.py",
-        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/macaron_v1_tall_w4a8.yaml",
-        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/macaron_v1_tall_w8a8.yaml",
-        "examples_merak/llm/macaron_v1_tall/**"
+        "xhmodel_merak/xh_llm/models/qwen3_5/**",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/**",
+        "xhmodel_merak/model_integrations/qwen/**",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/macaron*.yaml",
+        "examples_merak/llm/macaron_v1_tall/**",
+        "benchmark_test/ci_test_transformer5.16.0/test_macaron_runtime_model_inputs.py"
       ]
     }
   ]

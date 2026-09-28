@@ -694,8 +694,10 @@ License File:   licenses/grouped_gemm/LICENSE
 
 --------------------------------------------------------------------------------
 Component Name: lerobot
-Version:        0.4.0
+Version:        0.4.0; 0.6.0 (Pi0.5 prefix cache adapter)
 Upstream URL:   https://github.com/huggingface/lerobot/archive/refs/tags/v0.4.0.tar.gz
+Additional URL: https://github.com/huggingface/lerobot/blob/v0.6.0/src/lerobot/policies/pi_gemma.py
+Modified File:  xhmodel_merak/xh_other_model/models/pi05/_prefix_cache.py
 License:        Apache-2.0
 License File:   licenses/lerobot/LICENSE
 --------------------------------------------------------------------------------

@@ -27,6 +27,26 @@ def _parse_wrapper_args(argv: list[str]) -> tuple[Path | None, list[str]]:
     return args.tokenizer_dir, lerobot_args
 
 
+def make_strict_pi05_policy(cfg, ds_meta=None, env_cfg=None, rename_map=None):
+    """Load the local evaluation checkpoint without LeRobot's catch-and-continue loader."""
+    from lerobot.configs.types import FeatureType
+    from lerobot.envs import env_to_policy_features
+    from lerobot.policies.utils import validate_visual_features_consistency
+    from xhmodel_merak.xh_other_model.models.pi05._export_utils import load_pi05_policy
+
+    if cfg.type != "pi05" or not cfg.pretrained_path or cfg.use_peft:
+        raise ValueError("This evaluator requires a local, complete Pi0.5 checkpoint")
+    if ds_meta is not None or env_cfg is None:
+        raise ValueError("This evaluator requires a simulation environment")
+    features = env_to_policy_features(env_cfg)
+    expected = {key: value for key, value in features.items() if value.type is FeatureType.ACTION}
+    if cfg.output_features != expected:
+        raise ValueError(f"Checkpoint action features differ from simulation: {cfg.output_features} != {expected}")
+    if not rename_map:
+        validate_visual_features_consistency(cfg, features)
+    return load_pi05_policy(str(cfg.pretrained_path), str(cfg.device), config=cfg)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     tokenizer_dir, lerobot_args = _parse_wrapper_args(argv)
@@ -51,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
         raise FileNotFoundError(f"No tokenizer.json or tokenizer.model in {tokenizer_dir}")
 
     original_make_processors = lerobot_eval.make_pre_post_processors
+    original_make_policy = lerobot_eval.make_policy
 
     @wraps(original_make_processors)
     def make_processors_with_local_tokenizer(*args: Any, **kwargs: Any):
@@ -62,10 +83,12 @@ def main(argv: list[str] | None = None) -> int:
     original_argv = sys.argv
     try:
         lerobot_eval.make_pre_post_processors = make_processors_with_local_tokenizer
+        lerobot_eval.make_policy = make_strict_pi05_policy
         sys.argv = [original_argv[0], *lerobot_args]
         lerobot_eval.main()
     finally:
         lerobot_eval.make_pre_post_processors = original_make_processors
+        lerobot_eval.make_policy = original_make_policy
         sys.argv = original_argv
     return 0
 

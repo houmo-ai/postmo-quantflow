@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ModelRecipe, ResolvedPrecision
 from xhmodel_merak.model_catalog.registry import ModelCatalog
-from xhmodel_merak.model_integrations._shared import (
-    AUTOREGRESSIVE_BUILD,
+from xhmodel_merak.model_integrations._dependencies import (
     AUTOROUND_REQUIREMENTS,
     GPTQ_REQUIREMENTS,
+    runtime_dependencies,
+)
+from xhmodel_merak.model_integrations._shared import (
+    AUTOREGRESSIVE_BUILD,
     LING_INFERENCE,
     PILE10K_RESOURCE,
     llm_deployment_precision,
@@ -22,6 +25,10 @@ _LING3 = "configs_merak/workflows/xh2a/llm_models/ling_3_flash"
 
 def _recipe() -> ModelRecipe:
     return ModelRecipe(
+        dependencies=runtime_dependencies(
+            quantization=(("autoround", AUTOROUND_REQUIREMENTS),),
+            checkpoint_build=GPTQ_REQUIREMENTS,
+        ),
         model_id="ling-3.0-flash",
         display_name="Ling 3.0 Flash",
         family="ling-3.0",
@@ -73,9 +80,6 @@ def _recipe() -> ModelRecipe:
             ("hidden_size", 2560),
             ("num_hidden_layers", 42),
         ),
-        worker_requirements=("xhquant", "transformers>=5.5.0,<5.17.0"),
-        quant_requirements=(("autoround", AUTOROUND_REQUIREMENTS),),
-        quant_checkpoint_requirements=GPTQ_REQUIREMENTS,
     )
 
 

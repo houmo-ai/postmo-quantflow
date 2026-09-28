@@ -81,7 +81,7 @@ def test_public_plan_binds_actual_exporter_switch_and_restores_environment(
     assert os.environ.get(variable) == inherited
 
 
-def test_lora_rejected_before_loading_adapter_weights(tmp_path):
+def test_streamed_lora_mtp_rejected_before_loading_adapter_weights(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     adapter = tmp_path / "adapter"
@@ -93,6 +93,7 @@ def test_lora_rejected_before_loading_adapter_weights(tmp_path):
             output_dir=str(tmp_path / "output"),
             low_memory=True,
             lora={"paths": [str(adapter)]},
+            speculative={"mode": "mtp"},
         )
 
 
@@ -100,6 +101,7 @@ def test_description_explains_variant_defaults_and_does_not_advertise_gemma():
     qwen = describe_model("qwen3.6-35b-a3b")["low_memory"]
     assert qwen["default"] is None
     assert qwen["variants"]["full"] == {"default": False, "choices": [False, True]}
-    assert qwen["variants"]["lora"] == {"default": False, "choices": [False]}
+    assert qwen["variants"]["lora"] == {"default": False, "choices": [False, True]}
+    assert qwen["variants"]["lora_mtp"] == {"default": False, "choices": [False]}
     assert describe_model("ling-3.0-flash")["low_memory"]["variants"]["full"]["default"] is True
     assert "low_memory" not in describe_model("gemma4-e2b")

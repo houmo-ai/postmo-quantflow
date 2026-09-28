@@ -4,6 +4,7 @@ from typing import Any
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ArtifactFormatSpec, ModelRecipe, ResolvedPrecision
 from xhmodel_merak.model_catalog.registry import ModelCatalog
+from xhmodel_merak.model_integrations._dependencies import AUDIO, runtime_dependencies
 from xhmodel_merak.model_integrations._shared import KOKORO_BUILD, KOKORO_INFERENCE, variant
 
 
@@ -42,6 +43,10 @@ def _output_schema() -> dict[str, Any]:
 
 def _recipe() -> ModelRecipe:
     return ModelRecipe(
+        dependencies=runtime_dependencies(
+            common=(*AUDIO, "misaki[en,zh]==0.9.4", "onnxruntime==1.24.4"),
+            unresolved=("Kokoro build requires the pinned source checkout bundled with the model assets",),
+        ),
         model_id="kokoro-82m-v1.1-zh",
         display_name="Kokoro 82M v1.1 Chinese",
         family="kokoro",
@@ -68,15 +73,6 @@ def _recipe() -> ModelRecipe:
         output_schema=_output_schema(),
         default_profile="bucketed-t32f160-t64f320-t128f640-t256f1280",
         profiles=("bucketed-t32f160-t64f320-t128f640-t256f1280",),
-        worker_requirements=(
-            "xhquant",
-            "misaki==0.9.4",
-            "cn2an",
-            "jieba",
-            "ordered-set",
-            "pypinyin",
-            "pypinyin-dict",
-        ),
         fixed_artifact_name=("hmquant_xh2_kokoro-82m-v1.1-zh_w16a16_t32-64-128-256_f160-320-640-1280"),
     )
 

@@ -1,0 +1,463 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "unified-common",
+      "patterns": [
+        "xhmodel_merak/model_build/**",
+        "xhmodel_merak/model_inference/**",
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_artifact/**",
+        "xhmodel_merak/_requirements.py",
+        "xhmodel_merak/_environment.py",
+        "xhmodel_merak/model_integrations/autoregressive/**",
+        "xhmodel_merak/xh_llm/workflows/**",
+        "xhmodel_merak/workflows/**",
+        "benchmark_test/ci_test_transformer5.16.0/_unified*.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/unified/**",
+        "xhmodel_merak/model_integrations/__init__.py",
+        "xhmodel_merak/model_integrations/_shared.py",
+        "xhmodel_merak/model_integrations/_dependencies.py"
+      ]
+    },
+    {
+      "id": "unified-qwen-shared",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5/**",
+        "xhmodel_merak/model_integrations/qwen/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[macaron-v1-tall/full]",
+        "test_public_build_relocate_and_inference[ornith-1.0-35b-a3b/full]",
+        "test_public_build_relocate_and_inference[qwen3-next-80b-a3b/full]",
+        "test_public_build_relocate_and_inference[qwen3-next-80b-a3b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.5-0.8b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/dflash]",
+        "test_public_build_relocate_and_inference[qwen3.5-2b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-4b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-9b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-9b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.5-9b/dflash]",
+        "test_public_build_relocate_and_inference[qwen3.6-27b/full]",
+        "test_public_build_relocate_and_inference[qwen3.6-27b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.6-27b/dflash]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/full]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/dflash]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/lora]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/lora_mtp]",
+        "test_public_build_relocate_and_inference[qwen3.8-27b/full]",
+        "test_public_build_relocate_and_inference[qwen3.8-27b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.8-27b/dflash2]",
+        "test_public_build_relocate_and_inference[wemm-embedding-2b/full]",
+        "test_public_build_relocate_and_inference[wemm-embedding-4b/full]",
+        "test_public_build_relocate_and_inference[wemm-embedding-9b/full]",
+        "test_public_build_relocate_and_inference[macaron-v1-tall/lora]"
+      ]
+    },
+    {
+      "id": "unified-qwen-moe",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[macaron-v1-tall/full]",
+        "test_public_build_relocate_and_inference[ornith-1.0-35b-a3b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/dflash]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/full]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/dflash]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/lora]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/lora_mtp]",
+        "test_public_build_relocate_and_inference[macaron-v1-tall/lora]"
+      ]
+    },
+    {
+      "id": "unified-gemma",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/gemma4_series/**",
+        "xhmodel_merak/model_integrations/gemma4/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[gemma4-12b-unified/full]",
+        "test_public_build_relocate_and_inference[gemma4-12b-unified/mtp]",
+        "test_public_build_relocate_and_inference[gemma4-26b-a4b/full]",
+        "test_public_build_relocate_and_inference[gemma4-26b-a4b/mtp]",
+        "test_public_build_relocate_and_inference[gemma4-31b/full]",
+        "test_public_build_relocate_and_inference[gemma4-31b/mtp]",
+        "test_public_build_relocate_and_inference[gemma4-e2b/full]",
+        "test_public_build_relocate_and_inference[gemma4-e2b/mtp]",
+        "test_public_build_relocate_and_inference[gemma4-e4b/full]",
+        "test_public_build_relocate_and_inference[gemma4-e4b/mtp]"
+      ]
+    },
+    {
+      "id": "unified-glm",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/glm5_3_flash/**",
+        "xhmodel_merak/model_integrations/glm53/**",
+        "benchmark_test/ci_test_transformer5.16.0/_glm53_packed_fixture.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_glm53_multimodal.py"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[glm-5.3-flash/full]"
+      ]
+    },
+    {
+      "id": "unified-ling",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/ling_3_flash/**",
+        "xhmodel_merak/model_integrations/ling/**",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/ling3_flash/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[ling-3.0-flash/full]"
+      ]
+    },
+    {
+      "id": "unified-macaron",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/macaron_v1_tall/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[macaron-v1-tall/full]",
+        "test_public_build_relocate_and_inference[macaron-v1-tall/lora]"
+      ]
+    },
+    {
+      "id": "unified-minicpm",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm5_dense/**",
+        "xhmodel_merak/model_integrations/minicpm5_dense/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[minicpm5-2.6b/full]"
+      ]
+    },
+    {
+      "id": "unified-paddleocr",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/paddleocr_vl/**",
+        "xhmodel_merak/model_integrations/paddleocr_vl/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[paddleocr-vl-1.6/full]"
+      ]
+    },
+    {
+      "id": "unified-moss",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/moss_transcribe_diarize/**",
+        "xhmodel_merak/model_integrations/moss_transcribe_diarize/**",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/moss/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[moss-transcribe-diarize-0.9b/full]"
+      ]
+    },
+    {
+      "id": "unified-qwen-next",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_next/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3-next-80b-a3b/full]",
+        "test_public_build_relocate_and_inference[qwen3-next-80b-a3b/mtp]"
+      ]
+    },
+    {
+      "id": "unified-wemm",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/wemm_embedding/**",
+        "xhmodel_merak/model_integrations/wemm_embedding/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[wemm-embedding-2b/full]",
+        "test_public_build_relocate_and_inference[wemm-embedding-4b/full]",
+        "test_public_build_relocate_and_inference[wemm-embedding-9b/full]"
+      ]
+    },
+    {
+      "id": "unified-pi05",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/pi05/**",
+        "xhmodel_merak/model_integrations/pi05/**",
+        "benchmark_test/ci_test_transformer5.16.0/_pi05_small_fixture.py"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[pi0.5-libero/lerobot-h50]"
+      ]
+    },
+    {
+      "id": "unified-kokoro",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/kokoro/**",
+        "xhmodel_merak/model_integrations/kokoro/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[kokoro-82m-v1.1-zh/full]"
+      ]
+    },
+    {
+      "id": "unified-config-gemma4-12b-unified",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/12b_unified/gemma4_12b_unified*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[gemma4-12b-unified/full]",
+        "test_public_build_relocate_and_inference[gemma4-12b-unified/mtp]"
+      ]
+    },
+    {
+      "id": "unified-config-gemma4-26b-a4b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/26b_a4b/gemma4_26b_a4b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[gemma4-26b-a4b/full]",
+        "test_public_build_relocate_and_inference[gemma4-26b-a4b/mtp]"
+      ]
+    },
+    {
+      "id": "unified-config-gemma4-31b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/31b/gemma4_31b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[gemma4-31b/full]",
+        "test_public_build_relocate_and_inference[gemma4-31b/mtp]"
+      ]
+    },
+    {
+      "id": "unified-config-gemma4-e2b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/e2b/gemma4_e2b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[gemma4-e2b/full]",
+        "test_public_build_relocate_and_inference[gemma4-e2b/mtp]"
+      ]
+    },
+    {
+      "id": "unified-config-gemma4-e4b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/gemma4_series/e4b/gemma4_e4b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[gemma4-e4b/full]",
+        "test_public_build_relocate_and_inference[gemma4-e4b/mtp]"
+      ]
+    },
+    {
+      "id": "unified-config-glm-5-3-flash",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/glm5_3_flash/glm5_3_flash*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[glm-5.3-flash/full]"
+      ]
+    },
+    {
+      "id": "unified-config-kokoro-82m-v1-1-zh",
+      "patterns": [
+        "configs_merak/workflows/xh2a/other_models/kokoro/kokoro*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[kokoro-82m-v1.1-zh/full]"
+      ]
+    },
+    {
+      "id": "unified-config-ling-3-0-flash",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/ling_3_flash/ling_3_flash*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[ling-3.0-flash/full]"
+      ]
+    },
+    {
+      "id": "unified-config-macaron-v1-tall",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/macaron_v1_tall*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[macaron-v1-tall/full]",
+        "test_public_build_relocate_and_inference[macaron-v1-tall/lora]"
+      ]
+    },
+    {
+      "id": "unified-config-minicpm5-2-6b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/minicpm5/2_6b/minicpm5_2_6b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[minicpm5-2.6b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-moss-transcribe-diarize-0-9b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/moss_transcribe_diarize/0_9b/moss_transcribe_diarize*.yaml",
+        "configs_merak/workflows/xh2a/llm_models/moss_transcribe_diarize/0_9b/moss_transcribe_diarize_128k*.yaml",
+        "configs_merak/workflows/xh2a/llm_models/moss_transcribe_diarize/0_9b/moss_transcribe_diarize_16k*.yaml",
+        "configs_merak/workflows/xh2a/llm_models/moss_transcribe_diarize/0_9b/moss_transcribe_diarize_64k*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[moss-transcribe-diarize-0.9b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-ornith-1-0-35b-a3b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/ornith-1.0-35b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[ornith-1.0-35b-a3b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-paddleocr-vl-1-6",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/paddleocr_vl/paddleocr_vl_1_6_r1*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[paddleocr-vl-1.6/full]"
+      ]
+    },
+    {
+      "id": "unified-config-pi0-5-libero",
+      "patterns": [
+        "configs_merak/workflows/xh2a/other_models/pi05/libero/pi05_libero*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[pi0.5-libero/lerobot-h50]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-next-80b-a3b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_next/80b_a3b/qwen3_next_80b_a3b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3-next-80b-a3b/full]",
+        "test_public_build_relocate_and_inference[qwen3-next-80b-a3b/mtp]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-5-0-8b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/0.8b/qwen3_5_0_8b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3.5-0.8b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-5-122b-a10b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_5_122b_a10b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.5-122b-a10b/dflash]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-5-2b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/2b/qwen3_5_2b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3.5-2b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-5-4b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/4b/qwen3_5_4b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3.5-4b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-5-9b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/9b/qwen3_5_9b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3.5-9b/full]",
+        "test_public_build_relocate_and_inference[qwen3.5-9b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.5-9b/dflash]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-6-27b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_6_27b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3.6-27b/full]",
+        "test_public_build_relocate_and_inference[qwen3.6-27b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.6-27b/dflash]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-6-35b-a3b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b*.yaml",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_lora*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/full]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/dflash]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/lora]",
+        "test_public_build_relocate_and_inference[qwen3.6-35b-a3b/lora_mtp]"
+      ]
+    },
+    {
+      "id": "unified-config-qwen3-8-27b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5/27b/qwen3_8_27b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[qwen3.8-27b/full]",
+        "test_public_build_relocate_and_inference[qwen3.8-27b/mtp]",
+        "test_public_build_relocate_and_inference[qwen3.8-27b/dflash2]"
+      ]
+    },
+    {
+      "id": "unified-config-wemm-embedding-2b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/wemm_embedding/2b/wemm_embedding_2b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[wemm-embedding-2b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-wemm-embedding-4b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/wemm_embedding/4b/wemm_embedding_4b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[wemm-embedding-4b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-wemm-embedding-9b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/wemm_embedding/9b/wemm_embedding_9b*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[wemm-embedding-9b/full]"
+      ]
+    }
+  ]
+}

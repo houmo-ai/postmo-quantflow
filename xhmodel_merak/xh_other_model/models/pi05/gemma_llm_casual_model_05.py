@@ -75,8 +75,10 @@ class XHGemma05CLLMModel(LLMBaseModel):
         
         _llm = self.wrap_model
         self.config = _llm.config
-        self.token_embedding = nn.Embedding(num_embeddings=257152, embedding_dim=1024, padding_idx=0)
-        random_embedding = torch.randn(257152, 1024)
+        self.token_embedding = nn.Embedding(
+            num_embeddings=self.config.vocab_size, embedding_dim=self.config.hidden_size, padding_idx=0
+        )
+        random_embedding = torch.randn(self.config.vocab_size, self.config.hidden_size)
         random_embedding[0] = 0.0
         state_dict = {"weight": random_embedding}
         self.token_embedding.load_state_dict(state_dict)
@@ -141,8 +143,6 @@ class XHGemma05CLLMModel(LLMBaseModel):
             raise ValueError("PI05 Expert cache write exceeds cache capacity")
         past_key_caches = self.past_key_caches
         past_value_caches = self.past_value_caches
-        torch.manual_seed(42)
-        cond = torch.randn(1, 1024).to(torch.bfloat16).to(device)
         if "attention_mask" in data:
             attention_mask = data['attention_mask']
         else:
@@ -159,7 +159,8 @@ class XHGemma05CLLMModel(LLMBaseModel):
         # inputs_embeds = torch.load("/data01/home/she.gao/lerobot/suffix_embs.pt").to(torch.float32)
         # cond = torch.load("/data01/home/she.gao/xhquant_llm/examples/cond.pt")
         # cond = cond.to(torch.float16)
-        cond = torch.ones(1, 1024, device=device, dtype=torch.float32)
+        cond_width = getattr(self.config, "adarms_cond_dim", None) or self.config.hidden_size
+        cond = torch.ones(1, cond_width, device=device, dtype=torch.float32)
         return (
             inputs_embeds.to(device),
             past_seq_length.to(device),

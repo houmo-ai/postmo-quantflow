@@ -62,8 +62,11 @@ def test_paddleocr_existing_checkpoint_skips_quantizer_requirements(tmp_path, qu
 
     assert plan.quant_method == "autoround"
     assert plan.worker_capabilities == ()
-    assert "gptqmodel>=5.8,<5.9" in plan.worker_requirements
+    assert "gptqmodel==5.8.0" in plan.worker_requirements
     assert not any(requirement.startswith("auto-round") for requirement in plan.worker_requirements)
+    published = describe_model("paddleocr-vl-1.6", full=True)["dependencies"]["profiles"][plan.variant]
+    assert list(plan.worker_requirements) == published["checkpoint_build"]["pip"]
+
     assert plan.deployment_precision == {
         "visual": "w8a16h1_sefp", "prefill": "w8a8_sefp", "decode": "w8a8_sefp",
     }
@@ -78,6 +81,9 @@ def test_default_plan_uses_full_autoround_and_dynamic_vit(model_dir, tmp_path):
 
     assert plan.variant == "full"
     assert plan.quant_method == "autoround"
+    published = describe_model(plan.model_id, full=True)["dependencies"]["profiles"][plan.variant]
+    assert list(plan.worker_requirements) == published["quantization"]["autoround"]["pip"]
+
     assert plan.precision.weight == "w4"
     assert plan.precision.activation == "a8"
     assert plan.vision_profile == "visualm96-196-384-704-1536"
@@ -110,6 +116,9 @@ def test_described_build_choices_are_accepted_by_the_real_resolver(model_dir, tm
         **values,
     )
 
+    published = describe_model(plan.model_id, full=True)["dependencies"]["profiles"][plan.variant]
+    phase = published["build"] if quant_method is None else published["quantization"][quant_method]
+    assert list(plan.worker_requirements) == phase["pip"]
     assert plan.precision.weight == weight
     assert plan.quant_method == quant_method
     assert plan.context_length == parameters["context_length"]["maximum"]
@@ -130,7 +139,7 @@ def test_qwen3_next_mtp_selects_registered_gptq_variant(model_dir, tmp_path):
     assert plan.variant == "mtp"
     assert plan.config_path.endswith("qwen3_next_80b_a3b_full_mtp_gptq.yaml")
     assert plan.quant_method == "gptq"
-    assert "gptqmodel>=5.8,<5.9" in plan.worker_requirements
+    assert "gptqmodel==5.8.0" in plan.worker_requirements
     assert not any(requirement.startswith("auto-round") for requirement in plan.worker_requirements)
     assert plan.worker_capabilities == ("gptqmodel.recipes.qwen3_next:quantize_qwen3_next",)
     assert plan.config_overrides["export.model.num_draft_tokens"] == 6
@@ -357,13 +366,15 @@ def test_dflash_source_requires_semantic_assistant_contract(
 
 def test_qwen38_selects_registered_dflash2_variant(model_dir, tmp_path):
     config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    config["text_config"] = {"hidden_size": 5120, "num_hidden_layers": 64}
+    config["text_config"] = {"architectures": ["DFlash2DraftModel"],
+                "hidden_size": 5120, "num_hidden_layers": 64}
     (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
     assistant = tmp_path / "assistant"
     assistant.mkdir()
     (assistant / "config.json").write_text(
         json.dumps(
             {
+                "architectures": ["DFlash2DraftModel"],
                 "hidden_size": 5120,
                 "num_target_layers": 64,
                 "dflash_config": {
@@ -379,11 +390,11 @@ def test_qwen38_selects_registered_dflash2_variant(model_dir, tmp_path):
         model_id="qwen3.8-27b",
         model_dir=str(model_dir),
         output_dir=str(tmp_path / "artifact"),
-        speculative={"mode": "dflash"},
-        sources={"dflash": str(assistant)},
+        speculative={"mode": "dflash2"},
+        sources={"dflash2": str(assistant)},
     )
 
-    assert plan.variant == "dflash"
+    assert plan.variant == "dflash2"
     assert plan.config_path.endswith("qwen3_8_27b_full_dflash2_8k.yaml")
     assert plan.config_replacements["export.model.dflash_config.hf_model"] == str(assistant.resolve())
     assert plan.config_replacements["export.model.model_name"] == "qwen3_8_27b"
@@ -393,11 +404,29 @@ def test_qwen38_selects_registered_dflash2_variant(model_dir, tmp_path):
         model_dir=str(model_dir),
         output_dir=str(tmp_path / "long-artifact"),
         context_length=262144,
-        speculative={"mode": "dflash"},
-        sources={"dflash": str(assistant)},
+        speculative={"mode": "dflash2"},
+        sources={"dflash2": str(assistant)},
     )
     assert long_plan.config_path.endswith("qwen3_8_27b_full_dflash2_256k_fa.yaml")
     assert long_plan.workflow_config.endswith("qwen3_8_27b_full_dflash2_256k_fa.yaml")
+
+
+    # Public names and checkpoint architecture must agree; no silent alias.
+    with pytest.raises(ModelError):
+        resolve_build_plan(model_id="qwen3.8-27b", model_dir=str(model_dir),
+                           output_dir=str(tmp_path / "old-name"),
+                           speculative={"mode": "dflash"}, sources={"dflash": str(assistant)})
+    with pytest.raises(ModelError):
+        resolve_build_plan(model_id="qwen3.8-27b", model_dir=str(model_dir),
+                           output_dir=str(tmp_path / "wrong-source-key"),
+                           speculative={"mode": "dflash2"}, sources={"dflash": str(assistant)})
+    draft_config = json.loads((assistant / "config.json").read_text())
+    draft_config["architectures"] = ["DFlashDraftModel"]
+    (assistant / "config.json").write_text(json.dumps(draft_config))
+    with pytest.raises(ModelError, match="architecture does not match"):
+        resolve_build_plan(model_id="qwen3.8-27b", model_dir=str(model_dir),
+                           output_dir=str(tmp_path / "wrong-architecture"),
+                           speculative={"mode": "dflash2"}, sources={"dflash2": str(assistant)})
 
 
 def test_lora_selects_the_only_validated_lora_workflow(model_dir, tmp_path):
@@ -734,7 +763,7 @@ def test_quant_output_dir_must_be_unused_disjoint_and_applicable(model_dir, tmp_
         output_dir=str(tmp_path / "checkpoint-artifact"),
         quant_checkpoint=str(checkpoint),
     )
-    assert "gptqmodel>=5.8,<5.9" in checkpoint_plan.worker_requirements
+    assert "gptqmodel==5.8.0" in checkpoint_plan.worker_requirements
     assert not any(requirement.startswith("auto-round") for requirement in checkpoint_plan.worker_requirements)
 
     with pytest.raises(ModelError) as skipped_error:

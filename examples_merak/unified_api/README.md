@@ -198,8 +198,10 @@ Qwen3.5/3.6/3.8 recipe v3 的新量化默认校准 Head W5。普通版与 MTP/DF
 使用同一主模型精度；MTP、DFlash、DFlash2 继承完整 head 载荷。
 旧 draft head 字段与主模型相同则兼容，冲突时报错。Qwen3-Next 保持原有量化
 recipe 默认值，采用相同的 head 继承规则，不提供 LoRA 组合。
-DFlash2 沿用 `speculative={"mode": "dflash"}` 和 `sources.dflash`，由 draft
-checkpoint 的架构声明识别，不增加一个 head 或精度选择参数。
+DFlash2 使用独立的公开变体 `dflash2`、`speculative={"mode": "dflash2"}` 和
+`sources.dflash2`，要求 draft checkpoint 声明 `DFlash2DraftModel`。
+Qwen3.5／3.6 的 DFlash 仍使用 `dflash`；两者不作为别名互换。
+底层共用 `dflash_config` 字段，不增加一个 head 或精度选择参数。
 例如 Qwen3.8 的 AutoRound 主干先通过 W5 head workflow 补校准，之后统一接口
 读取新 checkpoint 中的 W5 元数据并让 target/draft 共用 head：
 
@@ -208,8 +210,8 @@ build_model(
     model_id="qwen3.8-27b",
     model_dir="/models/Qwen3.8-27B",
     quant_checkpoint="/models/autoround_quant_head_w5",
-    sources={"dflash": "/models/Qwen3.8-27B-DFlash2"},
-    speculative={"mode": "dflash"},
+    sources={"dflash2": "/models/Qwen3.8-27B-DFlash2"},
+    speculative={"mode": "dflash2"},
     context_length=8192,
     output_dir="/exports/qwen3_8_dflash2_w5_8k",
     device="cuda:0",
@@ -270,3 +272,29 @@ Qwen3.5-122B-A10B 的 MTP workflow 默认沿用主模型 W5 head 权重，生成
 复用已补全 W5 head、W4 MTP 专家的量化目录时，使用
 `model_id="qwen3.5-122b-a10b"`、`speculative={"mode": "mtp", "num_draft_tokens": 3}`
 和 `low_memory=True`；单卡执行设置 `CUDA_VISIBLE_DEVICES=1`、`device="cuda:0"`。
+
+### 查询与导出模型依赖
+
+```python
+from xhmodel_merak.model_build import describe_model, export_model_dependencies
+
+metadata = describe_model("gemma4-12b-unified", full=True)
+print(metadata["dependencies"]["profiles"]["full"])
+export_model_dependencies(
+    model_id="gemma4-12b-unified",
+    variant="full",
+    output_dir="gemma4-full-environment",  # 必须不存在
+)
+```
+
+导出 `environment.json`、`environments/build.txt`、`inference.txt`、
+`checkpoint_build.txt` 以及已注册量化方法的 `quant-<method>.txt`。
+所有文件路径相对导出根目录；JSON 记录每份 requirements 的 SHA-256。
+`build_model` 也将同样的文件附在产物中，JSON 以 `type: json` 登记在
+`export_meta_info.json`，全部文件纳入构建 Manifest。
+
+这些文件当前是候选直接依赖，尚不是锁文件。先检查 `status`、`unresolved`、
+`audit` 与 `validation`：`blocked_distribution` 表示本机修改后的源码发行物等
+条件尚未齐备；`pending_install_validation` 表示尚未完成干净环境验证。
+只有完成发布、依赖解析与对应变体的运行验证后，才能把文件作为可复现安装清单。
+查询和导出不会执行 pip、下载权重或导入 Torch/SDK。

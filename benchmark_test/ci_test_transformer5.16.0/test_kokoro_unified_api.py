@@ -68,6 +68,53 @@ def _validate_both(root, plan):
     )
 
 
+def test_minimal_ci_fixture_keeps_validation_and_restores_public_profile(release, monkeypatch, tmp_path):
+    from _unified_special_fixtures import configure_kokoro_minimal
+    from xhmodel_merak.model_catalog.registry import get_catalog
+    from xhmodel_merak.model_integrations.kokoro import artifact
+    from xhmodel_merak.model_build.resolver import resolve_build_plan
+    from xhmodel_merak.model_build.workflow import materialize_workflow_config
+    from xhmodel_merak.workflows import AutoWorkflow
+
+    root, meta, plan = release
+    catalog = get_catalog()
+    recipe = get_recipe(MODEL_ID)
+    original_routes = artifact._ROUTES
+    meta["bucket_presets"]["routes"] = meta["bucket_presets"]["routes"][:1]
+    for role, component in meta["components"].items():
+        key = "t0032" if role == "text_duration" else "f0160"
+        component["buckets"] = {key: component["buckets"][key]}
+    metadata_path = root / "export_meta_info.json"
+    metadata_path.write_text(json.dumps(meta))
+    with monkeypatch.context() as patch:
+        configure_kokoro_minimal(catalog, recipe, patch)
+        source = tmp_path / "source"
+        source.mkdir()
+        resolved = resolve_build_plan(model_id=MODEL_ID, model_dir=str(source), output_dir=str(tmp_path / "out"))
+        effective = tmp_path / "effective.yaml"
+        materialize_workflow_config(resolved, effective)
+        workflow = AutoWorkflow.from_config(model_dir=str(source), config_path=str(effective))
+        config = workflow.workflow_config.with_overrides(resolved.config_overrides).export
+        assert config["token_buckets"] == [32]
+        assert config["audio_seconds_buckets"] == [4]
+        assert resolved.profile == "bucketed-t32f160"
+        _validate_both(root, plan)
+        broken = copy.deepcopy(meta)
+        del broken["components"]["frame_acoustic"]["buckets"]["f0160"]
+        metadata_path.write_text(json.dumps(broken))
+        with pytest.raises(ModelError, match="bucket metadata"):
+            build.validate_artifact(root, plan)
+        metadata_path.write_text(json.dumps(meta))
+    assert artifact._ROUTES == original_routes
+    assert get_recipe(MODEL_ID) == recipe
+    with pytest.raises(ModelError, match="all four"):
+        build.validate_artifact(root, plan)
+    with pytest.raises(ValueError, match="all four"):
+        inference.adapter.validate_artifact(
+            recipe=recipe, root=root, manifest=_manifest(root), meta_file=metadata_path,
+        )
+
+
 def test_release_is_consumed_without_reconstructing_frontend_or_source(release):
     root, meta, plan = release
     before = file_manifest(root)
@@ -282,7 +329,7 @@ def test_public_dispatch_uses_model_tokens_voice_and_current_runtime_signature(r
 def test_catalog_exposes_only_supported_kokoro_parameters():
     assert set(describe_model(MODEL_ID)) == {"model_dir", "output_dir", "device"}
     full = describe_model(MODEL_ID, full=True)
-    assert "misaki==0.9.4" in full["worker_requirements"]
+    assert "misaki[en,zh]==0.9.4" in full["dependencies"]["profiles"]["full"]["inference"]["pip"]
     assert full["recipe_version"] == "3"
     assert full["golden_components"] == []
 

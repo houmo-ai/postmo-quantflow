@@ -79,7 +79,17 @@ def test_moe_source_selects_its_registered_block_export(filename, expects_layout
     changed = f"xhmodel_merak/xh_llm/models/qwen3_5_moe/{filename}"
     selection = select_for_changes([changed], repo_root=REPO_ROOT)
     target = f"{SUITE_RELATIVE}/test_qwen35_35b_a3b_block_export.py"
-    expected = POLICY_GATES | {target}
+    from _unified_cases import CASES
+    expected = POLICY_GATES | {target} | {
+        f"{SUITE_RELATIVE}/test_unified_small_models.py::test_public_build_relocate_and_inference[{case.id}]"
+        for case in CASES if case.fixture in {"qwen_moe", "macaron"}
+    }
+    expected.update({
+        f"{SUITE_RELATIVE}/test_qwen35_moe_lora_low_memory.py",
+        f"{SUITE_RELATIVE}/test_macaron_runtime_model_inputs.py",
+    })
+    if filename == "qwen3_5_moe_model.py":
+        expected.add(f"{SUITE_RELATIVE}/test_hmonnx_export_boundary.py")
     if expects_layout:
         layout = f"{SUITE_RELATIVE}/test_qwen35_visual_release_layout.py"
         expected.add(layout)
@@ -512,7 +522,7 @@ def test_manifest_cannot_redirect_ownership_to_a_cheaper_test(declaration_repo):
     data = json.loads(path.read_text())
     data["rules"][0]["tests"] = [f"{SUITE_RELATIVE}/test_policy.py"]
     path.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match="only id and patterns"):
+    with pytest.raises(ValueError, match="id, patterns and optional nodes"):
         select_for_changes([manifest], repo_root=declaration_repo)
 
 
@@ -782,3 +792,40 @@ def test_every_selection_path_stays_inside_active_ci_directory():
     for changed in cases:
         selection = select_for_changes(changed, repo_root=REPO_ROOT)
         assert all(test.startswith(f"{SUITE_RELATIVE}/") for test in selection.tests)
+
+
+def test_parameter_rules_union_and_whole_file_precedence(declaration_repo):
+    repo = declaration_repo
+    test, manifest = _declare_test(repo, "parameters", ["xhmodel_merak/demo/a.py"])
+    path = repo / manifest
+    path.write_text(json.dumps({"version": 1, "rules": [
+        {"id": "a", "patterns": ["xhmodel_merak/demo/a.py"], "nodes": ["test_flow[a/full]"]},
+        {"id": "b", "patterns": ["xhmodel_merak/demo/b.py"], "nodes": ["test_flow[b/mtp]"]},
+        {"id": "common", "patterns": ["xhmodel_merak/demo/common.py"]},
+        {"id": "function", "patterns": ["xhmodel_merak/demo/function.py"], "nodes": ["test_flow"]},
+    ]}))
+    changed = ["xhmodel_merak/demo/a.py", "xhmodel_merak/demo/b.py"]
+    result = select_for_changes(changed, repo_root=repo)
+    assert {t for t in result.tests if t.startswith(test)} == {
+        test + "::test_flow[a/full]", test + "::test_flow[b/mtp]",
+    }
+    result = select_for_changes(changed + ["xhmodel_merak/demo/function.py"], repo_root=repo)
+    assert {t for t in result.tests if t.startswith(test)} == {test + "::test_flow"}
+    for extra in (["xhmodel_merak/demo/common.py"], [test], [manifest]):
+        result = select_for_changes(changed + extra, repo_root=repo)
+        assert {t for t in result.tests if t.startswith(test)} == {test}
+    for diff, force in ((None, False), (changed, True)):
+        result = select_for_changes(diff, repo_root=repo, force_all=force)
+        assert {t for t in result.tests if t.startswith(test)} == {test}
+
+
+@pytest.mark.parametrize("nodes", [None, [], "test_a[x]", [1], [{}], ["test_a", "test_a"],
+                                    ["../other.py::test_a"], ["test_a[x]::test_b"], ["-k"], ["test_a[bad\n]"]])
+def test_invalid_parameter_targets_fail_closed(declaration_repo, nodes):
+    test, manifest = _declare_test(declaration_repo, "bad_nodes", ["xhmodel_merak/demo.py"])
+    path = declaration_repo / manifest
+    data = json.loads(path.read_text())
+    data["rules"][0]["nodes"] = nodes
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError):
+        select_for_changes(["xhmodel_merak/demo.py"], repo_root=declaration_repo)

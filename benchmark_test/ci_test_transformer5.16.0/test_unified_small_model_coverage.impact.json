@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test_unified_small_model_coverage",
+      "patterns": [
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_integrations/*/plugin.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_cases.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_e2e_worker.py",
+        "xhmodel_merak/model_integrations/_dependencies.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_unified_small_models.impact.json",
+        "benchmark_test/ci_test_transformer5.16.0/select_tests.py",
+        "benchmark_test/ci_test_transformer5.16.0/_impact_manifest.py"
+      ]
+    }
+  ]
+}

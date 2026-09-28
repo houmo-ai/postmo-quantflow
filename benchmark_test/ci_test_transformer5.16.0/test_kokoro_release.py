@@ -45,6 +45,45 @@ def recipe():
     }
 
 
+@pytest.mark.parametrize("fail_import", [False, True])
+def test_pinned_source_import_preserves_input_fingerprint(tmp_path, monkeypatch, fail_import):
+    import sys
+    from types import SimpleNamespace
+
+    from xhmodel_merak.model_build.fingerprints import resource_sha256
+    from xhmodel_merak.xh_other_model.models.kokoro.graph import load_official_model
+
+    source = tmp_path / "kokoro"
+    source.mkdir()
+    (source / "__init__.py").write_text('__version__ = "0.9.4"\n')
+    (source / "model.py").write_text(
+        'raise ImportError("missing test dependency")\n' if fail_import else
+        'from torch import nn\nclass KModel(nn.Module):\n'
+        '    def __init__(self, **kwargs):\n        super().__init__()\n'
+    )
+    for name in list(sys.modules):
+        if name == "kokoro" or name.startswith("kokoro."):
+            monkeypatch.delitem(sys.modules, name)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    before = resource_sha256(tmp_path)
+    assets = SimpleNamespace(source_root=tmp_path, config=tmp_path / "config.json",
+                             checkpoint=tmp_path / "model.pth")
+    try:
+        if fail_import:
+            with pytest.raises(ImportError, match="pinned upstream"):
+                load_official_model(assets)
+        else:
+            assert not load_official_model(assets).training
+        assert sys.dont_write_bytecode is False
+        assert resource_sha256(tmp_path) == before
+        assert not list(tmp_path.rglob("*.pyc"))
+    finally:
+        for name in list(sys.modules):
+            if name == "kokoro" or name.startswith("kokoro."):
+                sys.modules.pop(name)
+
+
 def test_kokoro_checked_in_recipe_matches_release_contract():
     root = Path(__file__).resolve().parents[2]
     config = WorkflowConfig.from_file(

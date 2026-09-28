@@ -27,18 +27,18 @@ def sdk_export(tmp_path):
     return directory
 
 
-@pytest.mark.parametrize("family", ["qwen", "macaron", "deepseek"])
+@pytest.mark.parametrize("family", ["qwen", "qwen_moe", "deepseek"])
 @pytest.mark.parametrize("low_memory", [False, True])
 def test_family_returns_sdk_files_unchanged(tmp_path, monkeypatch, sdk_export, family, low_memory):
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
-    from xhmodel_merak.xh_llm.models.macaron_v1_tall.macaron_v1_tall_model import XHMacaronV1TallModel
+    from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_model import XHQwen3_5MoeModel
     from xhmodel_merak.xh_llm.models.deepseek_v4.deepseek_v4_model import XHDeepSeekV4Model
     from xhmodel_merak.xh_llm.types import ExportData, LLMModelMeta, LLMModelState, ModelSwitcher
     from xhmodel_merak.xh_llm import utils
 
     monkeypatch.setenv("HUGE_MODEL_EXPORT_ENABLED", "1" if low_memory else "0")
     assert utils.is_huge_model_export_enabled() == low_memory
-    parent = {"qwen": XHQwen3_5Model, "macaron": XHMacaronV1TallModel, "deepseek": XHDeepSeekV4Model}[family]
+    parent = {"qwen": XHQwen3_5Model, "qwen_moe": XHQwen3_5MoeModel, "deepseek": XHDeepSeekV4Model}[family]
     # Supply the expensive model-specific export stages with a real SDK result.
     # The family export_hmonnx method itself runs unchanged in both branches.
     class ExportHarness(parent):

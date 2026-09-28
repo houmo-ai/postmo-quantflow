@@ -232,7 +232,9 @@ def main() -> int:
         episode_ids = select_episode_ids(dataset.meta, args.num_samples, action_horizon, args.seed)
 
     config = load_config(model_dir, device_name, action_horizon, runtime_config_dir)
-    policy = PI05Policy.from_pretrained(model_dir, config=config, strict=True).to(device).eval()
+    from xhmodel_merak.xh_other_model.models.pi05._export_utils import load_pi05_policy
+
+    policy = load_pi05_policy(str(model_dir), str(device), config=config)
     preprocessor, postprocessor = make_pre_post_processors(
         config,
         pretrained_path=str(runtime_config_dir),

@@ -48,6 +48,14 @@ def test_tts_graph_fuses_masked_normalized_semantics_and_audio_head():
         normalize_projected_hidden = True
 
     graph = Graph()
+    with torch.no_grad():
+        graph.semantic_projector.weight.copy_(
+            torch.eye(3, 4, dtype=graph.semantic_projector.weight.dtype)
+        )
+        graph.semantic_projector.bias.zero_()
+        graph.audio_code_head.weight.copy_(
+            torch.arange(1, 16, dtype=graph.audio_code_head.weight.dtype).reshape(5, 3) / 16
+        )
     embeddings = torch.tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]])
     semantic = torch.tensor([[[1.0, 0.0, 0.5, -1.0], [3.0, 2.0, 1.0, 0.0]]])
     mask = torch.tensor([[[1.0], [0.0]]])

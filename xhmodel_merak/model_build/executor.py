@@ -13,6 +13,7 @@ from xhmodel_merak.model_artifact.export_info import publish_export_info
 
 from . import checkpoint, embeddings, fingerprints, manifest, packaging, workflow, workspace
 from .contracts import BuildPlan, BuildResult
+from .dependencies import write_dependency_files
 
 
 def execute_build(plan: BuildPlan) -> BuildResult:
@@ -99,6 +100,7 @@ def execute_build(plan: BuildPlan) -> BuildResult:
         published_quant_artifact = (
             quant_artifact if plan.quant_checkpoint or plan.quant_output_dir is not None else None
         )
+        write_dependency_files(stage_path, plan.model_id, plan.variant)
         manifest.write_child_manifests(stage_path, plan, effective_workflow, published_quant_artifact,
                                        quant_metadata, artifact_metadata, source_fingerprints, embedding_metadata)
         publish_export_info(stage_path, artifact_metadata, embedding_metadata=embedding_metadata)

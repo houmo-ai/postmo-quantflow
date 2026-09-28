@@ -1,0 +1,84 @@
+{
+  "config": {
+    "architectures": [
+      "Qwen3NextForCausalLM"
+    ],
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "bos_token_id": 0,
+    "decoder_sparse_step": 1,
+    "dtype": "bfloat16",
+    "eos_token_id": 2,
+    "head_dim": 32,
+    "hidden_act": "silu",
+    "hidden_size": 64,
+    "initializer_range": 0.02,
+    "intermediate_size": 128,
+    "layer_types": [
+      "linear_attention",
+      "full_attention"
+    ],
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 16,
+    "linear_num_key_heads": 4,
+    "linear_num_value_heads": 4,
+    "linear_value_head_dim": 16,
+    "max_position_embeddings": 256,
+    "mlp_only_layers": [],
+    "model_type": "qwen3_next",
+    "moe_intermediate_size": 128,
+    "norm_topk_prob": true,
+    "num_attention_heads": 4,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "num_hidden_layers": 2,
+    "num_key_value_heads": 2,
+    "output_router_logits": false,
+    "pad_token_id": null,
+    "partial_rotary_factor": 0.25,
+    "rms_norm_eps": 1e-06,
+    "rope_parameters": {
+      "partial_rotary_factor": 0.25,
+      "rope_theta": 10000000,
+      "rope_type": "default"
+    },
+    "router_aux_loss_coef": 0.001,
+    "shared_expert_intermediate_size": 128,
+    "tie_word_embeddings": false,
+    "transformers_version": "5.16.1",
+    "use_cache": true,
+    "use_sliding_window": false,
+    "vocab_size": 512
+  },
+  "tokenizer": {
+    "vocab": {
+      "<|im_end|>": 2,
+      "<|endoftext|>": 0,
+      "<|im_start|>": 1,
+      "<|object_ref_start|>": 3,
+      "<|object_ref_end|>": 4,
+      "<|box_start|>": 5,
+      "<|box_end|>": 6,
+      "<|quad_start|>": 7,
+      "<|quad_end|>": 8,
+      "<|vision_start|>": 9,
+      "<|vision_end|>": 10,
+      "<|vision_pad|>": 11,
+      "<|image_pad|>": 12,
+      "<|video_pad|>": 13,
+      "[UNK]": 14,
+      "hello": 15,
+      "world": 16,
+      "test": 17,
+      "calibration": 18,
+      "OCR:": 19,
+      "42": 20,
+      "你好": 21
+    },
+    "special_tokens": {
+      "eos_token": "<|im_end|>",
+      "pad_token": "<|endoftext|>"
+    }
+  },
+  "processor_files": {}
+}

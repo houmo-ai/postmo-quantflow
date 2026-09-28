@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from xhmodel_merak.model_catalog.contracts import DeploymentPrecisionBinding, ResolvedPrecision, VariantRecipe
+from xhmodel_merak.model_catalog.dependencies import DependencySpec
 
 
 AUTOREGRESSIVE_BUILD = "autoregressive.build"
@@ -16,8 +17,6 @@ KOKORO_INFERENCE = "kokoro.inference"
 MOSS_TRANSCRIBE_DIARIZE_BUILD = "moss_transcribe_diarize.build"
 MOSS_TRANSCRIBE_DIARIZE_INFERENCE = "moss_transcribe_diarize.inference"
 
-GPTQ_REQUIREMENTS = ("gptqmodel>=5.8,<5.9",)
-AUTOROUND_REQUIREMENTS = ("auto-round>=0.12.0.dev0,<0.13.0", *GPTQ_REQUIREMENTS)
 PILE10K_RESOURCE = ("calibration", "data/calib_data/NeelNanda-pile-10k.jsonl")
 
 
@@ -56,8 +55,9 @@ def variant(
     requires_lora: bool = False,
     context_workflows: tuple[tuple[int, str], ...] = (),
     export_modes: tuple[str, ...] = ("standard",),
+    dependencies: DependencySpec | None = None,
 ) -> VariantRecipe:
-    required_sources = ("dflash",) if speculative_mode == "dflash" else ()
+    required_sources = (speculative_mode,) if speculative_mode in {"dflash", "dflash2"} else ()
     extra_components = ((speculative_mode,) if speculative_mode else ()) + (("lora",) if requires_lora else ())
     return VariantRecipe(
         name=name,
@@ -68,6 +68,7 @@ def variant(
         extra_components=extra_components,
         context_workflows=context_workflows,
         export_modes=export_modes,
+        dependencies=dependencies if dependencies is not None else DependencySpec(),
     )
 
 
@@ -108,9 +109,7 @@ def moe_precision() -> ResolvedPrecision:
 
 __all__ = [
     "AUTOREGRESSIVE_BUILD",
-    "AUTOROUND_REQUIREMENTS",
     "GEMMA4_INFERENCE",
-    "GPTQ_REQUIREMENTS",
     "KOKORO_BUILD",
     "KOKORO_INFERENCE",
     "LING_INFERENCE",

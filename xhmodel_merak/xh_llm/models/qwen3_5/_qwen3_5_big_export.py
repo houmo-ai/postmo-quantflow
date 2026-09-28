@@ -7,6 +7,7 @@ from torch import Tensor
 from xhquant.utils.registry import DynamicModule, _DMRegistryCls
 
 from ...big_hf_model_helper import BigHFModelExportHelper
+from .lora_moe import QwenLoRAPlaceholderMixin
 from ._hybrid_placeholder import HybridGatedDeltaNetPlaceholderMixin
 from .modeling_qwen3_5 import (
     Qwen3_5Attention,
@@ -149,7 +150,7 @@ def _runtime_aliases(hf_model: Optional[torch.nn.Module], type_name: str) -> dic
     return {type(module): type_name for module in hf_model.modules() if type(module).__name__ == type_name}
 
 
-class Qwen3_5BigHFModel(BigHFModelExportHelper):  # noqa: N801
+class Qwen3_5BigHFModel(QwenLoRAPlaceholderMixin, BigHFModelExportHelper):  # noqa: N801
     PLACEHOLDER_TYPES = [
         "Qwen3_5Attention",
         "Qwen3_5GatedDeltaNet",

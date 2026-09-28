@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "pi05-native-prefix-cache",
+    "patterns": [
+      "xhmodel_merak/xh_other_model/models/pi05/_prefix_cache.py",
+      "xhmodel_merak/xh_other_model/models/pi05/workflow.py",
+      "xhmodel_merak/model_integrations/pi05/plugin.py"
+    ]
+  }]
+}

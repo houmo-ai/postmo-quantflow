@@ -93,6 +93,7 @@ class LoRAWeightPair:
     b_key: str
     a_shape: tuple[int, ...]
     b_shape: tuple[int, ...]
+    target_parameter: str | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +185,13 @@ def inspect_lora_adapter(adapter_path: str) -> LoRAAdapterSpec:
         b_key, b_shape = sides["B"]
         if len(a_shape) != 2 or len(b_shape) != 2:
             raise ValueError(f"LoRA A/B tensors must be 2-D for module {module_path!r}, got {a_shape} and {b_shape}")
+        from .lora_moe import expert_target
+        target_parameter = expert_target(module_path, adapter_config)
+        if target_parameter:
+            if a_shape[0] % rank or b_shape[1] != a_shape[0] or a_shape[0] == 0:
+                raise ValueError(f"Invalid packed expert LoRA rank for {module_path}")
+            pairs.append(LoRAWeightPair(module_path, a_key, b_key, a_shape, b_shape, target_parameter))
+            continue
         has_standard_rank = a_shape[0] == rank and b_shape[1] == rank
         has_transposed_rank = a_shape[1] == rank and b_shape[0] == rank
         if not (has_standard_rank or has_transposed_rank):
@@ -204,40 +212,102 @@ def inspect_lora_adapter(adapter_path: str) -> LoRAAdapterSpec:
     )
 
 
-def attach_lora_buffers(model: nn.Module, adapter: LoRAAdapterSpec) -> int:
+def attach_lora_buffers(model: nn.Module, adapter: LoRAAdapterSpec, *, module_prefix: str = "") -> int:
     """Attach a validated adapter to the corresponding original Linear modules."""
 
     tensor_by_key = _load_adapter_tensors(adapter)
-    linear_modules = {name: module for name, module in model.named_modules() if isinstance(module, nn.Linear)}
-    registered = 0
+    linear_modules = {".".join(p for p in (module_prefix, name) if p): module
+                      for name, module in model.named_modules() if isinstance(module, nn.Linear)}
+    from .lora_moe import attach_expert_lora
+    registered = attach_expert_lora(model, adapter, tensor_by_key, module_prefix=module_prefix)
     resolved_names: set[str] = set()
     for pair in adapter.pairs:
-        linear_name, linear = _resolve_linear(pair.module_path, pair, linear_modules)
-        if linear_name in resolved_names:
-            raise ValueError(
-                f"Multiple LoRA tensor pairs resolve to the same Linear {linear_name!r} "
-                f"for adapter {adapter.source_path}"
+        if pair.target_parameter is not None:
+            continue
+        targets = [(pair.module_path, tensor_by_key[pair.a_key], tensor_by_key[pair.b_key])]
+        # split_conv_cache preserves Q/K/V row order but replaces the packed
+        # Linear. Share A and partition B exactly like the base projection.
+        if pair.module_path.endswith(".linear_attn.in_proj_qkv"):
+            try:
+                _resolve_linear(pair.module_path, pair, linear_modules)
+            except _LoRATargetNotFound:
+                names = [pair.module_path[:-3] + suffix for suffix in ("q", "k", "v")]
+                resolved = [_resolve_linear(name, pair, linear_modules) for name in names]
+                sizes = [linear.out_features for _, linear in resolved]
+                packed_a, packed_b = _orient_lora_weights(
+                    tensor_by_key[pair.a_key], tensor_by_key[pair.b_key],
+                    (sum(sizes), resolved[0][1].in_features), pair.module_path,
+                )
+                targets = [(name, packed_a, part) for name, part in zip(names, packed_b.split(sizes, dim=0))]
+        for target, target_a, target_b in targets:
+            linear_name, linear = _resolve_linear(target, pair, linear_modules)
+            if linear_name in resolved_names:
+                raise ValueError(f"Multiple LoRA pairs resolve to Linear {linear_name!r}")
+            resolved_names.add(linear_name)
+            if hasattr(linear, "weight_lora_a") or hasattr(linear, "weight_lora_b"):
+                raise ValueError(f"Linear {linear_name!r} already has LoRA buffers")
+            lora_a, lora_b = _orient_lora_weights(
+                target_a, target_b, tuple(linear.weight.shape), linear_name,
             )
-        resolved_names.add(linear_name)
-        if hasattr(linear, "weight_lora_a") or hasattr(linear, "weight_lora_b"):
-            raise ValueError(f"Linear {linear_name!r} already has LoRA buffers")
-
-        lora_a, lora_b = _orient_lora_weights(
-            tensor_by_key[pair.a_key],
-            tensor_by_key[pair.b_key],
-            tuple(linear.weight.shape),
-            linear_name,
-        )
-        # These are frontend-only transport buffers.  The graph rewrite turns
-        # them into LoRALinear parameters, so they should not remain as extra
-        # state on the base Linear in exported checkpoints.
-        linear.register_buffer("weight_lora_a", lora_a, persistent=False)
-        linear.register_buffer("weight_lora_b", lora_b, persistent=False)
+            linear.register_buffer("weight_lora_a", lora_a, persistent=False)
+            linear.register_buffer("weight_lora_b", lora_b, persistent=False)
         registered += 1
 
     if registered != len(adapter.pairs):
         raise RuntimeError(f"Attached {registered} LoRA pairs but adapter contains {len(adapter.pairs)} pairs")
     return registered
+
+
+def apply_lora_graph(graph_module, adapter, w_schema, a_schema=None):
+    from ...lora_layer import LoRALinear, apply_lora_to_linear
+    from xhquant.nn.modules.moeblock import MoeBlock
+    expected_lora_linears = sum(p.target_parameter is None for p in adapter.pairs) * 2
+    linears = {name: m for name, m in graph_module.named_modules() if isinstance(m, nn.Linear)}
+    for pair in adapter.pairs:
+        if pair.module_path.endswith(".linear_attn.in_proj_qkv"):
+            try:
+                _resolve_linear(pair.module_path, pair, linears)
+            except _LoRATargetNotFound:
+                for suffix in ("q", "k", "v"):
+                    _resolve_linear(pair.module_path[:-3] + suffix, pair, linears)
+                expected_lora_linears += 4
+    apply_lora_to_linear(
+        graph_module,
+        [],
+        lora_scale=adapter.alpha,
+        runtime_mask=False,
+    )
+    lora_nodes = []
+    for node in graph_module.graph.nodes:
+        if node.op != "call_module":
+            continue
+        module = graph_module.get_submodule(str(node.target))
+        if not isinstance(module, LoRALinear):
+            continue
+        lora_nodes.append(node)
+        # Always create a node entry.  On externally quantized models,
+        # xhquant supplies a W8A8 fallback for modules without
+        # ``quant_weight``; an empty explicit entry suppresses that
+        # fallback and lets both W/A inherit the main quant scheme.
+        quant_config = copy.deepcopy(node.meta.get("quant_config", {}))
+        if w_schema is not None:
+            quant_config["w_schema"] = copy.deepcopy(dict(w_schema))
+        if a_schema is not None:
+            quant_config["act_schema"] = copy.deepcopy(dict(a_schema))
+
+        node.meta["quant_config"] = quant_config
+    if len(lora_nodes) != expected_lora_linears:
+        raise RuntimeError(
+            f"Qwen3.5 graph contains {len(lora_nodes)} LoRA A/B Linear nodes; "
+            f"expected {expected_lora_linears} for adapter {adapter.name!r}"
+        )
+
+    blocks = [m for m in graph_module.modules() if isinstance(m, MoeBlock) and m.has_lora]
+    if len(blocks) * 2 != sum(p.target_parameter is not None for p in adapter.pairs):
+        raise RuntimeError("Expert LoRA targets were lost or duplicated while tracing")
+    for block in blocks:
+        block.lora_w_schema = copy.deepcopy(w_schema)
+        block.lora_a_schema = copy.deepcopy(a_schema)
 
 
 def apply_lora_to_frontend(
@@ -248,41 +318,9 @@ def apply_lora_to_frontend(
 ) -> None:
     """Rewrite both target graphs to ``src + B(A(X)) * (alpha / rank)``."""
 
-    from ...lora_layer import LoRALinear, apply_lora_to_linear
-
-    expected_lora_linears = len(adapter.pairs) * 2
+    from ...lora_layer import LoRALinear
     for mode in ("prefill", "decode"):
-        graph_module = getattr(frontend_model, mode)
-        apply_lora_to_linear(
-            graph_module,
-            [],
-            lora_scale=adapter.alpha,
-            runtime_mask=False,
-        )
-        lora_nodes = []
-        for node in graph_module.graph.nodes:
-            if node.op != "call_module":
-                continue
-            module = graph_module.get_submodule(str(node.target))
-            if not isinstance(module, LoRALinear):
-                continue
-            lora_nodes.append(node)
-            # Always create a node entry.  On externally quantized models,
-            # xhquant supplies a W8A8 fallback for modules without
-            # ``quant_weight``; an empty explicit entry suppresses that
-            # fallback and lets both W/A inherit the main quant scheme.
-            quant_config = copy.deepcopy(node.meta.get("quant_config", {}))
-            if w_schema is not None:
-                quant_config["w_schema"] = copy.deepcopy(dict(w_schema))
-            if a_schema is not None:
-                quant_config["act_schema"] = copy.deepcopy(dict(a_schema))
-
-            node.meta["quant_config"] = quant_config
-        if len(lora_nodes) != expected_lora_linears:
-            raise RuntimeError(
-                f"Qwen3.5 {mode} graph contains {len(lora_nodes)} LoRA A/B Linear nodes; "
-                f"expected {expected_lora_linears} for adapter {adapter.name!r}"
-            )
+        apply_lora_graph(getattr(frontend_model, mode), adapter, w_schema, a_schema)
 
     # Qwen3.5 normally shares base Linear modules between prefill and decode.
     # Preserve that property for the newly inserted A/B modules as well.
@@ -332,7 +370,8 @@ def finalize_lora_metadata(
             "rank": adapter.rank,
             "alpha": adapter.alpha,
             "scale": adapter.scale,
-            "target_linear_count": len(adapter.pairs),
+            "target_linear_count": sum(p.target_parameter is None for p in adapter.pairs),
+            "target_expert_parameter_count": sum(p.target_parameter is not None for p in adapter.pairs),
             "w_schema": copy.deepcopy(lora_config.w_schema),
             "a_schema": copy.deepcopy(lora_config.a_schema),
         }
@@ -368,7 +407,8 @@ def finalize_lora_metadata(
                 "rank": adapter.rank,
                 "alpha": adapter.alpha,
                 "scale": adapter.scale,
-                "target_linear_count": len(adapter.pairs),
+                "target_linear_count": sum(p.target_parameter is None for p in adapter.pairs),
+                "target_expert_parameter_count": sum(p.target_parameter is not None for p in adapter.pairs),
                 "w_schema": copy.deepcopy(lora_config.w_schema),
                 "a_schema": copy.deepcopy(lora_config.a_schema),
             }
@@ -637,11 +677,14 @@ def _validate_symlink_free_artifact(root: Path) -> None:
 def _validate_peft_config(config: Mapping[str, Any], config_path: Path) -> None:
     if str(config.get("peft_type", "")).upper() != "LORA":
         raise ValueError(f"Only PEFT LoRA adapters are supported: {config_path}")
+    from .lora_moe import EXPERT_PARAMETERS
+    targets = set(config.get("target_parameters") or ())
+    if targets and targets != EXPERT_PARAMETERS:
+        raise ValueError(f"Unsupported expert LoRA target_parameters: {sorted(targets)}")
     unsupported_truthy = (
         "alpha_pattern",
         "rank_pattern",
         "modules_to_save",
-        "target_parameters",
         "layer_replication",
         "use_dora",
         "use_qalora",
@@ -744,6 +787,10 @@ def _module_path_candidates(module_path: str) -> list[str]:
     return candidates
 
 
+class _LoRATargetNotFound(ValueError):
+    pass
+
+
 def _resolve_linear(
     module_path: str,
     pair: LoRAWeightPair,
@@ -767,7 +814,7 @@ def _resolve_linear(
     if len(suffix_matches) == 1:
         return next(iter(suffix_matches.items()))
     if not suffix_matches:
-        raise ValueError(
+        raise _LoRATargetNotFound(
             f"LoRA target module {module_path!r} was not found in the Qwen3.5 language model "
             f"(A={pair.a_shape}, B={pair.b_shape})"
         )
@@ -784,7 +831,7 @@ def _orient_lora_weights(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if (lora_b.shape[0], lora_a.shape[1]) == linear_shape and lora_a.shape[0] == lora_b.shape[1]:
         return lora_a, lora_b
-    if (lora_a.shape[0], lora_b.shape[1]) == linear_shape and lora_a.shape[1] == lora_b.shape[0]:
+    if (lora_b.shape[1], lora_a.shape[0]) == linear_shape and lora_a.shape[1] == lora_b.shape[0]:
         return lora_a.T.contiguous(), lora_b.T.contiguous()
     raise ValueError(
         f"LoRA shapes for {linear_name!r} do not match base Linear {linear_shape}: "

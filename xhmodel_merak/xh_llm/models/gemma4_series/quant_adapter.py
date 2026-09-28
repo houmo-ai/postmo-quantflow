@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+import json
 import os
 import subprocess
 import sys
@@ -272,10 +273,43 @@ def quantize_with_gptqmodel_recipe(
     recipe_entrypoint = str(quant_cfg.get("recipe_entrypoint") or _DEFAULT_RECIPE_ENTRYPOINT)
     recipe_result = _call_gptqmodel_recipe(recipe_entrypoint, recipe_kwargs)
     quanted_model_dir = _result_output_dir(recipe_result, recipe_kwargs["output_dir"])
+    _restore_unified_audio_config(model_dir, quanted_model_dir)
     return QuantResult(
         raw_model_dir=model_dir,
         quanted_model_dir=_normalize_path(quanted_model_dir),
     )
+
+
+def _restore_unified_audio_config(model_dir: str, quanted_model_dir: str) -> None:
+    """Restore source-only audio dimensions dropped by HF config serialization.
+
+    GPTQModel saves the quantized config via ``save_pretrained``.  The Gemma4
+    Unified audio config in some checkpoints has dimensions that this path
+    omits, even though their audio weights are copied unchanged.  Preserve
+    only absent dimensions; checkpoint validation still rejects a conflicting
+    value emitted by the quantizer.
+    """
+
+    source_path = Path(model_dir) / "config.json"
+    output_path = Path(quanted_model_dir) / "config.json"
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+    source_audio = source.get("audio_config")
+    if not isinstance(source_audio, dict):
+        return
+    output_audio = output.get("audio_config")
+    if output_audio is None:
+        output_audio = {}
+        output["audio_config"] = output_audio
+    if not isinstance(output_audio, dict):
+        return
+    changed = False
+    for field in ("hidden_size", "output_proj_dims"):
+        if field in source_audio and field not in output_audio:
+            output_audio[field] = source_audio[field]
+            changed = True
+    if changed:
+        output_path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def build_gptqmodel_recipe_kwargs(

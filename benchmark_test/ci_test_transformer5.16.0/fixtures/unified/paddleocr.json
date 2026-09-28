@@ -1,0 +1,108 @@
+{
+  "config": {
+    "architectures": [
+      "PaddleOCRVLForConditionalGeneration"
+    ],
+    "dtype": "float32",
+    "image_token_id": 3,
+    "model_type": "paddleocr_vl",
+    "text_config": {
+      "bos_token_id": 1,
+      "eos_token_id": 2,
+      "head_dim": 16,
+      "hidden_act": "silu",
+      "hidden_size": 32,
+      "initializer_range": 0.02,
+      "intermediate_size": 64,
+      "max_position_embeddings": 64,
+      "model_type": "paddleocr_vl_text",
+      "num_attention_heads": 4,
+      "num_hidden_layers": 2,
+      "num_key_value_heads": 2,
+      "pad_token_id": 0,
+      "rms_norm_eps": 1e-05,
+      "rope_parameters": {
+        "mrope_section": [
+          2,
+          3,
+          3
+        ],
+        "rope_theta": 500000.0,
+        "rope_type": "default"
+      },
+      "tie_word_embeddings": false,
+      "use_bias": false,
+      "use_cache": true,
+      "vocab_size": 512
+    },
+    "tie_word_embeddings": false,
+    "transformers_version": "5.16.1",
+    "video_token_id": 0,
+    "vision_config": {
+      "attention_dropout": 0.0,
+      "hidden_act": "gelu_pytorch_tanh",
+      "hidden_size": 32,
+      "image_size": 28,
+      "intermediate_size": 4304,
+      "layer_norm_eps": 1e-06,
+      "model_type": "paddleocr_vl_vision",
+      "num_attention_heads": 4,
+      "num_channels": 3,
+      "num_hidden_layers": 1,
+      "patch_size": 14,
+      "spatial_merge_size": 2
+    },
+    "vision_end_token_id": 0,
+    "vision_start_token_id": 0
+  },
+  "tokenizer": {
+    "vocab": {
+      "[EOS]": 2,
+      "[UNK]": 0,
+      "<image>": 3,
+      "OCR:": 1,
+      "hello": 4,
+      "world": 5,
+      "test": 6,
+      "calibration": 7,
+      "42": 8,
+      "你好": 9
+    },
+    "special_tokens": {
+      "eos_token": "[EOS]",
+      "unk_token": "[UNK]",
+      "image_token": "<image>"
+    }
+  },
+  "processor_files": {
+    "processor_config.json": {
+      "image_processor": {
+        "do_convert_rgb": true,
+        "do_normalize": true,
+        "do_rescale": true,
+        "do_resize": true,
+        "image_mean": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "image_processor_type": "PaddleOCRVLImageProcessor",
+        "image_std": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "merge_size": 2,
+        "patch_size": 14,
+        "resample": 3,
+        "rescale_factor": 0.00392156862745098,
+        "size": {
+          "longest_edge": 2359296,
+          "shortest_edge": 147456
+        },
+        "temporal_patch_size": 1
+      },
+      "processor_class": "PaddleOCRVLProcessor"
+    }
+  }
+}

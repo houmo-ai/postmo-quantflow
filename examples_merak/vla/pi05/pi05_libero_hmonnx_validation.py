@@ -225,7 +225,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     from lerobot.envs.configs import LiberoEnv
     from lerobot.envs.factory import make_env, make_env_pre_post_processors
-    from lerobot.envs.utils import add_envs_task, close_envs, preprocess_observation
+    from lerobot.envs.utils import close_envs, preprocess_observation
     from lerobot.policies.factory import make_pre_post_processors
     from lerobot.policies.pi05 import PI05Policy
     from lerobot.scripts.lerobot_eval import eval_policy
@@ -249,7 +249,9 @@ def main() -> int:
     device_name = args.device if torch.cuda.is_available() else "cpu"
     device = torch.device(device_name)
     config = load_config(model_dir, device_name, horizon)
-    policy = PI05Policy.from_pretrained(model_dir, config=config, strict=True).to(device).eval()
+    from xhmodel_merak.xh_other_model.models.pi05._export_utils import load_pi05_policy
+
+    policy = load_pi05_policy(str(model_dir), str(device), config=config)
     preprocessor, postprocessor = make_pre_post_processors(
         config,
         pretrained_path=str(model_dir),
@@ -285,7 +287,7 @@ def main() -> int:
                     env_seed = args.seed + sample_index
                     raw_observation, _ = env.reset(seed=[env_seed])
                     observation = preprocess_observation(raw_observation)
-                    observation = add_envs_task(env, observation)
+                    observation["task"] = list(env.call("task_description"))
                     observation = env_preprocessor(observation)
                     batch = preprocessor(observation)
 

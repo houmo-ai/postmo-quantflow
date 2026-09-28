@@ -353,8 +353,18 @@ def test_inference_model_validates_manifest_and_runs_registered_adapter(monkeypa
         quick_test,
     )
 
+    checked = []
+    monkeypatch.setattr(
+        "xhmodel_merak.model_inference.api.validate_worker_requirements",
+        lambda requirements, **kwargs: checked.append(list(requirements)),
+    )
     result = inference_model(inputs={"prompt": "hello"}, artifact_dir=str(artifact))
 
+    from xhmodel_merak.model_catalog.dependencies import dependency_profile
+
+    recipe = get_recipe("qwen3.5-4b")
+    assert checked == [dependency_profile(recipe, recipe.default_variant)["inference"]["pip"]]
+    assert not any("auto-round" in requirement or "gptqmodel" in requirement for requirement in checked[0])
     assert result.output_text == "ok"
     assert result.components == ("visual", "prefill", "decode")
     assert captured["path"] == str(artifact / "golden_meta_info.json")
@@ -1628,7 +1638,7 @@ def test_recipe_contract_accepts_registered_context_workflow(tmp_path):
     from xhmodel_merak.model_build.resolver import _build_artifact_name, _select_context_workflow
 
     recipe = get_recipe("qwen3.8-27b")
-    variant = recipe.get_variant("dflash")
+    variant = recipe.get_variant("dflash2")
     assert variant is not None
     context_length = 262144
     workflow_config = _select_context_workflow(recipe, variant, context_length)

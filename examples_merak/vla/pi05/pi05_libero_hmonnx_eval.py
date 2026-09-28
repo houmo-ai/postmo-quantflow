@@ -16,7 +16,7 @@ from examples_merak.vla.pi05.pi05_droid_hmonnx_validation import (
     HMONNX_RUNTIME_CHOICES,
     CompactHMONNX,
 )
-from examples_merak.vla.pi05.pi05_libero_fp_eval import _merge_local_tokenizer_override
+from examples_merak.vla.pi05.pi05_libero_fp_eval import _merge_local_tokenizer_override, make_strict_pi05_policy
 
 
 def _parse_hmonnx_wrapper_args(
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
 
     @wraps(original_make_policy)
     def make_hmonnx_policy(*args: Any, **kwargs: Any):
-        policy = original_make_policy(*args, **kwargs)
+        policy = make_strict_pi05_policy(*args, **kwargs)
         device = next(policy.parameters()).device
         runtime = CompactHMONNX(policy, export_dir, device, runtime_mode=runtime_mode)
 

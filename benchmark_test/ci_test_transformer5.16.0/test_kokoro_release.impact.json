@@ -3,6 +3,7 @@
   "rules": [{
     "id": "kokoro-release",
     "patterns": [
+      "xhmodel_merak/model_build/fingerprints.py",
       "xhmodel_merak/xh_other_model/models/kokoro/graph.py",
       "xhmodel_merak/xh_other_model/models/kokoro/independent_split.py",
       "xhmodel_merak/xh_other_model/models/kokoro/sine_source.py",

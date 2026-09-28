@@ -83,7 +83,7 @@ def get_spec_decode_verify_steps(meta_info: Any) -> int:
     else:
         mode = getattr(spec_decode, "mode", None)
         num_draft_tokens = getattr(spec_decode, "num_draft_tokens", None)
-    if mode in {"mtp", "dflash"} and num_draft_tokens is not None:
+    if mode in {"mtp", "dflash", "dflash2"} and num_draft_tokens is not None:
         return int(num_draft_tokens) + 1
     return 1
 

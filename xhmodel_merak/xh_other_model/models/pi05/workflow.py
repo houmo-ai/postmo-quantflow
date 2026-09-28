@@ -522,7 +522,10 @@ def export_pi05_llm_component(
     dtype = PI05_EXPORT_DTYPE
     cfg_name = f"{component_name}_{target_device}_{quant_type}"
 
-    xh_model = MODELS.build(ConfigDict(dict(model_cfg)))
+    constructor_cfg = copy.deepcopy(dict(model_cfg))
+    # Unified release naming is metadata, not an XHGemmaLLMModel constructor option.
+    constructor_cfg.pop("model_name", None)
+    xh_model = MODELS.build(ConfigDict(constructor_cfg))
     tokenizer = xh_model.get_tokenizer(str(runtime_cfg["config_dir"]))
     if kind == "gemma":
         policy = xh_model.get_hf_model(model="pi0.5").to(device=device, dtype=dtype).eval()
@@ -535,7 +538,7 @@ def export_pi05_llm_component(
         )
         xh_model.init_wrap_model(policy.model.paligemma_with_expert.paligemma.model.language_model)
     elif kind == "expert":
-        policy = xh_model.get_hf_model().to(device=device, dtype=dtype).eval()
+        policy = xh_model.get_hf_model(model="pi0.5").to(device=device, dtype=dtype).eval()
         _configure_pi05_action_horizon(policy, int(runtime_cfg["action_horizon"]))
         calibration_contexts = _build_pi05_calibration_contexts(
             policy=policy,
@@ -749,7 +752,9 @@ def _build_pi05_llm_golden_inputs(
     from xhmodel_merak.xh_other_model.builder import MODELS
     from xhquant.api import ConfigDict
 
-    xh_model = MODELS.build(ConfigDict(copy.deepcopy(dict(model_cfg))))
+    constructor_cfg = copy.deepcopy(dict(model_cfg))
+    constructor_cfg.pop("model_name", None)
+    xh_model = MODELS.build(ConfigDict(constructor_cfg))
     tokenizer = xh_model.get_tokenizer(config_dir)
     torch_device = torch.device(device)
     input_ids = _build_prompt_input_ids(tokenizer, prompt, torch_device)
@@ -765,7 +770,7 @@ def _build_pi05_llm_golden_inputs(
         )
         xh_model.init_wrap_model(policy.model.paligemma_with_expert.paligemma.model.language_model)
     elif kind == "expert":
-        policy = xh_model.get_hf_model().to(device=torch_device, dtype=PI05_EXPORT_DTYPE).eval()
+        policy = xh_model.get_hf_model(model="pi0.5").to(device=torch_device, dtype=PI05_EXPORT_DTYPE).eval()
         _configure_pi05_action_horizon(policy, int(comp_meta["prefill_input_sequence_length"]))
         prefix_sequence_length = len(selected_image_indices) * 256 + text_max_length
         contexts = _build_pi05_calibration_contexts(
@@ -946,19 +951,18 @@ def _build_pi05_calibration_contexts(
             "valid_prefix_length": valid_prefix_length,
         }
         if include_prefix_kv:
-            with torch.no_grad():
-                output = policy.model.paligemma_with_expert.paligemma.model.language_model(
-                    inputs_embeds=prefix_embs,
-                    attention_mask=prefix_attention_mask.to(dtype=prefix_embs.dtype),
-                    position_ids=prefix_position_ids,
-                    use_cache=True,
-                )
+            from ._prefix_cache import collect_prefix_cache
+
+            cache = collect_prefix_cache(
+                policy.model.paligemma_with_expert.paligemma.model.language_model,
+                prefix_embs, prefix_attention_mask, prefix_position_ids,
+            )
             context["prefix_key_values"] = [
                 (
                     key[..., :valid_prefix_length, :].contiguous(),
                     value[..., :valid_prefix_length, :].contiguous(),
                 )
-                for key, value in _extract_pi05_prefix_key_values(output.past_key_values)
+                for key, value in _extract_pi05_prefix_key_values(cache)
             ]
         contexts.append(context)
     return contexts

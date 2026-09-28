@@ -73,7 +73,7 @@ def test_qwen38_dflash2_unified_plan_reuses_w5_head(tmp_path, context, flash_att
 
     plan = resolve_build_plan(
         model_id="qwen3.8-27b", model_dir=str(source),
-        sources={"dflash": str(draft)}, speculative={"mode": "dflash"},
+        sources={"dflash2": str(draft)}, speculative={"mode": "dflash2"},
         context_length=context, quant_checkpoint=str(checkpoint),
         output_dir=str(tmp_path / "out"),
     )

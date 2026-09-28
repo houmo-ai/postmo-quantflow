@@ -30,14 +30,21 @@ model_integrations/<family>/
 `sources`、`workflow`、`quant_checkpoint`、`precision`，返回 Workflow 点路径替换。
 只读来源配置，不加载权重或执行校准。先应用 family 策略，再解析用户的组件精度覆盖；
 已有 checkpoint 的模型身份、实际载荷和格式由执行阶段继续验证。
+Qwen3-Next 复用 checkpoint 构建 MTP 时，MTP 权重必须包含在同一 checkpoint 中；
+不从原始模型拼接 draft，避免旋转后的主模型与未旋转 MTP 混用。
 
 ### 组件精度与已有权重
 
 `VariantRecipe.export_modes` 登记导出实现，第一项是默认值。只有实际实现分层导出的变体
 才能列出 `low_memory`；仅有环境变量开关不算支持。公共 `low_memory=True/False` 选择模式，
-不传时按变体默认值，不继承父进程开关。Qwen 的 LoRA 只登记 `standard`，Ling 默认
-`low_memory`，Gemma 目前只登记 `standard`。这不是推理低内存选项，也不是实测通过标记；
+不传时按变体默认值，不继承父进程开关。Qwen 的普通 LoRA 登记 `standard` 和 `low_memory`；LoRA + MTP 仍只登记
+`standard`。专家 LoRA 复用 Qwen3.5 与 SDK MoeBlock 的量化导出，Macaron 只提供
+配置和 recipe，不另建导出后注入流程。Ling 默认
+`low_memory`，Gemma4-31B 的 full/MTP 经真实权重低内存构建与推理验证，默认 `low_memory` 且仍可选 `standard`；其余 Gemma 只登记 `standard`。这不是推理低内存选项，也不是实测通过标记；
 新增模式需验证最终主图无 placeholder 残留、draft 图完整、推理状态 ABI 和峰值内存。
+Qwen3.8 的 DFlash2 公开变体、`speculative.mode` 和 source key 均为 `dflash2`；
+Qwen3.5／3.6 的 DFlash 保持 `dflash`。两者不能互作别名，规划时校验 draft 架构；
+产物的组件名、依赖 profile 和推理返回 mode 保留该区别，底层复用 `dflash_config`。
 投机解码的低内存导出必须沿用主图的多步验证配置，不能只调用普通 `set_decode()`。
 逐层子图也要保留每个验证步的卷积缓存和 recurrent state；切回 prefill 时恢复配置，
 避免把验证步数或中间输出标志带到 prefill。需要覆盖主图配置交接、子图拼装和真实 MTP/DFLASH 推理。
@@ -69,8 +76,9 @@ Q/K norm、MLA 内部 norm 等形状由具体模型加载和导出检查，不�
 
 ### 依赖与运行时缓存
 
-`worker_requirements` / `worker_capabilities` 只声明构建、推理都实际需要的依赖；
-所选量化方法的依赖放在 `quant_requirements` / `quant_capabilities`，只在构建量化时检查。
+`dependencies` 是唯一包版本声明，按 common、build、inference、quantization、checkpoint_build 分阶段，
+变体可补充自己的依赖。公开档案、requirements 导出和 worker 前置检查使用同一合并结果。
+`worker_capabilities` / `quant_capabilities` 只检查运行入口能力，不另行声明包版本。
 能力函数必须在支持的 SDK 中真实存在，并验证调用结果；不要为接口假设一个尚未实现的
 SDK 函数或环境开关，也不要让纯推理的可选优化阻断构建。
 视频文件还需实际解码验证，不能只检查解码包是否安装。TorchCodec 与 PyTorch 必须
@@ -262,3 +270,11 @@ shape/dtype、Host/NPU 精度边界、路由与溢出策略、资源路径、依
 消费它们的用例。至少覆盖：默认值和拒绝路径、构建到加载、搬移后无源目录依赖、
 失败不发布、受影响的实际数值/ABI 边界。用小真实模块验证数值；只在测试编排时替换
 无关的昂贵导出或会话，并说明没覆盖什么。示例能运行、mock 测试通过都不是精度结论。
+
+### 依赖声明
+
+在 `ModelRecipe.dependencies` 声明公共、构建、推理依赖，在
+`VariantRecipe.dependencies` 声明补充项。使用轻量 `DependencySpec`，不要读取当前
+环境或导入模型推导声明。公开 profiles 合并已注册量化方法及 checkpoint 加载依赖，
+保留旧 worker 预检字段；必要依赖审计与安装验证分别记录，未验证不能标为可安装。
+详细字段、发布阻塞项及示例见 [依赖契约](../../docs/architecture/model-dependencies.md)。

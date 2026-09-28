@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 
 import yaml
 
@@ -15,6 +16,8 @@ from xhmodel_merak.xh_llm.models.minicpm5_dense.minicpm5_model import (
 )
 from xhmodel_merak.xh_llm.models.minicpm5_dense.workflow import XHMiniCPM5Workflow
 from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
+from xhmodel_merak.xh_llm.workflows.result import ExportResult
+from xhmodel_merak.xh_llm.workflows.runtime_config import finalize_merak_runtime_config
 from xhquant.api import Config
 
 
@@ -26,6 +29,18 @@ CONFIG_PATH = REPO_ROOT / (
 EXPECTED_WORKFLOW_CLS = (
     "xhmodel_merak.xh_llm.models.minicpm5_dense.workflow:XHMiniCPM5Workflow"
 )
+
+
+def test_minicpm5_export_writes_merak_runtime_config(tmp_path: Path) -> None:
+    model = tmp_path / "hmquant_minicpm5"
+    model.mkdir()
+    (model / "golden_meta_info.json").write_text(json.dumps({
+        "model_config": {"flash_attention": {"enable": False}},
+    }))
+    config_path = finalize_merak_runtime_config(ExportResult(str(tmp_path), "unused.yaml"))
+    config = json.loads(config_path.read_text())
+    assert config["xh_model"] == {"model_type": "hmonnx", "meta_info": "golden_meta_info.json"}
+    assert config["enable_page_attention"] is False
 
 
 def test_minicpm5_2_6b_recipe_points_at_dense_workflow() -> None:

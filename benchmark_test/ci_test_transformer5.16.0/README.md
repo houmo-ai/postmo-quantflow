@@ -38,6 +38,18 @@ path lists fail with an error, rather than quietly running a different diff.
 Changed-file lists must include both old and new paths for renames. Local Git
 discovery disables rename collapsing to preserve both paths.
 
+## Initialization state isolation
+
+The common function-scoped fixture saves and restores the three Torch
+initializers changed by GPTQModel and Transformers' legacy initialization flag.
+Checkpoint loading retains its no-initialization optimization inside a test;
+restoration runs on both success and failure. This isolates tests, not production
+calls. A test that constructs a native model after loading a checkpoint must
+request the `restore_model_initialization_state` fixture and scope that load
+with `with restore_model_initialization_state():`, or use a separate worker. The 45 unified flows already use independent workers.
+Module/session fixtures and collection must not load checkpoints in the shared
+pytest process: the function-scoped guard does not bracket those operations.
+
 ## Coverage policy
 
 The selector separates global safety policy from test ownership:
@@ -101,6 +113,14 @@ narrow as the test actually exercises. Add any shared helpers the test relies
 on, and add the shared input to each existing affected test's declaration.
 No list of target tests is needed: the declaration's filename determines its
 one owner. Both `test_*.py` and `*_test.py` names are supported.
+An optional `nodes` list restricts a rule to local pytest functions or parameter
+instances, for example `"nodes": ["test_flow[pi0.5-libero/lerobot-h50]"]`.
+The selector prefixes each node with the owning test path and sends those exact
+node IDs to pytest. Nodes cannot redirect ownership to another file. Matching
+rules form a union; a whole-file/function selection supersedes its individual
+nodes to avoid duplicate execution. Editing/deleting the declaration or editing
+the test itself still selects the whole surviving file. Unknown diffs and
+forced/global full-suite selection also run the complete file.
 
 | Change | Selected tests |
 | --- | --- |
@@ -242,8 +262,9 @@ guarded production/config files remain fail-closed.
 The directory name tracks the Transformers 5.16 CI boundary. The CI runtime is
 pinned to Transformers 5.16.1.
 
-AutoRound runs once when a block checkpoint is published. Pull-request CI does
-not quantize weights. It downloads the immutable checkpoint, verifies the
+For the existing block export tests, AutoRound runs once when a block checkpoint
+is published. Those tests do not quantize weights in pull-request CI. They download
+the immutable checkpoint, verify the
 archive SHA-256, and runs the current ModelZoo export path. It does not call
 `dump_golden` or create `golden`/`step_*` payloads. The maintained real export
 matrix is:
@@ -287,3 +308,100 @@ padding, visual-feature scattering, sequential positions, chunk continuation,
 decode, cache ordering, and the page-attention input ABI. The two MiniCPM
 callers and their shared Qwen3.5 preprocessing/cache helpers select this test;
 this is not a full MiniCPM vision/export/runtime correctness suite.
+
+## Unified model and variant regressions
+
+`test_unified_small_models.py` explicitly enumerates all 26 registered models
+and 45 variants. `test_unified_small_model_coverage.py` fails if the catalog and
+this list diverge, or their dependency profiles cannot share Transformers
+5.16.1. Each selected case runs `build_model`, moves the artifact, removes its
+generated source/checkpoint directories, and runs `inference_model` in a fresh
+process. Failures retain `worker.log` and `result.json` in pytest's temporary
+directory, including the failing stage, traceback and installed versions.
+
+This suite intentionally exercises quantization on newly generated tiny native
+models, in addition to the existing immutable block export tests. Calibration
+uses two samples and four AutoRound iterations where supported, with one held-out
+MTP validation sample. Model dimensions are reduced; registered workflows,
+precisions and export paths are preserved. GLM starts from a native floating
+checkpoint and runs the real GPTQModel AutoRound recipe; the test checks actual
+calibration tokens, tuning losses and W4/W8 module audits in the saved provenance. See [fixture details](fixtures/unified/README.md).
+Macaron exposes `full` and `lora`; the LoRA case exports three adapters through
+the shared Qwen pipeline. `test_qwen35_moe_lora_low_memory.py` exercises the same
+three adapters with streamed export. Both paths inspect final MoeBlock operands,
+compare Prefill/Decode adapter weights, reject leftover placeholders, and load
+all three relocated views. `test_qwen35_moe_lora.py` additionally compares the
+PEFT expert layout and round-trips W4/W8 LoRA through the SDK exporter/runtime.
+
+These checks exercise integration contracts, not model quality or full-size
+memory/performance requirements.
+
+For source-based CI, keep the tested ModelZoo, SDK and GPTQModel checkouts on
+`PYTHONPATH`. Dependency checks read ModelZoo (`xhmodel-zoo==1.0.0`) and SDK
+(`xhquanttool==0.9.2`) versions from the `pyproject.toml` next to the imported
+package, ahead of stale editable-install metadata. Wheel installs use their
+distribution metadata. The SDK's legacy runtime `__version__` is not its package
+release version. Missing GPTQModel distribution metadata does not justify
+replacing the modified checkout with a public PyPI package.
+Quantization also pins `datasets==3.6.0`: the CI image's 5.0.1 failed while
+fingerprinting even a one-row calibration dataset (`MonthDayNano` pickling).
+Install with dependency resolution and run `python -m pip check`; checking only
+the direct package versions does not validate dataset creation or model execution.
+
+Pi0.5 uses the same Python environment: Transformers 5.16.1 and the bare
+`lerobot==0.6.0` package. Do not install the `lerobot[pi]` extra, whose Transformers
+constraint differs. Pi0.5 weights and tokenizer are generated locally. Kokoro downloads its pinned
+release inputs from the internal Artifactory on the first selected run, then
+reuses a local cache. The archive includes the original checkpoint, config,
+`zf_001` voice and pinned Kokoro source checkout (including its license).
+`_unified_assets.py` verifies the archive SHA-256 before safe extraction and
+checks the release file hashes/source commit before use. It never downloads
+model weights from Hugging Face or ModelScope during CI.
+
+- Default object: `http://10.10.1.53:8082/artifactory/model_zoo2/unified_ci_assets/kokoro/704324aeaac896e830f964f36e7a19002c134440d51c9124e582ca8460f4e13c/kokoro-ci-source-v1.tar.gz`
+- Archive SHA-256: `704324aeaac896e830f964f36e7a19002c134440d51c9124e582ca8460f4e13c` (357,694,336 bytes).
+- Default cache: `work_dirs/unified_ci_assets`; override with `UNIFIED_CI_ASSET_CACHE`.
+- Mirror root override: `UNIFIED_CI_ARTIFACTORY`; the object path/hash remain pinned.
+- Offline source override: `UNIFIED_CI_KOKORO_SOURCE`, validated with the same release checks.
+
+MOSS also downloads a SHA-256-pinned release bundle from Artifactory on its first
+selected run, using the same cache, mirror override and inter-process lock.
+The bundle contains the original ModelScope weights, tokenizer/processor files,
+README and Apache-2.0 license. `fixtures/moss/release.json` records the upstream
+per-file revisions, sizes and SHA-256 values; downloads, cached files and local
+overrides are verified. CI does not access a model hub.
+
+- MOSS object: `http://10.10.1.53:8082/artifactory/model_zoo2/unified_ci_assets/moss/1e58b1d08c1bdd93e1ec025b0b29dad8dcc37ce29318132ca5088f97b4946dc5/moss-ci-source-v1.tar.gz`
+- Archive SHA-256: `1e58b1d08c1bdd93e1ec025b0b29dad8dcc37ce29318132ca5088f97b4946dc5` (1,463,848,620 bytes).
+- Extracted root: `moss-ci-source-v1`; default cache and mirror override are shared with Kokoro.
+
+`UNIFIED_CI_MOSS_SOURCE` is now an optional offline override, pointing to the
+extracted bundle directory. Missing inputs and corrupt downloads fail rather
+than skip. Package-version reporting tolerates missing distribution metadata
+(recorded as null); original `ModelError` codes/details are printed and saved
+in `result.json` without changing test pass/fail status.
+Kokoro builds only the smallest T32/F160 gear in this CI fixture, retaining all
+four components and relocation/inference. The published four-gear default and
+its rejection of missing gears remain covered by the fast Kokoro contract tests;
+larger gears are not numerically exercised by the unified smoke test.
+
+With the CI environment activated, run:
+
+```bash
+python benchmark_test/ci_test_transformer5.16.0/select_tests.py --format report
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  ./benchmark_test/ci_test_transformer5.16.0/run.sh -k 'unified_small'
+```
+
+Ordinary pytest schedules one isolated worker per visible GPU; do not add xdist
+workers to this module. Use `-k` to narrow the model/variant selection. A worker
+has a 3600-second timeout, configurable with `UNIFIED_CI_TIMEOUT`; a timeout kills
+its process group before the GPU is reused. Its `.impact.json` selects parameter
+nodes for model-private source/adapter changes, and all variants of the specific
+model for its workflow configurations. Shared Qwen source also selects its MoE,
+Qwen3-Next, Macaron and WeMM consumers. Public unified build/inference/catalog
+and shared fixture changes select the entire 45-case matrix. Multiple changes
+are combined; `--format report` shows the exact pytest nodes and reasons.
+`test_unified_small_model_coverage.py` checks registered workflow routing, shared
+consumers and the actual pytest collection of every declared node. Global policy
+is unchanged; changing the selector itself still triggers the full CI suite.

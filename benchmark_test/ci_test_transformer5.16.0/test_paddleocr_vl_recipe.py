@@ -14,7 +14,7 @@ from recipes.paddleocr_vl import (
     PaddleOCRVLVisionQModel,
     _copy_processor_assets,
     _merge_quantized_stages,
-    _pad_symmetric_qzeros,
+    _publish_quantized_stages,
     preserve_paddleocr_vl_tie_word_embeddings,
     quantize_paddleocr_vl,
     register_paddleocr_vl_gptqmodel,
@@ -28,19 +28,19 @@ FULL_PADDLEOCR_VL = ROOT / "/data01/datasets/PaddleOCR-VL-1.6"
 
 
 @pytest.mark.transformer516
-def test_paddleocr_vl_pads_symmetric_qzeros_for_partial_output_word() -> None:
-    class Packed(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.sym = True
-            self.pack_factor = 4
-            self.register_buffer("qzeros", torch.full((18, 1072), 0x7F7F7F7F, dtype=torch.int32))
-            self.register_buffer("scales", torch.ones((18, 4304)))
+def test_paddleocr_vl_merge_keeps_reserved_quant_root(tmp_path: Path) -> None:
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    (merged / "config.json").write_text("{}")
+    reserved = tmp_path / "reserved"
+    reserved.mkdir()
+    inode = reserved.stat().st_ino
 
-    model = torch.nn.Sequential(Packed())
-    assert _pad_symmetric_qzeros(model) == 1
-    assert model[0].qzeros.shape == (18, 1076)
-    assert torch.equal(model[0].qzeros[:, -1], model[0].qzeros[:, -2])
+    _publish_quantized_stages(merged, reserved)
+
+    assert reserved.stat().st_ino == inode
+    assert (reserved / "config.json").read_text() == "{}"
+    assert not merged.exists()
 
 
 @pytest.mark.transformer516
@@ -108,6 +108,10 @@ def test_paddleocr_vl_recipe_signature_and_dry_run(tmp_path: Path) -> None:
     assert result.provenance["offload_to_disk"] is False
     assert result.provenance["offload_to_disk_path"] is None
     assert result.precision["scope"] == "language_model"
+    assert result.precision["components"] == {"language_model": {"bits": 8}}
+    assert combined_result.precision["components"] == {
+        "language_model": {"bits": 8}, "vision_encoder": {"bits": 8},
+    }
     assert result.precision["visual_modules"] == "float"
     assert result.precision["vision_patch_embedding"] == "float"
     assert result.precision["projector_modules"] == "float"
@@ -265,11 +269,10 @@ def test_paddleocr_vl_native_minimal_model_shape_and_tie_patch() -> None:
 @pytest.mark.transformer516
 def test_paddleocr_vl_offline_r1_rotation_save_load_preserves_multimodal_logits(tmp_path: Path) -> None:
     pytest.importorskip("transformers.models.paddleocr_vl")
+    from gptqmodel.quantization.rotation.rotation import fuse_layer_norms, get_orthogonal_matrix
     from transformers.models.paddleocr_vl.modeling_paddleocr_vl import (
         PaddleOCRVLForConditionalGeneration,
     )
-
-    from gptqmodel.quantization.rotation.rotation import fuse_layer_norms, get_orthogonal_matrix
 
     torch.manual_seed(7)
     base_model = PaddleOCRVLForConditionalGeneration(_minimal_native_config()).eval()

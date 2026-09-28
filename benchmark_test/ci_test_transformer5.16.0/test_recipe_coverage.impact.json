@@ -7,7 +7,9 @@
         "benchmark_test/ci_test_transformer5.16.0/_recipe_coverage.py",
         "benchmark_test/ci_test_transformer5.16.0/recipe_legacy_gaps.json",
         "benchmark_test/ci_test_transformer5.16.0/test_recipe_coverage.py",
-        "examples_merak/unified_api/recipe.py"
+        "examples_merak/unified_api/recipe.py",
+        "xhmodel_merak/model_integrations/_dependencies.py",
+        "xhmodel_merak/model_integrations/ling/plugin.py"
       ]
     }
   ]

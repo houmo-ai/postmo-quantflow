@@ -50,8 +50,10 @@ def validate_dynamic_vision(
     manifest_gears = manifest.get("gears")
     if not isinstance(manifest_gears, list) or len(manifest_gears) != len(expected_gears):
         raise _invalid_dynamic_vision(model_id, "gear_manifest.gears must map every registered token gear")
+    schema_version = manifest.get("schema_version")
+    if schema_version not in (1, 2) or isinstance(schema_version, bool):
+        raise _invalid_dynamic_vision(model_id, "unsupported gear_manifest schema_version")
     required_manifest_values = {
-        "schema_version": 1,
         "visual_input_mode": "patches",
         "token_unit": "post_spatial_merge",
         "routing_policy": "smallest_fit",
@@ -64,6 +66,20 @@ def validate_dynamic_vision(
     }
     if mismatches:
         raise _invalid_dynamic_vision(model_id, "gear_manifest routing contract is invalid", mismatches=mismatches)
+
+    if schema_version == 2:
+        extended_fields = (
+            "position_format", "rotary_position_format", "attention_mask_format",
+            "attention_mask_shape", "attention_mask_operator", "spatial_merge_size",
+            "rotary_cache_length",
+        )
+        mismatches = {
+            key: {"expected": visual.get(key), "actual": manifest.get(key)}
+            for key in extended_fields
+            if visual.get(key) is None or manifest.get(key) != visual.get(key)
+        }
+        if mismatches:
+            raise _invalid_dynamic_vision(model_id, "gear_manifest visual geometry is invalid", mismatches=mismatches)
 
     spatial_merge_size = visual.get("spatial_merge_size")
     if not isinstance(spatial_merge_size, int) or isinstance(spatial_merge_size, bool) or spatial_merge_size <= 0:
