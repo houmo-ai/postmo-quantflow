@@ -159,17 +159,20 @@ internal:
     reviewer: ''
     quant_models:
     - name: Fun-Audio-Chat 8B
-      release_path: ''
-      release_url: ''
-      version: ''
-      date: ''
+      release_path: fun_audio_chat_8b_yuehui_w8a8.zip
+      release_url: http://10.10.1.53:8081/artifactory/model_zoo2/fun_audio_chat_8b/fun_audio_chat_8b_yuehui_w8a8.zip
+      version: '20260928'
+      date: '2026-09-28'
       quant_type: w8a8h1_sefp
       artifact_type: hmonnx
-      status: missing
+      status: draft
   presentation:
     summary: Fun-Audio-Chat 8B A20 Merak workflow 卡片。
     demo:
       kind: metadata_only
+      experiment_commits:
+        xh2modelzoo: 8bf67c492bd580ac53fbe3c243945aad2ca2130d
+        xhquanttool: 1ed429872231eb4a2cb47024c3d859bbd23fa32a
     limitations:
     - A20 性能尚未测试；静态 audio encoder 固定为 8 秒，超长音频会截断。
     - 精度基于 Seed-TTS EN 和 CoVoST2 en-zh 各前 500 条，仅用于 HF 与芯片结果的回归对比。
