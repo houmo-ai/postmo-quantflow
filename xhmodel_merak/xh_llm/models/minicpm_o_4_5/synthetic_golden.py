@@ -133,6 +133,14 @@ def synthetic_golden_inputs(
         )
         return tuple(values)
     if name == "token2wav_flow_frontend":
+        if role == "stream_flow_prompt_frontend":
+            contract = component["stream_contract"]
+            capacity = int(contract["prompt_token_capacity"])
+            return (
+                torch.zeros((1, capacity), dtype=torch.int32),
+                torch.tensor([capacity], dtype=torch.int32),
+                torch.zeros((1, 192), dtype=torch.float16),
+            )
         if role == "stream_flow_frontend":
             contract = component["stream_contract"]
             token_capacity = int(contract["chunk_token_capacity"])
@@ -172,6 +180,16 @@ def synthetic_golden_inputs(
             torch.zeros((1, 192), dtype=torch.float16),
         )
     if name == "token2wav_flow_decoder":
+        if role == "stream_flow_prompt_estimator_step":
+            capacity = int(component["stream_contract"]["base_cache_valid_length"])
+            return (
+                torch.zeros((2, 80, capacity), dtype=torch.float16),
+                torch.zeros((2, 80, capacity), dtype=torch.float16),
+                torch.zeros((2,), dtype=torch.float16),
+                torch.zeros((2, 80), dtype=torch.float16),
+                torch.zeros((2, 80, capacity), dtype=torch.float16),
+                torch.tensor([capacity], dtype=torch.int32),
+            )
         if role == "stream_flow_estimator_step":
             contract = component["stream_contract"]
             shapes = contract["estimator_step_cache_shapes"]

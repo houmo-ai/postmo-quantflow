@@ -19,6 +19,8 @@ from .minicpmo_token2wav_modules import (
     FlowDecoderWrapper,
     FlowEstimatorStepWrapper,
     FlowFrontendWrapper,
+    FlowPromptEstimatorStepWrapper,
+    FlowPromptFrontendWrapper,
     FlowStreamingFrontendWrapper,
     HiftF0Wrapper,
     HiftPart2Wrapper,
@@ -569,9 +571,30 @@ def export_flow_frontend(
                 )
         stream_contract = {
             "pre_lookahead_len": int(streaming["pre_lookahead_len"]),
+            "prompt_token_capacity": prompt_token_capacity,
+            "prompt_mel_capacity": prompt_mel_capacity,
             "base_cache_valid_length": int(streaming["base_cache_valid_length"]),
             "base_cache_shapes": {name: list(shape) for name, shape in configured_base_shapes.items()},
         }
+        graphs["stream_flow_prompt_frontend"] = _convert(
+            FlowPromptFrontendWrapper(flow),
+            (
+                stream_inputs[0],
+                torch.tensor([prompt_token_capacity], dtype=torch.int32),
+                stream_inputs[2],
+            ),
+            (
+                ("tokens", "token_valid_length", "embedding"),
+                (
+                    "mu", "spks", "conformer_cnn_cache", "conformer_base_att_cache",
+                    "conformer_up_att_cache", "prompt_mel_valid_length",
+                ),
+            ),
+            component_dir
+            / f"{name_prefix}token2wav_flow_frontend_stream_flow_prompt_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+        )
         all_cache_shapes = {
             name: tuple(int(value) for value in streaming["cache_shapes"][name]) for name in FLOW_CACHE_NAMES
         }
@@ -654,6 +677,25 @@ def export_flow_decoder(
     if export_mode in {"session", "stream"}:
         streaming = config["streaming"]
         step_shapes = streaming["estimator_step_cache_shapes"]
+        prompt_frames = int(streaming["base_cache_valid_length"])
+        graphs["stream_flow_prompt_estimator_step"] = _convert(
+            FlowPromptEstimatorStepWrapper(flow.decoder.estimator),
+            (
+                torch.zeros((2, 80, prompt_frames)),
+                torch.zeros((2, 80, prompt_frames)),
+                torch.zeros((2,)),
+                torch.zeros((2, 80)),
+                torch.zeros((2, 80, prompt_frames)),
+                torch.tensor([prompt_frames], dtype=torch.int32),
+            ),
+            (
+                ("x_cfg", "mu_cfg", "t_cfg", "spks_cfg", "cond_cfg", "current_frame_valid_length"),
+                ("derivative_cfg", "estimator_cnn_cache", "estimator_att_cache"),
+            ),
+            component_dir / f"{name_prefix}token2wav_flow_decoder_stream_flow_prompt_{target_device}_{quant_type}.onnx",
+            target_device,
+            quant_type,
+        )
         stream_inputs = (
             torch.zeros((2, 80, int(streaming["append_capacity"]))),
             torch.zeros((2, 80, int(streaming["append_capacity"]))),

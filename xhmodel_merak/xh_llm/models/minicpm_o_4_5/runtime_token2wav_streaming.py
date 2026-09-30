@@ -75,16 +75,10 @@ class StreamState:
         )
 
     def reset(self, base_cache: Mapping[str, Tensor]) -> None:
-        """Restore the prompt cache and official zero-length HiFT tails."""
+        """Restore the prompt cache and zero the existing HiFT tails."""
         self.flow_cache = {name: value.detach().clone() for name, value in base_cache.items()}
         self.flow_valid_lengths = {name: int(base_cache[name].shape[FLOW_CACHE_AXES[name]]) for name in FLOW_CACHE_AXES}
-        device = next(iter(self.flow_cache.values())).device
-        dtype = next(iter(self.flow_cache.values())).dtype
-        self.hift_cache = {
-            "mel": torch.zeros((1, 80, 0), device=device, dtype=dtype),
-            "source": torch.zeros((1, 1, 0), device=device, dtype=dtype),
-            "speech": torch.zeros((1, 0), device=device, dtype=dtype),
-        }
+        self.hift_cache = {name: torch.zeros_like(value) for name, value in self.hift_cache.items()}
         self.hift_valid_lengths = {"mel": 0, "source": 0, "speech": 0}
         bank_count = self.host_timestep_cache_banks
         self.estimator_cnn_banks = base_cache["estimator_cnn_cache"][:bank_count].detach().clone()

@@ -89,7 +89,8 @@ PYTHONPATH=$PWD python \
 该配置的默认目录为 `work_dirs/minicpm_o_4_5_xh2a_w4a8_gptq_quant` 与
 `work_dirs/minicpm_o_4_5_xh2a_w4a8_gptq_export`。
 
-导出物仍需原始模型目录中的 processor、tokenizer、remote code 和 Token2Wav assets。
+推理仍需原始模型目录中的 processor、tokenizer 和 remote code；Token2Wav 权重已在导出图中，
+不再加载原始 `flow.pt` / `hift.pt`。
 `export.mode` 决定导出的运行模式：
 
 - `offline`：非流式 `chat`；

@@ -127,9 +127,7 @@ def _use_exec_device_as_default(device: str) -> None:
         torch.cuda.set_device(device)
 
 
-def _init_host(host: Any, *, model_dir: Path, work_dir: Path) -> MiniCPMO45HMONNXRuntime:
-    if hasattr(host, "init_tts"):
-        host.init_tts(model_dir=str(model_dir / "assets" / "token2wav"))
+def _init_host(host: Any, *, work_dir: Path) -> MiniCPMO45HMONNXRuntime:
     return MiniCPMO45HMONNXRuntime(work_dir, host)
 
 
@@ -161,7 +159,7 @@ def _build_real_runtime(args: argparse.Namespace) -> tuple[StreamingHost, Any, A
     ).eval()
     patch_dynamic_cache_seen_tokens(DynamicCache)
     patch_audio_attention_return_compat(host)
-    runtime = _init_host(host, model_dir=model_dir, work_dir=work_dir)
+    runtime = _init_host(host, work_dir=work_dir)
     runtime.set_exec_device(args.exec_device)
     return runtime, tokenizer, None
 

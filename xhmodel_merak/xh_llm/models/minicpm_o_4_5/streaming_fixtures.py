@@ -60,6 +60,8 @@ _DUPLEX_AUDIO_ROLES = ("audio.stream_prefill", "audio.stream_decode")
 _LLM_ROLES = ("llm.prefill", "llm.decode")
 _TTS_ROLES = ("tts.prefill", "tts.decode")
 _TOKEN2WAV_ROLES = (
+    "token2wav.stream_flow_prompt_frontend",
+    "token2wav.stream_flow_prompt_estimator_step",
     "token2wav.stream_flow_frontend",
     "token2wav.stream_flow_estimator_step",
     "token2wav.stream_hift_part1",
@@ -87,7 +89,8 @@ CERTIFIED_STREAMING_CASES = (
         _DUPLEX_AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES,
     ),
     StreamingCase(
-        "duplex_omni_reply", "case-05", "duplex", True, True, _DUPLEX_AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES
+        "duplex_omni_reply", "case-05", "duplex", True, True,
+        _DUPLEX_AUDIO_ROLES + _LLM_ROLES + _TTS_ROLES + _TOKEN2WAV_ROLES,
     ),
 )
 
@@ -96,8 +99,8 @@ _GRAPH_ROLE_NAMES = {
     "audio": {"stream_prefill", "stream_decode", "session_prefill", "session_decode"},
     "llm": {"prefill", "decode"},
     "tts": {"prefill", "decode"},
-    "token2wav_flow_frontend": {"stream_flow_frontend"},
-    "token2wav_flow_decoder": {"stream_flow_estimator_step"},
+    "token2wav_flow_frontend": {"stream_flow_prompt_frontend", "stream_flow_frontend"},
+    "token2wav_flow_decoder": {"stream_flow_prompt_estimator_step", "stream_flow_estimator_step"},
     "token2wav_hift": {"stream_hift_part1", "stream_hift_part2"},
 }
 

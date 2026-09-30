@@ -91,14 +91,6 @@ def test_prepare_output_paths_creates_parent_directories(tmp_path) -> None:
     assert tokens_path.parent.is_dir()
 
 
-def test_token2wav_asset_path_uses_model_directory() -> None:
-    demo = _load_demo_module()
-
-    path = demo.token2wav_asset_path(Path("/models/MiniCPM-o-4_5"))
-
-    assert path == Path("/models/MiniCPM-o-4_5/assets/token2wav")
-
-
 def test_normalize_video_uses_official_ffmpeg_path(monkeypatch) -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import media
 
@@ -161,7 +153,7 @@ def test_official_video_helper_loads_without_importing_decord(monkeypatch) -> No
     assert helper.__name__ == "get_video_frame_audio_segments"
 
 
-def test_hmonnx_demo_initializes_tts_before_attaching_runtime_even_for_text_only() -> None:
+def test_hmonnx_demo_does_not_load_native_tts_before_attaching_runtime() -> None:
     demo = _load_demo_module()
     events: list[str] = []
 
@@ -176,12 +168,11 @@ def test_hmonnx_demo_initializes_tts_before_attaching_runtime_even_for_text_only
 
     demo.initialize_hmonnx_host(
         Host(),
-        model_dir=Path("/models/MiniCPM-o-4_5"),
         work_dir=Path("/tmp/export"),
         runtime_type=Runtime,
     )
 
-    assert events == ["init:/models/MiniCPM-o-4_5/assets/token2wav", "runtime"]
+    assert events == ["runtime"]
 
 
 def test_hf_demo_prepares_audio_attention_compatibility_before_chat() -> None:

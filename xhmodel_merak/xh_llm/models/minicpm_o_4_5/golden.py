@@ -34,6 +34,8 @@ _STREAM_ROLES = (
     "tts_decode",
     "token2wav_speech_tokenizer",
     "token2wav_campplus",
+    "token2wav_prompt_frontend",
+    "token2wav_prompt_estimator_step",
     "token2wav_flow_frontend",
     "token2wav_estimator_step",
     "token2wav_hift_stream_part1",
@@ -194,8 +196,6 @@ def _load_real_runtime(root: Path, meta: Mapping[str, Any]) -> tuple[MiniCPMO45H
         torch_dtype=torch.float16,
         device_map="cpu",
     ).eval()
-    if hasattr(host, "init_tts"):
-        host.init_tts(model_dir=str(Path(model_dir) / "assets" / "token2wav"))
     patch_dynamic_cache_seen_tokens(DynamicCache)
     patch_audio_attention_return_compat(host)
     return MiniCPMO45HMONNXRuntime(root, host), tokenizer
@@ -224,7 +224,9 @@ def _runtime_sessions(runtime: MiniCPMO45HMONNXRuntime) -> dict[str, Any]:
         "hift_part1_session",
         "hift_part2_session",
         "flow_frontend_session",
+        "prompt_frontend_session",
         "estimator_step_session",
+        "prompt_estimator_step_session",
         "hift_stream_part1_session",
         "hift_stream_part2_session",
         "campplus_session",

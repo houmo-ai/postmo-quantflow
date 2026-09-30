@@ -101,7 +101,7 @@ def test_stream_export_copy_bounds_registered_flow_buffers_without_mutating_sour
     assert source.decoder.estimator.att_cache_buffer.shape == (16, 2, 8, 1000, 128)
 
 
-def test_streaming_frontend_uses_official_host_initialization_and_exports_frontend_roles(tmp_path, monkeypatch) -> None:
+def test_streaming_frontend_exports_prompt_and_chunk_roles(tmp_path, monkeypatch) -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import export_token2wav
 
     class Flow:
@@ -175,8 +175,8 @@ def test_streaming_frontend_uses_official_host_initialization_and_exports_fronte
         "XH2a",
     )
 
-    assert set(result["graphs"]) == {"stream_flow_frontend"}
-    assert len(converted_roles) == 1
+    assert set(result["graphs"]) == {"stream_flow_prompt_frontend", "stream_flow_frontend"}
+    assert len(converted_roles) == 2
     assert result["stream_contract"]["chunk_token_capacity"] == 4
     assert result["stream_contract"]["base_conformer_layers"] == 1
 
@@ -492,9 +492,9 @@ def test_flow_stream_roles_use_explicit_cache_contract_and_seven_outputs(tmp_pat
         "XH2a",
     )
 
-    assert set(result["graphs"]) == {"stream_flow_estimator_step"}
-    assert len(calls) == 1
-    _, input_names, output_names, input_shapes = calls[0]
+    assert set(result["graphs"]) == {"stream_flow_prompt_estimator_step", "stream_flow_estimator_step"}
+    assert len(calls) == 2
+    _, input_names, output_names, input_shapes = calls[1]
     assert input_names == tuple(
         [
             "x_cfg",

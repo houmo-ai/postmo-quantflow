@@ -34,7 +34,7 @@ class Token2WavExecutionReport:
     stream_estimator_step_count: int = 0
     stream_hift_count: int = 0
     host_initialization_count: int = 0
-    host_initialization_backend: str = "official_host"
+    host_initialization_backend: str = "hmonnx_prompt"
     streaming_attached: bool = False
 
     @property

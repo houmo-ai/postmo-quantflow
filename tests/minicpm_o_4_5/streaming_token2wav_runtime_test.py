@@ -10,7 +10,9 @@ def _flow_meta() -> dict[str, object]:
     return {
         "graphs": {
             "main": "flow.onnx",
+            "stream_flow_prompt_frontend": "flow_prompt_frontend.onnx",
             "stream_flow_frontend": "flow_frontend.onnx",
+            "stream_flow_prompt_estimator_step": "flow_prompt_estimator_step.onnx",
             "stream_flow_estimator_step": "flow_estimator_step.onnx",
         },
         "stream_contract": {
@@ -125,7 +127,9 @@ def test_streaming_role_loader_requires_decomposed_flow_graphs(tmp_path, monkeyp
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
     runtime._load_streaming_roles(tmp_path, _components(), lambda path: str(path))
 
+    assert runtime.prompt_frontend_session == str(tmp_path / "flow_prompt_frontend.onnx")
     assert runtime.flow_frontend_session == str(tmp_path / "flow_frontend.onnx")
+    assert runtime.prompt_estimator_step_session == str(tmp_path / "flow_prompt_estimator_step.onnx")
     assert runtime.estimator_step_session == str(tmp_path / "flow_estimator_step.onnx")
     assert runtime.hift_stream_part1_session == str(tmp_path / "hift_part1.onnx")
     assert runtime.hift_stream_part2_session == str(tmp_path / "hift_part2.onnx")
@@ -154,10 +158,12 @@ def test_stream_cache_reset_restores_base_flow_and_empty_hift_state() -> None:
     runtime._base_flow_cache = {name: value.clone() for name, value in base.items()}
     runtime._stream_state = runtime_token2wav.StreamState.from_base_cache(base, prompt_mel_length=5)
     runtime._stream_state.flow_cache["conformer_cnn_cache"].add_(10)
+    runtime._stream_state.hift_cache["speech"] = torch.ones(1, 4)
     runtime.reset_stream_cache()
 
     assert torch.equal(runtime._stream_state.flow_cache["conformer_cnn_cache"], base["conformer_cnn_cache"])
-    assert all(value.shape[-1] == 0 for value in runtime._stream_state.hift_cache.values())
+    assert runtime._stream_state.hift_cache["speech"].shape == (1, 4)
+    assert all(not value.any() for value in runtime._stream_state.hift_cache.values())
 
 
 def test_reset_before_prompt_cache_initialization_is_a_noop() -> None:
@@ -592,51 +598,25 @@ def test_install_guards_native_streaming_boundaries_without_fallback() -> None:
         tokenizer.hift(torch.zeros(1), torch.zeros(1))
 
 
-def test_adapter_setup_cache_uses_native_result_instead_of_exported_template() -> None:
+def test_adapter_setup_cache_uses_exported_prompt_graphs() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
 
-    shapes = {
-        "conformer_cnn_cache": (1, 2, 1),
-        "conformer_att_cache": (1, 1, 1, 3, 1),
-        "estimator_cnn_cache": (1, 1, 1, 2, 1),
-        "estimator_att_cache": (1, 1, 1, 1, 3, 1),
-    }
-    exported_template = {name: torch.zeros(shape) for name, shape in shapes.items()}
-    native_cache = {name: torch.full(shape, float(index + 11)) for index, (name, shape) in enumerate(shapes.items())}
-    observed_native_args: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]] = []
-
-    class NativeFlow:
-        def setup_cache(self, token, mel, spk, n_timesteps=10):
-            observed_native_args.append((token, mel, spk, n_timesteps))
-            return native_cache
-
-    runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
-    runtime.up_rate = 2
-    runtime.streaming_enabled = True
-    runtime._base_flow_cache = exported_template
-    runtime._regenerate_noise = lambda: None
-    runtime.stream_flow_meta = {
-        "cache_shapes": {name: list(shape) for name, shape in shapes.items()},
-        "cache_axes": {"conformer_att_cache": 3, "estimator_att_cache": 4},
-    }
-    runtime.report = runtime_token2wav.Token2WavExecutionReport()
-    tokenizer = SimpleNamespace(flow=NativeFlow(), hift=SimpleNamespace())
-    runtime_token2wav.install_hmonnx_token2wav(tokenizer, runtime)
+    calls = []
+    cache = {"conformer_cnn_cache": torch.ones(1)}
+    runtime = SimpleNamespace(
+        up_rate=2,
+        pre_lookahead_len=3,
+        setup_prompt_cache=lambda *args, **kwargs: calls.append((args, kwargs)) or cache,
+    )
+    adapter = runtime_token2wav._HMONNXFlowAdapter(runtime)
     token = torch.ones(1, 2, dtype=torch.int32)
     mel = torch.ones(1, 7, 80)
     spk = torch.ones(1, 192)
 
-    result = tokenizer.flow.setup_cache(token, mel, spk, n_timesteps=4)
+    result = adapter.setup_cache(token, mel, spk, n_timesteps=4)
 
-    assert result is native_cache
-    assert observed_native_args == [(token, mel, spk, 4)]
-    assert runtime._stream_state.prompt_mel_length == 7
-    assert all(
-        torch.equal(runtime._stream_state.flow_cache[name], native_cache[name])
-        for name in runtime_token2wav.FLOW_CACHE_NAMES
-    )
-    assert runtime.report.host_initialization_count == 1
-    assert runtime.report.host_initialization_backend == "official_host"
+    assert result is cache
+    assert calls == [((token, mel, spk), {"n_timesteps": 4})]
 
 
 def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
@@ -779,78 +759,6 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
     assert hift_input_counts == [("part1", 4), ("part2", 2), ("part1", 4), ("part2", 2)]
 
 
-def test_top_level_init_bridges_official_prompt_cache_before_stream() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime import MiniCPMO45HMONNXRuntime
-
-    base = {
-        name: torch.zeros(shape)
-        for name, shape in {
-            "conformer_cnn_cache": (1, 2, 1),
-            "conformer_att_cache": (1, 1, 1, 3, 1),
-            "estimator_cnn_cache": (1, 1, 1, 2, 1),
-            "estimator_att_cache": (1, 1, 1, 1, 3, 1),
-        }.items()
-    }
-    init_calls: list[tuple[object, int]] = []
-    runtime = object.__new__(MiniCPMO45HMONNXRuntime)
-    runtime.token2wav = SimpleNamespace(
-        init_stream_cache=lambda cache, length: init_calls.append((cache, length)),
-        bridge_official_init=lambda result: init_calls.append((result["flow_cache_base"], result["prompt_mel_length"])),
-    )
-    runtime.host_model = SimpleNamespace(
-        init_token2wav_cache=lambda prompt: {
-            "flow_cache_base": base,
-            "hift_cache_base": {
-                "mel": torch.zeros(1, 80, 0),
-                "source": torch.zeros(1, 1, 0),
-                "speech": torch.zeros(1, 0),
-            },
-            "prompt_mel_length": 7,
-            "prompt": prompt,
-        }
-    )
-
-    result = runtime.init_token2wav_cache("prompt")
-
-    assert result["prompt"] == "prompt"
-    assert init_calls == [(base, 7)]
-
-
-def test_top_level_init_parses_actual_official_none_return_and_host_cache() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime import MiniCPMO45HMONNXRuntime
-
-    flow = {
-        "conformer_cnn_cache": torch.zeros(1, 2, 1),
-        "conformer_att_cache": torch.zeros(1, 1, 1, 7, 1),
-        "estimator_cnn_cache": torch.zeros(1, 1, 1, 2, 1),
-        "estimator_att_cache": torch.zeros(1, 1, 1, 1, 7, 1),
-    }
-    official_cache = {
-        "flow_cache_base": flow,
-        "hift_cache_base": {
-            "mel": torch.zeros(1, 80, 0),
-            "source": torch.zeros(1, 1, 0),
-            "speech": torch.zeros(1, 0),
-        },
-    }
-    bridged: list[object] = []
-    host = SimpleNamespace(token2wav_cache=None)
-
-    def official_init(prompt: object) -> None:
-        del prompt
-        host.token2wav_cache = official_cache
-
-    host.init_token2wav_cache = official_init
-    runtime = object.__new__(MiniCPMO45HMONNXRuntime)
-    runtime.host_model = host
-    runtime.token2wav = SimpleNamespace(bridge_official_init=bridged.append)
-
-    result = runtime.init_token2wav_cache("prompt")
-
-    assert result is None
-    assert bridged == [official_cache]
-
-
 def test_reset_requires_an_immutable_prompt_base() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_token2wav import (
         MiniCPMO45Token2WavHMONNXRuntime,
@@ -867,7 +775,9 @@ def test_reset_requires_an_immutable_prompt_base() -> None:
 @pytest.mark.parametrize(
     ("component", "role"),
     (
+        ("token2wav_flow_frontend", "stream_flow_prompt_frontend"),
         ("token2wav_flow_frontend", "stream_flow_frontend"),
+        ("token2wav_flow_decoder", "stream_flow_prompt_estimator_step"),
         ("token2wav_flow_decoder", "stream_flow_estimator_step"),
         ("token2wav_hift", "stream_hift_part1"),
         ("token2wav_hift", "stream_hift_part2"),
@@ -930,7 +840,7 @@ def test_host_initialization_is_reported_separately_from_hmonnx_execution() -> N
     report.record_host_initialization()
 
     assert report.host_initialization_count == 1
-    assert report.host_initialization_backend == "official_host"
+    assert report.host_initialization_backend == "hmonnx_prompt"
     assert tuple(report.streaming_execution_counts) == (
         "token2wav_flow_stream",
         "token2wav_flow_stream_final",
@@ -1034,58 +944,6 @@ def test_init_stream_cache_rejects_missing_or_malformed_flow_cache() -> None:
         runtime.init_stream_cache({}, 5)
 
 
-def test_official_none_bridge_uses_prompt_mel_frame_axis() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
-
-    flow = {
-        name: torch.zeros(shape, dtype=torch.float32)
-        for name, shape in {
-            "conformer_cnn_cache": (1, 2, 1),
-            "conformer_att_cache": (1, 1, 1, 12, 1),
-            "estimator_cnn_cache": (1, 1, 1, 2, 1),
-            "estimator_att_cache": (1, 1, 1, 1, 12, 1),
-        }.items()
-    }
-    runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
-    runtime.streaming_enabled = True
-    runtime.stream_flow_meta = {"cache_shapes": {name: list(value.shape) for name, value in flow.items()}}
-    runtime.report = runtime_token2wav.Token2WavExecutionReport()
-    runtime._regenerate_noise = lambda: None
-    result = {
-        "flow_cache_base": flow,
-        # Official hift cache mel is zero-length by design; the prompt length is
-        # inferred from the flow conformer attention cache length axis.
-        "hift_cache_base": {"mel": torch.zeros(1, 80, 0), "source": torch.zeros(1, 1, 0), "speech": torch.zeros(1, 0)},
-    }
-
-    runtime.bridge_official_init(result)
-
-    assert runtime._stream_state.prompt_mel_length == 12
-
-
-def test_official_none_bridge_infers_prompt_mel_from_flow_when_hift_layout_odd() -> None:
-    from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
-
-    flow = {
-        name: torch.zeros(shape, dtype=torch.float32)
-        for name, shape in {
-            "conformer_cnn_cache": (1, 2, 1),
-            "conformer_att_cache": (1, 1, 1, 3, 1),
-            "estimator_cnn_cache": (1, 1, 1, 2, 1),
-            "estimator_att_cache": (1, 1, 1, 1, 3, 1),
-        }.items()
-    }
-    runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
-    runtime.streaming_enabled = True
-    runtime.stream_flow_meta = {"cache_shapes": {name: list(value.shape) for name, value in flow.items()}}
-    runtime.report = runtime_token2wav.Token2WavExecutionReport()
-    runtime._regenerate_noise = lambda: None
-
-    # The flow conformer cache length (3) wins over the odd hift mel layout.
-    runtime.bridge_official_init({"flow_cache_base": flow, "hift_cache_base": {"mel": torch.zeros(1, 12, 80)}})
-    assert runtime._stream_state.prompt_mel_length == 3
-
-
 def test_offline_report_stays_three_keys_after_stream_attachment() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_token2wav import Token2WavExecutionReport
 
@@ -1160,7 +1018,7 @@ def test_flow_adapter_disables_autocast_around_stream_flow(monkeypatch) -> None:
         up_rate=2,
         pre_lookahead_len=3,
     )
-    adapter = runtime_token2wav._HMONNXFlowAdapter(SimpleNamespace(), runtime)
+    adapter = runtime_token2wav._HMONNXFlowAdapter(runtime)
 
     adapter.inference_chunk(torch.zeros(1, 2, dtype=torch.int32), torch.zeros(1, 4), False)
 
@@ -1283,8 +1141,7 @@ def test_stream_hift_crops_waveform_and_source_to_logical_combined_mel_length() 
 
 
 def test_init_stream_cache_rejects_prompt_caches_exceeding_exported_stream_capacity() -> None:
-    """Official native setup_cache sizes prompt caches to the reference audio; graphs are
-    exported for a bounded prompt, so oversized caches must fail with a clear error."""
+    """Prompt caches must fit the exported streaming graph capacity."""
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
 
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)

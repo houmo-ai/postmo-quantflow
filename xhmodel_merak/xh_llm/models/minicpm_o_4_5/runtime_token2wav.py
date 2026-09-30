@@ -165,8 +165,14 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         self.flow_frontend_session = graph(
             root / str(components["token2wav_flow_frontend"]["graphs"]["stream_flow_frontend"])
         )
+        self.prompt_frontend_session = graph(
+            root / str(components["token2wav_flow_frontend"]["graphs"]["stream_flow_prompt_frontend"])
+        )
         self.estimator_step_session = graph(
             root / str(components["token2wav_flow_decoder"]["graphs"]["stream_flow_estimator_step"])
+        )
+        self.prompt_estimator_step_session = graph(
+            root / str(components["token2wav_flow_decoder"]["graphs"]["stream_flow_prompt_estimator_step"])
         )
         self.hift_stream_part1_session = graph(root / str(components["token2wav_hift"]["graphs"]["stream_hift_part1"]))
         self.hift_stream_part2_session = graph(root / str(components["token2wav_hift"]["graphs"]["stream_hift_part2"]))
@@ -459,41 +465,6 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         self.reset_stream_cache()
         self._regenerate_noise()
 
-    def bridge_official_init(self, result: object) -> None:
-        if not isinstance(result, Mapping):
-            raise RuntimeError("unsupported official Token2Wav cache schema: expected mapping or host token2wav_cache")
-        base_cache = result.get("flow_cache_base")
-        if not isinstance(base_cache, Mapping):
-            raise RuntimeError("unsupported official Token2Wav cache schema: missing flow_cache_base mapping")
-        prompt_mel_length = result.get("prompt_mel_length")
-        if not isinstance(prompt_mel_length, int):
-            prompt_mel_length = self._infer_prompt_mel_length(result)
-        if prompt_mel_length is None:
-            raise RuntimeError("unsupported official Token2Wav cache schema: missing prompt mel length")
-        self.init_stream_cache(base_cache, prompt_mel_length)
-        if self.report.host_initialization_count == 0:
-            self.report.record_host_initialization()
-
-    def _infer_prompt_mel_length(self, result: Mapping[str, object]) -> int | None:
-        # The official hift_cache_base mel is zero-length by design; the real prompt
-        # mel length lives in the flow conformer attention cache length axis.
-        base_cache = result.get("flow_cache_base")
-        if isinstance(base_cache, Mapping):
-            conformer_att = base_cache.get("conformer_att_cache")
-            if isinstance(conformer_att, Tensor) and conformer_att.dim() >= 4:
-                return int(conformer_att.shape[3])
-        hift_cache = result.get("hift_cache_base")
-        if isinstance(hift_cache, Mapping):
-            mel = hift_cache.get("mel")
-            if isinstance(mel, Tensor):
-                if mel.dim() != 3 or mel.shape[0] != 1 or mel.shape[1] != 80:
-                    raise RuntimeError(
-                        "unsupported official Token2Wav cache schema: prompt mel must be [1, 80, frames]"
-                    )
-                if mel.shape[-1] > 0:
-                    return int(mel.shape[-1])
-        return None
-
     def _stream_att_capacity(self) -> int:
         """Exported streaming attention-cache capacity (prompt + tail window)."""
         meta = getattr(self, "stream_flow_meta", None)
@@ -524,7 +495,85 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
             if length > capacity:
                 raise RuntimeError(_token2wav_capacity_guide(length, capacity))
 
-    def init_stream_cache(self, base_cache: Mapping[str, Tensor], prompt_mel_length: int) -> StreamState:
+    def setup_prompt_cache(
+        self, token: Tensor, mel: Tensor, spk: Tensor, n_timesteps: int = 10
+    ) -> Mapping[str, Tensor]:
+        if n_timesteps != self.n_timesteps:
+            raise ValueError(f"Token2Wav requires {self.n_timesteps} CFM steps, got {n_timesteps}")
+        token_length = int(token.shape[1])
+        mel_length = int(mel.shape[1])
+        frontend = self.stream_flow_meta
+        token_capacity = int(frontend["prompt_token_capacity"])
+        mel_capacity = int(frontend["prompt_mel_capacity"])
+        if token_length > token_capacity or mel_length > mel_capacity:
+            raise RuntimeError(
+                f"Token2Wav prompt {token_length} tokens/{mel_length} frames exceeds {token_capacity}/{mel_capacity}"
+            )
+        if (token_length - self.pre_lookahead_len) * self.up_rate != mel_length:
+            raise ValueError("Token2Wav prompt token and mel lengths do not match")
+        device = self._noise_device
+        self._regenerate_noise()
+        tokens = F.pad(
+            token.to(device=device, dtype=torch.int32),
+            (0, token_capacity - token_length),
+            value=STREAM_SILENCE_TOKEN,
+        )
+        values = _values(self.prompt_frontend_session(
+            tokens,
+            torch.tensor([token_length], dtype=torch.int32, device=device),
+            spk.to(device=device, dtype=torch.float16),
+        ))
+        mu, projected_spk, conformer_cnn, base_att, up_att, valid_length = values
+        if int(valid_length.item()) != mel_length:
+            raise RuntimeError("Token2Wav prompt Frontend returned an incorrect mel length")
+        base_length = token_length - self.pre_lookahead_len
+        conformer_att = torch.cat(
+            (base_att[:, :, :, :base_length].repeat(1, 1, 1, self.up_rate, 1), up_att[:, :, :, :mel_length]),
+            dim=0,
+        )
+        mu_cfg = torch.cat((mu, torch.zeros_like(mu)), dim=0)
+        spks_cfg = torch.cat((projected_spk, torch.zeros_like(projected_spk)), dim=0)
+        cond = F.pad(mel.to(device=device, dtype=mu.dtype).transpose(1, 2), (0, mel_capacity - mel_length))
+        cond_cfg = torch.cat((cond, torch.zeros_like(cond)), dim=0)
+        x = F.pad(self.rand_noise[:, :, :mel_length].to(mu.dtype), (0, mel_capacity - mel_length))
+        t_span = torch.linspace(0, 1, n_timesteps + 1, device=device, dtype=mu.dtype)
+        t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
+        estimator_cnn = []
+        estimator_att = []
+        for index in range(n_timesteps):
+            t = t_span[index]
+            derivative, cnn, att = _values(self.prompt_estimator_step_session(
+                x.repeat(2, 1, 1),
+                mu_cfg,
+                t.repeat(2),
+                spks_cfg,
+                cond_cfg,
+                torch.tensor([mel_length], dtype=torch.int32, device=device),
+            ))
+            conditional, unconditional = derivative.chunk(2, dim=0)
+            x = x + (t_span[index + 1] - t) * ((1.0 + self.cfg_rate) * conditional - self.cfg_rate * unconditional)
+            estimator_cnn.append(cnn.float())
+            estimator_att.append(att[:, :, :, :mel_length].float())
+        bank_capacity = int(frontend["base_cache_shapes"]["estimator_cnn_cache"][0])
+        cnn_banks = torch.stack(estimator_cnn)
+        att_banks = torch.stack(estimator_att)
+        base_cache = {
+            "conformer_cnn_cache": conformer_cnn.float(),
+            "conformer_att_cache": conformer_att.float(),
+            "estimator_cnn_cache": torch.cat(
+                (cnn_banks, cnn_banks.new_zeros((bank_capacity - n_timesteps, *cnn_banks.shape[1:]))), dim=0
+            ),
+            "estimator_att_cache": torch.cat(
+                (att_banks, att_banks.new_zeros((bank_capacity - n_timesteps, *att_banks.shape[1:]))), dim=0
+            ),
+        }
+        self.init_stream_cache(base_cache, mel_length, regenerate_noise=False)
+        self.report.record_host_initialization()
+        return base_cache
+
+    def init_stream_cache(
+        self, base_cache: Mapping[str, Tensor], prompt_mel_length: int, *, regenerate_noise: bool = True
+    ) -> StreamState:
         expected_shapes = getattr(self, "stream_flow_meta", {}).get("cache_shapes", {})
         missing = [name for name in FLOW_CACHE_NAMES if name not in base_cache]
         if missing:
@@ -535,7 +584,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
                 raise RuntimeError(f"Flow cache {name} is not a tensor")
             expected = tuple(int(item) for item in expected_shapes.get(name, value.shape))
             # The exported cache_shapes are the graph capacity (prompt + tail); the
-            # official base_cache carries the full prompt only, so its length axis may
+            # prompt base cache carries the full prompt only, so its length axis may
             # be shorter than the capacity. Other axes must match exactly.
             axis = FLOW_CACHE_AXES.get(name)
             if len(expected) != value.dim():
@@ -554,7 +603,8 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         self._require_prompt_within_stream_capacity(base_cache)
         if prompt_mel_length < 0:
             raise RuntimeError("prompt mel length must be non-negative")
-        self._regenerate_noise()
+        if regenerate_noise:
+            self._regenerate_noise()
         self._base_flow_cache = {name: value.detach().clone() for name, value in base_cache.items()}
         att_capacity = self._stream_att_capacity()
         self._stream_state = StreamState.from_base_cache(

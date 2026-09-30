@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import io
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, Protocol
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -15,7 +17,13 @@ class Token2WavRuntimeProtocol(Protocol):
 
     def hift_inference(self, speech_feat: Tensor) -> Tensor: ...
 
+    def setup_prompt_cache(
+        self, token: Tensor, mel: Tensor, spk: Tensor, n_timesteps: int = 10
+    ) -> Mapping[str, Tensor]: ...
+
     def init_stream_cache(self, base_cache: Mapping[str, Tensor], prompt_mel_length: int) -> Any: ...
+
+    def reset_stream_cache(self) -> None: ...
 
     def stream_flow(
         self, tokens: Tensor, embedding: Tensor, last_chunk: bool
@@ -27,14 +35,10 @@ class Token2WavRuntimeProtocol(Protocol):
 
 
 class _HMONNXFlowAdapter:
-    def __init__(self, native_flow: object, runtime: Token2WavRuntimeProtocol) -> None:
-        self.native_flow = native_flow
+    def __init__(self, runtime: Token2WavRuntimeProtocol) -> None:
         self.runtime = runtime
         self.up_rate = runtime.up_rate
         self.pre_lookahead_len = int(getattr(runtime, "pre_lookahead_len", 0))
-
-    def __getattr__(self, name: str) -> object:
-        return getattr(self.native_flow, name)
 
     def inference(self, *args: Tensor | int) -> Tensor:
         reference = next((value for value in args if isinstance(value, Tensor)), None)
@@ -43,17 +47,7 @@ class _HMONNXFlowAdapter:
             return self.runtime.flow_inference(*args)
 
     def setup_cache(self, token: Tensor, mel: Tensor, spk: Tensor, n_timesteps: int = 10) -> Mapping[str, Tensor]:
-        result = self.native_flow.setup_cache(token, mel, spk, n_timesteps=n_timesteps)
-        if not isinstance(result, Mapping):
-            raise RuntimeError("official Flow setup_cache must return a cache mapping")
-        if mel.dim() != 3 or mel.shape[0] != 1 or (mel.shape[1] != 80 and mel.shape[2] != 80):
-            raise RuntimeError("official Flow prompt mel must have layout [1, frames, 80] or [1, 80, frames]")
-        prompt_mel_length = int(mel.shape[2] if mel.shape[1] == 80 else mel.shape[1])
-        self.runtime.init_stream_cache(result, prompt_mel_length)
-        report = getattr(self.runtime, "report", None)
-        if report is not None:
-            report.record_host_initialization()
-        return result
+        return self.runtime.setup_prompt_cache(token, mel, spk, n_timesteps=n_timesteps)
 
     def inference_chunk(self, *args: Tensor, **kwargs: object) -> tuple[Tensor, Mapping[str, Tensor]]:
         token = kwargs.get("token", args[0] if args else None)
@@ -134,7 +128,7 @@ def _official_token_length(feats_length: int) -> int:
 
 
 def install_hmonnx_token2wav(audio_tokenizer: SimpleNamespace, runtime: Token2WavRuntimeProtocol) -> None:
-    audio_tokenizer.flow = _HMONNXFlowAdapter(audio_tokenizer.flow, runtime)
+    audio_tokenizer.flow = _HMONNXFlowAdapter(runtime)
     audio_tokenizer.hift = _HMONNXHiFTAdapter(runtime)
     audio_tokenizer.hift.inference_chunk = audio_tokenizer.hift
     if getattr(runtime, "campplus_session", None) is not None:
@@ -151,7 +145,113 @@ def install_hmonnx_token2wav(audio_tokenizer: SimpleNamespace, runtime: Token2Wa
         report.streaming_attached = True
 
 
+class HMONNXToken2Wav:
+    """Official Token2Wav call surface without loading native Flow or HiFT."""
+
+    def __init__(self, runtime: Token2WavRuntimeProtocol) -> None:
+        self.runtime = runtime
+        self.flow = _HMONNXFlowAdapter(runtime)
+        self.hift = _HMONNXHiFTAdapter(runtime)
+        self.spk_model = _HMONNXCampplusAdapter(runtime, sequence_length=runtime.campplus_sequence_length)
+        self.audio_tokenizer = _HMONNXSpeechTokenizerAdapter(
+            runtime, feats_length=runtime.speech_tokenizer_feats_length, n_mels=128
+        )
+        self.n_timesteps = runtime.n_timesteps
+        self.cache = None
+        self._stream_cache = None
+        self.hift_cache_dict = {}
+        self._xh_hmonnx_streaming_attached = True
+        runtime.report.streaming_attached = True
+
+    @property
+    def device(self) -> torch.device:
+        return self.runtime._noise_device
+
+    @property
+    def stream_cache(self):
+        return self._stream_cache
+
+    @stream_cache.setter
+    def stream_cache(self, cache):
+        self._stream_cache = cache
+        if cache is not None:
+            self.runtime.reset_stream_cache()
+
+    def _prepare_prompt(self, prompt_wav: str):
+        import s3tokenizer
+        import torchaudio
+        import torchaudio.compliance.kaldi as kaldi
+        from stepaudio2.flashcosyvoice.utils.audio import mel_spectrogram
+
+        audio = s3tokenizer.load_audio(prompt_wav, sr=16000)
+        mels = s3tokenizer.log_mel_spectrogram(audio)
+        mels, mels_lens = s3tokenizer.padding([mels])
+        prompt_tokens, prompt_token_lengths = self.audio_tokenizer.quantize(
+            mels.to(self.device), mels_lens.to(self.device)
+        )
+        spk_feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
+        spk_feat = spk_feat - spk_feat.mean(dim=0, keepdim=True)
+        spk = torch.as_tensor(
+            self.spk_model.run(None, {self.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(0).numpy()})[0],
+            device=self.device,
+        )
+        audio_24k, sample_rate = torchaudio.load(prompt_wav, backend="soundfile")
+        audio_24k = audio_24k.mean(dim=0, keepdim=True)
+        if sample_rate != 24000:
+            audio_24k = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=24000)(audio_24k)
+        prompt_mel = mel_spectrogram(audio_24k).transpose(1, 2).to(self.device)
+        prompt_mel_lengths = torch.tensor([prompt_mel.shape[1]], dtype=torch.int32, device=self.device)
+        prompt_mel = torch.nn.functional.pad(
+            prompt_mel,
+            (0, 0, 0, prompt_tokens.shape[1] * self.flow.up_rate - prompt_mel.shape[1]),
+            mode="replicate",
+        )
+        return prompt_tokens, prompt_token_lengths, spk, prompt_mel, prompt_mel_lengths
+
+    def set_stream_cache(self, prompt_wav: str):
+        self.cache = self._prepare_prompt(prompt_wav)
+        tokens, _, spk, mel, _ = self.cache
+        silence = torch.full((1, self.flow.pre_lookahead_len), 4218, dtype=tokens.dtype, device=self.device)
+        base_cache = self.flow.setup_cache(torch.cat((tokens, silence), dim=1), mel, spk, self.n_timesteps)
+        hift_cache = {
+            "mel": torch.zeros((1, 80, 0), device=self.device),
+            "source": torch.zeros((1, 1, 0), device=self.device),
+            "speech": torch.zeros((1, 0), device=self.device),
+        }
+        return base_cache, hift_cache
+
+    def __call__(self, generated_speech_tokens: list[int], prompt_wav: str) -> bytes:
+        import torchaudio
+
+        if self.cache is None:
+            self.cache = self._prepare_prompt(prompt_wav)
+        prompt_tokens, prompt_lengths, spk, prompt_mel, prompt_mel_lengths = self.cache
+        tokens = torch.tensor([generated_speech_tokens], dtype=torch.int32, device=self.device)
+        lengths = torch.tensor([tokens.shape[1]], dtype=torch.int32, device=self.device)
+        mel = self.runtime.flow_inference(
+            tokens, lengths, prompt_tokens, prompt_lengths, prompt_mel, prompt_mel_lengths, spk, self.n_timesteps
+        )
+        wav = self.runtime.hift_inference(mel)
+        output = io.BytesIO()
+        torchaudio.save(output, wav.float().cpu(), sample_rate=24000, format="wav")
+        return output.getvalue()
+
+    def stream(
+        self, generated_speech_tokens: list[int], prompt_wav: str | None,
+        last_chunk: bool = False, return_waveform: bool = False,
+    ) -> bytes | np.ndarray:
+        if self.cache is None:
+            self.cache = self._prepare_prompt(prompt_wav)
+        spk = self.cache[2]
+        tokens = torch.tensor([generated_speech_tokens], dtype=torch.int32, device=self.device)
+        waveform = self.runtime.stream(tokens, spk, last_chunk).float().cpu().numpy()
+        if return_waveform:
+            return waveform
+        return (np.clip(waveform, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+
+
 __all__ = [
+    "HMONNXToken2Wav",
     "Token2WavRuntimeProtocol",
     "_HMONNXCampplusAdapter",
     "_HMONNXFlowAdapter",

@@ -55,19 +55,12 @@ def prepare_output_paths(output_dir: Path, audio_path: Path, speech_tokens_path:
     return audio_path, speech_tokens_path
 
 
-def token2wav_asset_path(model_dir: Path) -> Path:
-    return model_dir / "assets" / "token2wav"
-
-
 def initialize_hmonnx_host(
     host,
     *,
-    model_dir: Path,
     work_dir: Path,
     runtime_type: Callable = MiniCPMO45HMONNXRuntime,
 ):
-    if hasattr(host, "init_tts"):
-        host.init_tts(model_dir=str(token2wav_asset_path(model_dir)))
     return runtime_type(work_dir, host)
 
 
@@ -96,7 +89,6 @@ def main() -> None:
     patch_audio_attention_return_compat(host)
     runtime = initialize_hmonnx_host(
         host,
-        model_dir=Path(args.model_dir),
         work_dir=args.work_dir,
     )
     runtime.set_exec_device(args.exec_device)

@@ -17,7 +17,8 @@ from .hf_compatible import (
 )
 from .runtime_audio import MiniCPMO45AudioHMONNXRuntime
 from .runtime_llm import MiniCPMO45LLMHMONNXRuntime
-from .runtime_token2wav import MiniCPMO45Token2WavHMONNXRuntime, install_hmonnx_token2wav
+from .runtime_token2wav import MiniCPMO45Token2WavHMONNXRuntime
+from .runtime_token2wav_adapters import HMONNXToken2Wav
 from .runtime_tts import MiniCPMO45TTSHMONNXRuntime
 from .runtime_vision import MiniCPMO45VisionHMONNXRuntime
 
@@ -173,10 +174,8 @@ class MiniCPMO45HMONNXRuntime:
         self.tts.install_host_embeddings(self.host_model.tts)
         self.tts.config = native_tts_config
         if hasattr(host_model, "tts") and hasattr(host_model, "_generate_speech_non_streaming"):
-            audio_tokenizer = getattr(host_model.tts, "audio_tokenizer", None)
-            if audio_tokenizer is None:
-                raise RuntimeError("MiniCPM-o-4.5 TTS audio tokenizer is not initialized")
-            install_hmonnx_token2wav(audio_tokenizer, self.token2wav)
+            self.host_model.tts.config.audio_tokenizer_type = "s3tokenizer_step_audio"
+            self.host_model.tts.audio_tokenizer = HMONNXToken2Wav(self.token2wav)
             patch_speech_generation_capture(self.host_model)
         return self.host_model
 
@@ -213,15 +212,7 @@ class MiniCPMO45HMONNXRuntime:
         if self.host_model is None:
             raise RuntimeError("MiniCPM-o-4.5 host model is not attached")
         init_cache = getattr(self, "_official_init_token2wav_cache", self.host_model.init_token2wav_cache)
-        result = init_cache(prompt_speech_16k)
-        token2wav = getattr(self, "token2wav", None)
-        bridge = getattr(token2wav, "bridge_official_init", None)
-        if bridge is not None:
-            official_cache = result
-            if official_cache is None:
-                official_cache = getattr(self.host_model, "token2wav_cache", None)
-            bridge(official_cache)
-        return result
+        return init_cache(prompt_speech_16k)
 
     def streaming_prefill(self, session_id: str, msgs: list[dict[str, Any]], **kwargs: Any) -> Any:
         if self.host_model is None:

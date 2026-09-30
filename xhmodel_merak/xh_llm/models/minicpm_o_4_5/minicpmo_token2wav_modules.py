@@ -260,6 +260,62 @@ class FlowStreamingFrontendWrapper(torch.nn.Module):
         return hidden, present_cnn, present_att, up_current_valid.reshape(1)
 
 
+class FlowPromptFrontendWrapper(torch.nn.Module):
+    """Preserve official full-prompt attention; 28-token chunk prefill is not equivalent."""
+
+    def __init__(self, flow_module: torch.nn.Module) -> None:
+        super().__init__()
+        self.flow = flow_module
+
+    def forward(
+        self, tokens: torch.Tensor, token_valid_length: torch.Tensor, embedding: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        encoder = self.flow.encoder
+        spks = self.flow.spk_embed_affine_layer(_normalize_embedding(embedding))
+        hidden = self.flow.input_embedding(tokens)
+        hidden, _, _ = encoder.embed(hidden, None)
+        token_positions = torch.arange(tokens.shape[1], device=tokens.device)
+        hidden = hidden * (token_positions < token_valid_length).reshape(1, -1, 1)
+
+        lookahead = int(encoder.pre_lookahead_layer.pre_lookahead_len)
+        valid_base = token_valid_length.to(torch.int64) - lookahead
+        pre = encoder.pre_lookahead_layer
+        pre_hidden = F.leaky_relu(pre.conv1(hidden.transpose(1, 2).contiguous()))
+        pre_indices = torch.arange(2, device=tokens.device) + valid_base - 2
+        pre_cache = torch.index_select(pre_hidden, 2, pre_indices.reshape(-1))
+        hidden = pre.conv2(F.pad(pre_hidden, (2, 0))).transpose(1, 2).contiguous() + hidden[:, :-lookahead]
+
+        base_mask = (torch.arange(hidden.shape[1], device=tokens.device) < valid_base).reshape(1, 1, -1)
+        base_pos = encoder.embed.position_encoding(offset=None, size=hidden.shape[1])
+        base_cache = []
+        for layer in encoder.encoders:
+            hidden, _, att, _ = layer(hidden, base_mask, base_pos, att_cache=None)
+            base_cache.append(att)
+        hidden = hidden * base_mask.transpose(1, 2)
+
+        up = encoder.up_layer
+        up_hidden = F.interpolate(hidden.transpose(1, 2).contiguous(), scale_factor=up.scale_factor, mode="nearest")
+        up_indices = torch.arange(up.stride * 2, device=tokens.device) + valid_base * up.stride - up.stride * 2
+        up_cache = torch.index_select(up_hidden, 2, up_indices.reshape(-1))
+        hidden = up.conv(F.pad(up_hidden, (up.stride * 2, 0))).transpose(1, 2).contiguous()
+        hidden, _, _ = encoder.up_embed(hidden, None)
+        valid_mel = valid_base * up.stride
+        up_mask = (torch.arange(hidden.shape[1], device=tokens.device) < valid_mel).reshape(1, 1, -1)
+        up_pos = encoder.embed.position_encoding(offset=None, size=hidden.shape[1])
+        up_att_cache = []
+        for layer in encoder.up_encoders:
+            hidden, _, att, _ = layer(hidden, up_mask, up_pos, att_cache=None)
+            up_att_cache.append(att)
+        if encoder.normalize_before:
+            hidden = encoder.after_norm(hidden)
+        cnn_cache = torch.cat((pre_cache, up_cache), dim=2)
+        mu = self.flow.encoder_proj(hidden).transpose(1, 2).contiguous()
+        return (
+            mu, spks, cnn_cache, torch.stack(base_cache), torch.stack(up_att_cache),
+            valid_mel.reshape(1).to(torch.int32),
+        )
+
+
 class FlowDecoderWrapper(torch.nn.Module):
     def __init__(self, estimator: torch.nn.Module):
         super().__init__()
@@ -426,6 +482,38 @@ class FlowEstimatorStepWrapper(torch.nn.Module):
             current_frame_valid_length,
         )
         return derivative, present_cnn, present_att
+
+
+class FlowPromptEstimatorStepWrapper(FlowEstimatorStepWrapper):
+    """Run one full-prompt CFM step and return its initial cache."""
+
+    def forward(
+        self,
+        x_cfg: torch.Tensor,
+        mu_cfg: torch.Tensor,
+        t_cfg: torch.Tensor,
+        spks_cfg: torch.Tensor,
+        cond_cfg: torch.Tensor,
+        current_frame_valid_length: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        block = self.estimator.blocks[0]
+        depth = len(self.estimator.blocks)
+        batch = x_cfg.shape[0]
+        cnn_width = block.conv.in_channels + block.conv.out_channels
+        cnn_cache = x_cfg.new_zeros((depth, batch, cnn_width, 2))
+        att_cache = x_cfg.new_zeros((depth, batch, block.attn.num_heads, 1, block.attn.head_dim * 2))
+        derivative, present_cnn, present_att = super().forward(
+            x_cfg,
+            mu_cfg,
+            t_cfg,
+            spks_cfg,
+            cond_cfg,
+            cnn_cache,
+            att_cache,
+            torch.zeros_like(current_frame_valid_length),
+            current_frame_valid_length,
+        )
+        return derivative, present_cnn, present_att[:, :, :, : x_cfg.shape[2]]
 
 
 class HiftForwardWrapper(torch.nn.Module):
