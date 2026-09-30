@@ -396,23 +396,27 @@ def test_transformer516_recipe_interface_contract(case: ContractCase, tmp_path: 
 
 
 @pytest.mark.transformer516
-def test_transformer516_public_workflow_surface_is_stable() -> None:
-    workflow_files = (
-        REPO_ROOT / "xhmodel_merak/xh_llm/models/qwen3_5/workflow.py",
-        REPO_ROOT / "xhmodel_merak/xh_llm/models/gemma4_series/workflow.py",
-    )
-    for path in workflow_files:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        methods = {
-            node.name: {
-                argument.arg
-                for argument in (*node.args.args, *node.args.kwonlyargs)
-            }
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"quant", "export"}
+@pytest.mark.parametrize(
+    "workflow_file",
+    (
+        "xhmodel_merak/xh_llm/models/qwen3_5/workflow.py",
+        "xhmodel_merak/xh_llm/models/gemma4_series/workflow.py",
+    ),
+    ids=("qwen3_5", "gemma4"),
+)
+def test_transformer516_public_workflow_surface_is_stable(workflow_file: str) -> None:
+    path = REPO_ROOT / workflow_file
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    methods = {
+        node.name: {
+            argument.arg
+            for argument in (*node.args.args, *node.args.kwonlyargs)
         }
-        assert {"output_dir", "device", "config_overrides"} <= methods["quant"]
-        assert {"quant_result", "output_dir", "device", "config_overrides"} <= methods["export"]
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in {"quant", "export"}
+    }
+    assert {"output_dir", "device", "config_overrides"} <= methods["quant"]
+    assert {"quant_result", "output_dir", "device", "config_overrides"} <= methods["export"]
 
 
 @pytest.mark.transformer516

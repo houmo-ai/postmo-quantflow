@@ -86,7 +86,8 @@ def test_qwen38_dflash2_unified_plan_reuses_w5_head(tmp_path, context, flash_att
     assert model.dflash_config.draft_head_weight_bits == 5
     assert target_head_bits(model.dflash_config.quant_scheme, "core_lm_head") == 5
     assert model.dflash_config.max_pe_length == export["max_pe_length"] == 262144
-    assert model.dflash_config.max_sequence_length == context
+    assert model.dflash_config.max_sequence_length == 2320
+    assert model.dflash_config.flash_attention["enable"] is False
     assert export["fuse_gdr_ops"] is True
     assert export["fuse_gdr_block_recurrent_ops"] is True
     assert export["flash_attention"]["enable"] is flash_attention

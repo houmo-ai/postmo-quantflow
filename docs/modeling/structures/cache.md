@@ -39,3 +39,29 @@ Ling XH2a 的 K 存 latent＋RoPE，V 单独存 latent。两者指数对齐轴�
 新增状态回归应在当前 CI 重现“预填充 → verify → 部分接受/拒绝 → 下一步 decode”，
 比较状态与结果；不要仅以输出个数或最终文本可读判断 ABI 正确。
 新设备若改变 cache 所有权或写回形式，应由 adapter/metadata 显式转换，保留相同的提交语义。
+
+## DFlash2：滑窗上下文与临时查询 KV
+
+`qwen_dflash2_hybrid_v1` 使用独立的 draft 缓存，布局为 `[B, Hkv, S, D]`。
+主模型的 context 长度和 FlashAttention 设置不决定 draft 的缓存容量。
+设滑窗大小为 `W`、prefill chunk 为 `C`、draft block 为 `B`（含 anchor），则
+容量为 `align16(W + max(C, B) + max(B - 1, 16))`；当前 Qwen3.8-27B DFlash2 的
+`W=2048, C=256, B=8`，容量为 2320。
+
+- context prefill/context decode 通过 `LLMCacheV2(attention_max_length=W)` 更新
+  `HybridCacheTensor`：保留已提交前缀末尾最多 `W-1` 个 KV，移到开头，再追加本次有效
+  context KV。更新后的有效长度 `H` 是保留长度加本次有效长度，可能大于 `W`。
+- spec decode 的 `past_seq_length` 仍是绝对位置，用于 RoPE；独立输入
+  `cache_position=H` 表示紧凑存储中的写入位置，两者不能互换。
+- spec decode 为 anchor 和 mask token 计算临时 K/V，写在 `[H,H+B)`。
+  运行时传入共享 `.data` 的普通 `CacheTensor`，使写入不推进 HybridCache 的已提交长度。
+  下一次 context 更新只读取已提交前缀，并覆盖临时区域。
+- draft attention 使用 dense attention 和 `MaskedAdd`，mask 同时限制有效 KV 和每个
+  query 的滑窗范围；此 ABI 不使用 draft FlashAttention 或 `query_kv_range_abs`。
+- 新请求必须清零 HybridCache 的数据和有效长度。旧 DFlash 沿用原 cache/FA 契约，
+  不采用 DFlash2 的滑窗容量和额外输入。
+
+[DFlash2 cache 回归](../../../benchmark_test/ci_test_transformer5.16.0/test_dflash2_hybrid_cache.py)
+用真实 attention 比较紧凑 cache 与完整 cache 在部分提交、重复滑窗移动后的数值，
+并通过真实 HMONNX context 图验证 HybridCache 更新。该小模型证据不代替完整模型的
+生成、接受率或目标芯片写回验证。

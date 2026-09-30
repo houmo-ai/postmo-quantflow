@@ -60,7 +60,15 @@ def test_qwen35_change_selects_only_active_ci_contract_and_exports():
 
     assert "benchmark_test/ci_test_transformer5.16.0/test_qwen35_9b_block_export.py" in selection.tests
     assert "benchmark_test/ci_test_transformer5.16.0/test_qwen35_35b_a3b_block_export.py" in selection.tests
-    assert "benchmark_test/ci_test_transformer5.16.0/test_transformer516_recipe_contract.py" in selection.tests
+    contract = f"{SUITE_RELATIVE}/test_transformer516_recipe_contract.py::"
+    selected_contract = {node.removeprefix(contract) for node in selection.tests if node.startswith(contract)}
+    assert selected_contract == {
+        "test_transformer516_recipe_interface_contract[Qwen3.5-9B-gptq]",
+        "test_transformer516_recipe_interface_contract[Qwen3.5-9B-autoround]",
+        "test_transformer516_recipe_interface_contract[Qwen3.5-35B-A3B-gptq]",
+        "test_transformer516_recipe_interface_contract[Qwen3.5-35B-A3B-autoround]",
+        "test_transformer516_public_workflow_surface_is_stable[qwen3_5]",
+    }
     assert "tests/qwen3_5/test_qwen35_quant_adapter.py" not in selection.tests
     assert "tests/gemma4/test_quant_result_contract.py" not in selection.tests
     assert "tests/ling_3_flash/quant_adapter_test.py" not in selection.tests
@@ -112,7 +120,16 @@ def test_gemma4_change_stays_inside_explicit_family_boundary():
 
     assert "benchmark_test/ci_test_transformer5.16.0/test_gemma4_e2b_block_export.py" in selection.tests
     assert "benchmark_test/ci_test_transformer5.16.0/test_gemma4_26b_a4b_block_export.py" in selection.tests
-    assert "benchmark_test/ci_test_transformer5.16.0/test_transformer516_recipe_contract.py" in selection.tests
+    contract = f"{SUITE_RELATIVE}/test_transformer516_recipe_contract.py::"
+    selected_contract = {node.removeprefix(contract) for node in selection.tests if node.startswith(contract)}
+    assert selected_contract == {
+        "test_transformer516_recipe_interface_contract[gemma-4-E2B-it-gptq]",
+        "test_transformer516_recipe_interface_contract[gemma-4-E2B-it-autoround]",
+        "test_transformer516_recipe_interface_contract[gemma-4-26B-A4B-it-gptq]",
+        "test_transformer516_recipe_interface_contract[gemma-4-26B-A4B-it-autoround]",
+        "test_transformer516_public_workflow_surface_is_stable[gemma4]",
+        "test_gemma_recipe_contract_drift_fails_instead_of_dropping_kwargs",
+    }
     assert "tests/gemma4/test_runtime_workflow_config_surface.py" not in selection.tests
     assert "tests/gemma4/test_quant_result_contract.py" not in selection.tests
     assert "tests/gemma4/test_flash_attention_export_contract.py" not in selection.tests

@@ -31,6 +31,7 @@ def _build_dflash_export_adapter(
     is_dflash2: bool = False,
 ) -> nn.Module:
     if is_dflash2:
+        use_flash_attention = False
         prepare_for_export = getattr(core_model, "prepare_for_export", None)
         if not callable(prepare_for_export):
             raise TypeError(
@@ -52,12 +53,9 @@ def _build_dflash_export_adapter(
             "noise_embedding",
             "past_seq_length",
             "current_input_length",
+            *(["cache_position"] if is_dflash2 else []),
             *(["anchor_token_id"] if is_dflash2 else []),
-            *(
-                ["query_kv_range_abs"]
-                if is_dflash2 and use_flash_attention
-                else ([] if use_flash_attention else ["attn_mask"])
-            ),
+            *([] if use_flash_attention else ["attn_mask"]),
             *[f"past_key_cache_{idx}" for idx in range(num_hidden_layers)],
             *[f"past_value_cache_{idx}" for idx in range(num_hidden_layers)],
         ]
@@ -71,12 +69,8 @@ def _build_dflash_export_adapter(
             "current_input_length",
             ("None" if use_flash_attention else "attn_mask"),
             ("anchor_token_id" if is_dflash2 else "None"),
-            (
-                "query_kv_range_abs"
-                if is_dflash2 and use_flash_attention
-                else "None"
-            ),
             *cache_names,
+            *(["cache_position=cache_position"] if is_dflash2 else []),
         ]
         core_call = "self.core.forward_decode"
     else:
@@ -152,6 +146,8 @@ class XHQwen3_5DFlashDraftModel(SharedHeadMixin, XHSubModel):  # noqa: N801
         )
 
     def _uses_flash_attention(self) -> bool:
+        if self._is_dflash2():
+            return False
         flash_attention = self.config.flash_attention
         if flash_attention is None:
             return False
@@ -229,20 +225,12 @@ class XHQwen3_5DFlashDraftModel(SharedHeadMixin, XHSubModel):  # noqa: N801
                 "current_input_length": torch.tensor([seq_len], dtype=torch.int64),
             }
             if self._is_dflash2():
+                inputs["cache_position"] = torch.zeros(bsz, dtype=torch.int64)
                 inputs["anchor_token_id"] = torch.zeros(
                     bsz,
                     dtype=torch.int64,
                 )
-            if self._is_dflash2() and self._uses_flash_attention():
-                query_kv_range_abs = torch.zeros(
-                    bsz,
-                    seq_len,
-                    2,
-                    dtype=torch.int32,
-                )
-                query_kv_range_abs[..., 1] = seq_len
-                inputs["query_kv_range_abs"] = query_kv_range_abs
-            elif not self._uses_flash_attention():
+            if not self._uses_flash_attention():
                 inputs["attn_mask"] = torch.zeros(
                     bsz,
                     *([seq_len, cache_len] if self._is_dflash2() else [cache_len]),
@@ -301,10 +289,9 @@ class XHQwen3_5DFlashDraftModel(SharedHeadMixin, XHSubModel):  # noqa: N801
                 "current_input_length",
             ]
             if self._is_dflash2():
+                input_names.append("cache_position")
                 input_names.append("anchor_token_id")
-            if self._is_dflash2() and self._uses_flash_attention():
-                input_names.append("query_kv_range_abs")
-            elif not self._uses_flash_attention():
+            if not self._uses_flash_attention():
                 input_names.append("attn_mask")
             output_names = (
                 [

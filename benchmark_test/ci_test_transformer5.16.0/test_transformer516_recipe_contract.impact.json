@@ -2,36 +2,36 @@
   "version": 1,
   "rules": [
     {
-      "id": "qwen35-shared-source",
+      "id": "qwen35-recipe-contract",
       "patterns": [
         "xhmodel_merak/xh_llm/models/qwen3_5/**",
-        "examples_merak/llm/qwen3_5/**"
-      ]
-    },
-    {
-      "id": "qwen35-config-contract",
-      "patterns": [
+        "examples_merak/llm/qwen3_5/**",
         "configs_merak/workflows/**/qwen3_5/**",
         "configs_merak/workflows/**/qwen3_5_moe/**"
+      ],
+      "nodes": [
+        "test_transformer516_recipe_interface_contract[Qwen3.5-9B-gptq]",
+        "test_transformer516_recipe_interface_contract[Qwen3.5-9B-autoround]",
+        "test_transformer516_recipe_interface_contract[Qwen3.5-35B-A3B-gptq]",
+        "test_transformer516_recipe_interface_contract[Qwen3.5-35B-A3B-autoround]",
+        "test_transformer516_public_workflow_surface_is_stable[qwen3_5]"
       ]
     },
     {
-      "id": "gemma4-shared-source",
+      "id": "gemma4-recipe-contract",
       "patterns": [
         "xhmodel_merak/xh_llm/models/gemma4_series/**",
-        "examples_merak/llm/gemma4_series/**"
-      ]
-    },
-    {
-      "id": "gemma4e-shared-source",
-      "patterns": [
-        "xhmodel_merak/xh_llm/models/gemma4e/**"
-      ]
-    },
-    {
-      "id": "gemma4-config-contract",
-      "patterns": [
+        "examples_merak/llm/gemma4_series/**",
+        "xhmodel_merak/xh_llm/models/gemma4e/**",
         "configs_merak/workflows/**/gemma4_series/**"
+      ],
+      "nodes": [
+        "test_transformer516_recipe_interface_contract[gemma-4-E2B-it-gptq]",
+        "test_transformer516_recipe_interface_contract[gemma-4-E2B-it-autoround]",
+        "test_transformer516_recipe_interface_contract[gemma-4-26B-A4B-it-gptq]",
+        "test_transformer516_recipe_interface_contract[gemma-4-26B-A4B-it-autoround]",
+        "test_transformer516_public_workflow_surface_is_stable[gemma4]",
+        "test_gemma_recipe_contract_drift_fails_instead_of_dropping_kwargs"
       ]
     }
   ]

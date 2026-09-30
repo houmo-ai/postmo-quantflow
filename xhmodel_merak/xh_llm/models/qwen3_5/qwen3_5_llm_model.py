@@ -177,7 +177,7 @@ def build_qwen35_spec_decode_contract(
         )
         contract["draft"] = {
             "abi": (
-                ("qwen_dflash2_paged_shared_v1" if flash_attention_enabled else "qwen_dflash2_v1")
+                "qwen_dflash2_hybrid_v1"
                 if is_dflash2
                 else ("qwen_dflash_paged_shared_v3" if flash_attention_enabled else "qwen_dflash_v1")
             ),
@@ -197,6 +197,8 @@ def build_qwen35_spec_decode_contract(
                 selector_rank=int(draft_config.selector_rank),
                 selector_top_k=int(draft_config.selector_top_k),
                 sliding_window=int(draft_config.sliding_window),
+                cache_capacity=int(draft_config.max_sequence_length),
+                cache_layout="sliding_context_transient_query",
                 is_causal=bool(getattr(draft_config, "is_causal", False)),
                 input_embedding_scale=float(draft_config.input_embedding_scale),
                 output_multiplier=float(draft_config.output_multiplier),

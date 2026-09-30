@@ -374,3 +374,15 @@ export = workflow.export(
 临时参数通过 `quant()` / `export()` 的 `config_overrides` 传入，如
 `{"quant.calibration.nsamples": 128, "quant.iters": 200}` 可做快速实验。
 默认配置仍是 n256/i400。
+
+## DFlash2 滑窗 cache
+
+`DFlash2DraftModel` 的 context prefill/context decode 使用 HybridCache，draft decode
+使用逐 query 的 mask 和 xhquant `MaskedAdd`。窗口 2048、prefill 256、block 8 时，
+draft cache 容量为 2320；容量计算、绝对位置与临时写入语义见
+[DFlash2 cache 契约](../../../docs/modeling/structures/cache.md#dflash2滑窗上下文与临时查询-kv)。
+主模型的 256K FlashAttention 不受影响；旧 `DFlashDraftModel` 保留原有 cache/FA 路径。
+
+新 DFlash2 产物使用 `qwen_dflash2_hybrid_v1` ABI，需要配套的加载端；旧 DFlash2
+产物需重新导出。接受率验证应记录数据集、抽样、采样参数、输出上限、结束原因，
+同时报告逐请求平均接受长度与 pooled draft 接受率。

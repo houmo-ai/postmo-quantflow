@@ -78,6 +78,7 @@ class DFlashCrossAttention(nn.Module):
         use_cache: bool,
         flash_attention: Mapping | None = None,
         query_dependent_mask: bool = False,
+        cache_window: int = -1,
     ):
         super().__init__()
         self.num_heads = num_attention_heads
@@ -120,8 +121,8 @@ class DFlashCrossAttention(nn.Module):
         self.k_rope = xhnn.Rope()
         self.cos_slice = xhnn.DynamicSlice([input_sequence_length], [2], [1])
         self.sin_slice = xhnn.DynamicSlice([input_sequence_length], [2], [1])
-        self.k_cache = LLMCacheV2(axis=2) if use_cache else None
-        self.v_cache = LLMCacheV2(axis=2) if use_cache else None
+        self.k_cache = LLMCacheV2(axis=2, attention_max_length=cache_window) if use_cache else None
+        self.v_cache = LLMCacheV2(axis=2, attention_max_length=cache_window) if use_cache else None
         self.masked_add = MaskedAdd()
 
         cos_cached, sin_cached = _build_rope_cache(
@@ -168,7 +169,7 @@ class DFlashCrossAttention(nn.Module):
         target_key_cache: Tensor,
         target_value_cache: Tensor,
         attn_mask: Tensor | None,
-        query_kv_range_abs: Tensor | None = None,
+        cache_position: Tensor | None = None,
     ) -> Tensor:
         bsz, q_len, _ = hidden_states.shape
         query_states = self.q_norm(
@@ -189,13 +190,13 @@ class DFlashCrossAttention(nn.Module):
 
         combined_key_states = self.k_cache(
             noise_key_states,
-            past_seq_length,
+            past_seq_length if cache_position is None else cache_position,
             current_input_length,
             target_key_cache,
         )
         combined_value_states = self.v_cache(
             noise_value_states,
-            past_seq_length,
+            past_seq_length if cache_position is None else cache_position,
             current_input_length,
             target_value_cache,
         )
@@ -207,7 +208,6 @@ class DFlashCrossAttention(nn.Module):
                 past_seq_length=past_seq_length,
                 current_input_length=current_input_length,
                 kv_valid_length=past_seq_length + current_input_length,
-                query_kv_range_abs=query_kv_range_abs,
             )
         else:
             if attn_mask is None:
@@ -502,6 +502,7 @@ class DFlashDecoderLayer(nn.Module):
         conv_group_size: int | None = None,
         input_residual_scale: float = 1.0,
         output_residual_scale: float = 1.0,
+        cache_window: int = -1,
     ):
         super().__init__()
         input_residual_scale = _validate_activation_residual_scale(
@@ -526,6 +527,7 @@ class DFlashDecoderLayer(nn.Module):
             use_cache=use_cache,
             flash_attention=flash_attention,
             query_dependent_mask=conv_kernel_size is not None,
+            cache_window=cache_window,
         )
         self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps)
@@ -559,7 +561,7 @@ class DFlashDecoderLayer(nn.Module):
         target_key_cache: Tensor,
         target_value_cache: Tensor,
         attn_mask: Tensor | None,
-        query_kv_range_abs: Tensor | None = None,
+        cache_position: Tensor | None = None,
     ) -> Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -575,7 +577,7 @@ class DFlashDecoderLayer(nn.Module):
             target_key_cache=target_key_cache,
             target_value_cache=target_value_cache,
             attn_mask=attn_mask,
-            query_kv_range_abs=query_kv_range_abs,
+            cache_position=cache_position,
         )
         if self.attention_conv is not None:
             hidden_states = self.attention_conv.finish(
@@ -706,7 +708,8 @@ class DFlashModel(nn.Module):
                     # states; draft_decode appends the transient anchor/mask
                     # query K/V after the valid target prefix.
                     use_cache=True,
-                    flash_attention=flash_attention,
+                    cache_window=(int(sliding_window) if self.is_dflash2 and mode == "context" else -1),
+                    flash_attention=(None if self.is_dflash2 else flash_attention),
                     conv_kernel_size=(conv_kernel_size if self.is_dflash2 else None),
                     conv_group_size=(conv_group_size if self.is_dflash2 else None),
                     input_residual_scale=(
@@ -786,8 +789,8 @@ class DFlashModel(nn.Module):
         current_input_length: Tensor,
         attn_mask: Tensor | None,
         anchor_token_id: Tensor | None,
-        query_kv_range_abs: Tensor | None,
         *cache_tensors: Tensor,
+        cache_position: Tensor | None = None,
     ) -> Tensor | Tuple[Tensor, Tensor, Tensor]:
         past_key_caches, past_value_caches = self._split_cache_tensors(cache_tensors)
         # DFlash checkpoints reuse the target token embedding table. Some
@@ -805,7 +808,7 @@ class DFlashModel(nn.Module):
                 target_key_cache=past_key_caches[idx],
                 target_value_cache=past_value_caches[idx],
                 attn_mask=attn_mask,
-                query_kv_range_abs=query_kv_range_abs,
+                cache_position=cache_position,
             )
         normalized_hidden = self.norm(hidden_states)
         if not self.is_dflash2:
@@ -901,7 +904,6 @@ class DFlashModel(nn.Module):
             input1,
             input2,
             input3,
-            None,
             None,
             *cache_inputs,
         )

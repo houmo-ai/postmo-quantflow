@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "dflash2-compact-context-and-transient-query",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/qwen3_5/_dflash_model_impl.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_dflash_model.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_spec_decode_onnx_model.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py"
+    ]
+  }]
+}

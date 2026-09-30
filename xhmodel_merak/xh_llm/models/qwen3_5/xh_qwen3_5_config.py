@@ -497,9 +497,8 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             dflash_config["max_pe_length"] = draft_pe_length
             dflash_config["batch_size"] = batch_size
             dflash_config["input_sequence_length"] = prefill_chunk_length
-            # The unified workflow flag applies to the target and the DFlash
-            # decoder. A second hidden switch can silently produce mixed graph
-            # contracts.
+            # Legacy DFlash follows the target FA setting. DFlash2 uses the
+            # compact, masked attention contract configured below.
             dflash_config["flash_attention"] = flash_attention
             dflash_config = XHQwen3_5_DFlashConfig(**dflash_config)
         elif dflash_config is not None:
@@ -510,6 +509,14 @@ class XHQwen3_5ModelConfig(VisionLLMModelConfig):  # noqa: N801
             dflash_config.input_sequence_length = prefill_chunk_length
             dflash_config.flash_attention = flash_attention
         self.dflash_config = dflash_config
+        if dflash_config is not None and dflash_config.is_dflash2:
+            # The target may retain a 256K context; the draft only needs its
+            # sliding history, one context chunk, and a transient query block.
+            capacity = int(dflash_config.sliding_window) + max(
+                prefill_chunk_length, int(dflash_config.block_size)
+            ) + max(int(dflash_config.block_size) - 1, 16)
+            dflash_config.max_sequence_length = (capacity + 15) // 16 * 16
+            dflash_config.flash_attention = {"enable": False}
         if self.dflash_config is not None:
             dflash_block_size = int(
                 getattr(

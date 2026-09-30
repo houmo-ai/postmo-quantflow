@@ -404,7 +404,8 @@ def test_next_cli_inherits_target_head():
 
 
 @pytest.mark.parametrize("architecture", ["DFlashDraftModel", "DFlash2DraftModel"])
-def test_real_dflash_decode_reuses_w5_head(tmp_path, architecture):
+@pytest.mark.parametrize("flash_attention", [False, True])
+def test_real_dflash_decode_reuses_w5_head(tmp_path, architecture, flash_attention):
     from xhmodel_merak.xh_llm.models.qwen3_5._dflash_model_impl import DFlashModel
     from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_dflash_model import _build_dflash_export_adapter
     from xhmodel_merak.xh_llm.shared_head import bind_quantized_head
@@ -415,19 +416,22 @@ def test_real_dflash_decode_reuses_w5_head(tmp_path, architecture):
                        num_target_layers=1, target_layer_ids=[0], vocab_size=256, input_sequence_length=4,
                        max_pe_length=32, max_sequence_length=32, architecture=architecture, block_size=4,
                        conv_kernel_size=4, conv_group_size=32, selector_rank=16, selector_top_k=32,
-                       sliding_window=32).half().eval()
+                       sliding_window=32, flash_attention={"enable": flash_attention}).half().eval()
     with torch.no_grad():
         for name, value in core.named_parameters():
             value.copy_(torch.ones_like(value) if "norm" in name else torch.randn_like(value) * 0.02)
     core.prepare_for_export()
     is_v2 = architecture == "DFlash2DraftModel"
     adapter = _build_dflash_export_adapter(core, mode="decode", num_hidden_layers=1,
-                                          use_flash_attention=False, is_dflash2=is_v2)
+                                          use_flash_attention=flash_attention, is_dflash2=is_v2)
+    assert core.layers[0].self_attn.use_flash_attention is (flash_attention and not is_v2)
     args = [torch.randn(1, 4, 128).half(), torch.tensor([0]), torch.tensor([4])]
     if is_v2:
+        args.append(torch.zeros(1, dtype=torch.int64))  # compact cache position
         args.append(torch.zeros(1, dtype=torch.int64))
-    args.extend([torch.zeros((1, 4, 32) if is_v2 else (1, 32)).half(),
-                 torch.zeros(1, 2, 32, 32).half(), torch.zeros(1, 2, 32, 32).half()])
+    if is_v2 or not flash_attention:
+        args.append(torch.zeros((1, 4, 32) if is_v2 else (1, 32)).half())
+    args.extend([torch.zeros(1, 2, 32, 32).half(), torch.zeros(1, 2, 32, 32).half()])
     class Target(torch.nn.Module):
         def __init__(self):
             super().__init__()

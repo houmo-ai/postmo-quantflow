@@ -20,6 +20,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from transformers import TextStreamer
+from xhmodel_merak.exec_backends import CacheTensor, HybridCacheTensor
 
 from ._spec_decode_shared import SpecDecodeVerifyResult, run_spec_decode_loop
 from .qwen3_5_onnx_model import (
@@ -347,6 +348,11 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
         if self._dflash_cache_state is None:
             cache_session = self.draft_context_session or self.draft_decode_session
             self._dflash_cache_state = _alloc_cache_inputs(cache_session, self.device)
+            if "cache_position" in self.draft_decode_session.get_input_names():
+                self._dflash_cache_state = {
+                    name: HybridCacheTensor(value.data)
+                    for name, value in self._dflash_cache_state.items()
+                }
         return self._dflash_cache_state
 
     def _run_draft_session(
@@ -531,6 +537,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
             raise RuntimeError("DFlash context session is not available.")
         cache_state = self._ensure_dflash_cache_state()
         actual_input_length = int(target_hidden.shape[1])
+        if self._is_dflash2 and past_seq_len == 0:
+            for cache in cache_state.values():
+                cache.reset()
         target_hidden_info = session.get_input("target_hidden")
         context_seq_len = int(target_hidden_info.shape[1])
         expected_hidden_dim = target_hidden_info.shape[-1] if len(target_hidden_info.shape) >= 3 else None
@@ -581,6 +590,11 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
     ) -> Dict[str, torch.Tensor]:
         if self.draft_decode_session is None:
             raise RuntimeError("DFlash decode session is not available.")
+        compact_cache = "cache_position" in self.draft_decode_session.get_input_names()
+        cache_length = (
+            next(iter(cache_state.values())).cache_valid_len
+            if compact_cache else int(past_seq_len)
+        )
         batch_size = noise_embedding.shape[0]
         current_input_length = torch.full(
             (batch_size,),
@@ -602,6 +616,11 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
                 feed[name] = past_seq_length
             elif name in ("current_input_length", "current_length"):
                 feed[name] = current_input_length
+            elif name == "cache_position":
+                info = self.draft_decode_session.get_input(name)
+                feed[name] = torch.full(
+                    info.shape, cache_length, dtype=info.dtype, device=self.device
+                )
             elif name == "anchor_token_id":
                 input_info = self.draft_decode_session.get_input(name)
                 feed[name] = anchor_token_id.reshape(batch_size).to(
@@ -619,7 +638,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
                 )
                 valid_length = min(
                     int(mask_shape[-1]),
-                    int(past_seq_len) + int(noise_embedding.shape[1]),
+                    cache_length + int(noise_embedding.shape[1]),
                 )
                 if len(mask_shape) == 2:
                     attn_mask[:, :valid_length] = 0
@@ -630,7 +649,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
                         device=self.device,
                     ).reshape(1, 1, -1)
                     query_positions = (
-                        int(past_seq_len)
+                        cache_length
                         + torch.arange(
                             mask_shape[1],
                             device=self.device,
@@ -648,37 +667,13 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
                         f"got shape={mask_shape}"
                     )
                 feed[name] = attn_mask
-            elif name == "query_kv_range_abs":
-                input_info = self.draft_decode_session.get_input(name)
-                range_shape = tuple(int(dim) for dim in input_info.shape)
-                if len(range_shape) != 3 or range_shape[-1] != 2:
-                    raise RuntimeError(
-                        "DFlash2 query_kv_range_abs must have shape [B, Q, 2], "
-                        f"got {range_shape}"
-                    )
-                window = int(self._dflash_sliding_window or 0)
-                valid_length = min(
-                    next(iter(cache_state.values())).shape[2]
-                    if cache_state
-                    else int(self.max_context_tokens),
-                    int(past_seq_len) + int(noise_embedding.shape[1]),
-                )
-                query_positions = (
-                    int(past_seq_len)
-                    + torch.arange(
-                        range_shape[1],
-                        dtype=input_info.dtype,
-                        device=self.device,
-                    )
-                )
-                starts = torch.clamp(query_positions - window + 1, min=0)
-                ends = torch.clamp(
-                    query_positions + window,
-                    max=int(valid_length),
-                )
-                feed[name] = torch.stack((starts, ends), dim=-1).unsqueeze(0)
             elif name in cache_state:
-                feed[name] = cache_state[name]
+                # Share storage without allowing transient LLMCache writes to
+                # advance the HybridCache's committed context length.
+                feed[name] = (
+                    CacheTensor(cache_state[name].data)
+                    if compact_cache else cache_state[name]
+                )
             else:
                 raise RuntimeError(f"Unexpected input '{name}' in DFlash draft decode session.")
         return feed
