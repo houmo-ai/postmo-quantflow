@@ -203,6 +203,57 @@ def test_complete_hybrid_blocks(hf_model):
             past += n
 
 
+@pytest.mark.parametrize("minimum_score", [-10.0, -40000.0, -65000.0])
+def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_score):
+    original = hf_model.layers[3].self_attn
+    original.indexer.weights_proj.weight.data.fill_(-0.125)
+    spec = Glm53CacheSpec.from_config(hf_model.config, 64)
+    core = StaticDSA(original, spec, 16)
+    chosen = {}
+    hook = core.topk.register_forward_pre_hook(lambda m, a: chosen.update(scores=a[0].clone()))
+    x = torch.randn(1, 16, 32).abs() + 0.1
+    t = build_transition(spec, 0, 16, 16)
+    with torch.no_grad():
+        outputs = core(
+            x, t["past_seq_length"], t["current_input_length"], t["pool_offset"],
+            t["pool_new_count"], t["pool_write_start"], t["query_validity"],
+            t["pool_validity"], t["tail_indices"], t["tail_validity"],
+            *spec.initial_caches()[-4:],
+        )
+        valid = t["pool_validity"].bool()
+        # Scale a real indexer's learned head weights to exercise scores
+        # below the former -32768 sentinel, including near the FP16 limit.
+        scale = minimum_score / chosen["scores"][valid].min().item()
+        original.indexer.weights_proj.weight.mul_(scale)
+        outputs = core(
+            x, t["past_seq_length"], t["current_input_length"], t["pool_offset"],
+            t["pool_new_count"], t["pool_write_start"], t["query_validity"],
+            t["pool_validity"], t["tail_indices"], t["tail_validity"],
+            *spec.initial_caches()[-4:],
+        )
+        pool = outputs[2].squeeze(1)
+        query = original.indexer.wq_b(core.q_norm(core.q_a_proj(x))).reshape(1, 16, 8, 8)
+        head_scores = torch.relu(
+            query.float() @ pool.float().transpose(1, 2).unsqueeze(1) * original.indexer.softmax_scale
+        )
+        head_weights = original.indexer.weights_proj(x).float() * 8**-0.5
+        raw_scores = (head_weights.unsqueeze(-2) @ head_scores).squeeze(-2)
+        assert bool((raw_scores[valid] < 0).any())
+        assert bool((raw_scores[valid] > torch.finfo(torch.float16).min).all())
+        torch.testing.assert_close(raw_scores[valid].min(), torch.tensor(minimum_score))
+        if minimum_score < -32768:
+            assert bool((raw_scores[valid] < -32768).any())
+        torch.testing.assert_close(chosen["scores"][valid], raw_scores[valid])
+        assert bool((chosen["scores"][~valid] == torch.finfo(torch.float16).min).all())
+        assert torch.isfinite(chosen["scores"].to(torch.float16)).all()
+        selected = torch.topk(chosen["scores"], spec.selected_pools, dim=-1).indices
+        selected_valid = valid.gather(-1, selected)
+        assert torch.equal(
+            selected_valid.sum(-1), valid.sum(-1).clamp(max=spec.selected_pools)
+        )
+    hook.remove()
+
+
 def test_dsa_tied_scores_select_valid_pools(hf_model):
     # torch.topk does not specify tie order, and padded capacity changes it.
     # Check the admissible set, then use HF attention to verify its raw tokens.
@@ -329,6 +380,25 @@ def test_source_fp8_blocks_and_missing_scale(tmp_path):
         reader.tensor("probe.weight")
 
 
+def test_256k_cache_capacity_and_final_chunk_controls():
+    cfg = tiny_config()
+    cfg.max_position_embeddings = 1048576
+    cfg.index_topk = 2048
+    spec = Glm53CacheSpec.from_config(cfg, 262144)
+    assert spec.pool_capacity == 65536
+    assert spec.selected_pools == 512
+    assert spec.cache_shapes("deepseek_sparse_attention")[:2] == (
+        (1, 1, 262144, 16), (1, 1, 65536, 8),
+    )
+    controls = build_transition(spec, 262141, 3, 256)
+    assert controls["pool_validity"].shape == (1, 256, 65536)
+    assert controls["pool_new_count"].item() == 1
+    assert controls["pool_write_start"].item() == 65535
+    assert controls["query_validity"].sum().item() == 3
+    with pytest.raises(ValueError):
+        build_transition(spec, 262143, 2, 256)
+
+
 def test_workflow_registration_and_configuration(tmp_path, hf_model):
     from transformers.models.glm5_next import Glm5NextConfig
 
@@ -342,6 +412,10 @@ def test_workflow_registration_and_configuration(tmp_path, hf_model):
     workflow = AutoWorkflow.from_config(model_dir=str(tmp_path), config_path=recipe)
     assert isinstance(workflow, Glm53Workflow)
     assert workflow.workflow_config.export["model"]["quant_scheme"]["quant_type"] == "w8a16h0_sefp"
+    assert workflow.workflow_config.export["model"]["context_max_length"] == 262144
+    assert XHGlm53ModelConfig().context_max_length == 262144
+    from xhmodel_merak.model_catalog import get_recipe
+    assert get_recipe("glm-5.3-flash").default_context_length == 262144
     quant = workflow.quant(str(tmp_path / "unused"), "cpu")
     assert quant.skipped
     cfg = AutoLLMConfig.from_pretrained(
@@ -434,6 +508,27 @@ def test_w8_export_reload_and_generation(tmp_path, monkeypatch, mlp_type):
         assert [t.name for t in graph.input] == input_names
         assert [t.name for t in graph.output] == spec.output_names()
         assert not any("placeholder" in node.op_type.lower() for node in graph.node)
+        tags = [node for node in graph.node if node.op_type == "Tag"]
+        assert [onnx.helper.get_attribute_value(next(a for a in n.attribute if a.name == "tag_name"))
+                for n in tags] == [b"layer_0", b"layer_1"]
+        assert not any(node.op_type == "ReduceMin" for node in graph.node)
+        if mlp_type == "sparse":
+            nodes = {output: node for node in graph.node for output in node.output}
+            constants = {tensor.name: tensor for tensor in graph.initializer}
+            sparse_topk = next(
+                node for node in graph.node
+                if node.op_type == "TopK"
+                and any("attention.topk" in prop.value for prop in node.metadata_props)
+            )
+            masked_score = nodes[sparse_topk.input[0]]
+            mask_terms = [nodes[name] for name in masked_score.input]
+            mask_mul = next(term for term in mask_terms if any(
+                name in nodes and nodes[name].op_type == "Sub"
+                and "pool_validity" in nodes[name].input for name in term.input
+            ))
+            sentinel = next(constants[name] for name in mask_mul.input if name in constants)
+            assert sentinel.data_type == onnx.TensorProto.FLOAT16
+            assert onnx.numpy_helper.to_array(sentinel).item() == 65504.0
         assert len(graph.output) == (7 if mlp_type == "sparse" else 5)
         assert all(o.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16 for o in graph.output)
     monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")

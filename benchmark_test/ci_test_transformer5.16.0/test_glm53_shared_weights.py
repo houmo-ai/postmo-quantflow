@@ -49,6 +49,10 @@ def test_shared_external_data_preserves_outputs_after_move(tmp_path):
     report = compact_glm53_language_weights(root)
     assert report["reused_tensors"] >= 2  # Renamed weights and external Constant attributes.
     metadata = json.loads((root / "golden_meta_info.json").read_text())
+    assert all(report["graphs"][stage].startswith(stage + "/") for stage in graphs)
+    assert metadata["glm53_shared_external_data"]["files"] == {
+        stage: f"{stage}/weights.bin" for stage in graphs
+    }
     assert all(not (root / path).exists() for path in report["source_external_files"])
     decode = onnx.load(root / report["graphs"]["decode"], load_external_data=False)
     spans = {t.name: {e.key: e.value for e in t.external_data} for t in decode.graph.initializer}
@@ -61,7 +65,9 @@ def test_shared_external_data_preserves_outputs_after_move(tmp_path):
         assert metadata[stage + "_hmonnx_md5"] == hashlib.md5(path.read_bytes()).hexdigest()
         onnx.checker.check_model(path)
         np.testing.assert_array_equal(evaluate(path), expected[stage])
-    assert len(list(relocated.rglob("*.bin"))) == 1
+    weight_paths = [relocated / stage / "weights.bin" for stage in graphs]
+    assert len(list(relocated.rglob("*.bin"))) == 2
+    assert len({path.stat().st_ino for path in weight_paths}) == 1
 
 
 @pytest.mark.parametrize("field,value", [("location", "../escape.bin"), ("length", "999999"), ("offset", "-1")])
@@ -82,7 +88,7 @@ def test_invalid_external_data_preserves_originals(tmp_path, field, value):
 def test_shared_conversion_rejects_overwrite(tmp_path):
     graphs = {stage: write_graph(tmp_path, stage, [1, 2]) for stage in ("prefill", "decode")}
     share_language_weights(tmp_path, graphs, chunk_size=3)
-    before = (tmp_path / "language/weights.bin").read_bytes()
+    before = (tmp_path / "prefill/weights.bin").read_bytes()
     with pytest.raises(FileExistsError):
         share_language_weights(tmp_path, graphs)
-    assert (tmp_path / "language/weights.bin").read_bytes() == before
+    assert (tmp_path / "prefill/weights.bin").read_bytes() == before

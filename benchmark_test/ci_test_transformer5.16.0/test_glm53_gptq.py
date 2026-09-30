@@ -195,6 +195,8 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
     meta_path = moved / "golden_meta_info.json"
     meta = json.loads(meta_path.read_text())
     validate_glm53_bundle(moved, meta)
+    assert all(meta[f"{stage}_hmonnx"].startswith(f"{stage}/") for stage in ("prefill", "decode"))
+    assert (moved / "prefill/weights.bin").samefile(moved / "decode/weights.bin")
     export_index = json.loads((moved / "export_meta_info.json").read_text())
     for stage in ("prefill", "decode"):
         assert export_index[stage] == {"path": meta[f"{stage}_hmonnx"], "type": stage}
@@ -211,6 +213,7 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
         "floating_gate_linears": 3,
         "w8_constant_matmuls": 2,
         "w8_convolutions": 1,
+        "mhc_sinkhorn_blocks": 4,
     }
     assert report["decode"] == report["prefill"] and report["vision_components"] == 3
     # A saved constant projection silently left at W16 used to escape the

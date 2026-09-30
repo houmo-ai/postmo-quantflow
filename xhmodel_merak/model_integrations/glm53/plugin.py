@@ -84,7 +84,7 @@ def register(catalog):
             artifact_format="glm53",
             input_schema=text_media_input_schema(("image", "video")),
             output_schema=text_output_schema(),
-            default_context_length=4096,
+            default_context_length=262144,
             default_prefill_chunk_length=256,
             max_pe_length=1048576,
             attention_profiles=("standard",),

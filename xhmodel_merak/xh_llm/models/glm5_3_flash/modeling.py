@@ -37,6 +37,7 @@ class StaticHyperConnection(nn.Module):
         self.hc = source.hc_mult
         self.eps, self.norm_eps = source.hc_eps, source.input_norm.eps
         self.iters = source.hc_sinkhorn_iters
+        self.sinkhorn = xhnn.MHCSinkhorn(self.iters, self.eps)
         self.norm = build_xh_rms_norm(source.fn.shape[1], self.norm_eps).to(
             device=source.fn.device, dtype=source.fn.dtype
         )
@@ -48,12 +49,8 @@ class StaticHyperConnection(nn.Module):
         hc = self.hc
         pre = torch.sigmoid(mix[..., :hc] * self.scale[0] + self.base[:hc]) + self.eps
         post = 2 * torch.sigmoid(mix[..., hc : 2 * hc] * self.scale[1] + self.base[hc : 2 * hc])
-        comb = (mix[..., 2 * hc :] * self.scale[2] + self.base[2 * hc :]).reshape(1, -1, hc, hc)
-        comb = torch.softmax(comb, dim=-1) + self.eps
-        comb = comb / (comb.sum(-2, keepdim=True) + self.eps)
-        for _ in range(self.iters - 1):
-            comb = comb / (comb.sum(-1, keepdim=True) + self.eps)
-            comb = comb / (comb.sum(-2, keepdim=True) + self.eps)
+        comb_logits = (mix[..., 2 * hc :] * self.scale[2] + self.base[2 * hc :]).reshape(1, -1, hc, hc)
+        comb = self.sinkhorn(comb_logits)
         collapsed = (pre.unsqueeze(-1) * streams).sum(2).to(streams.dtype)
         return post.to(streams.dtype), comb.to(streams.dtype), collapsed
 
@@ -209,7 +206,6 @@ class StaticDSA(nn.Module):
         self.gather = LatentCacheGather(feature_dim=spec.latent_dim)
         self.gather_validity = xhnn.GatherElements(axis=2)
         self.topk = xhnn.TopK(spec.selected_pools, axis=-1)
-        self.score_min = xhnn.ReduceMin(-1, keepdim=True)
         self.register_buffer("pool_offsets", torch.arange(spec.pool_size, dtype=torch.int32), persistent=False)
         self.ratio = spec.pool_size
 
@@ -242,9 +238,9 @@ class StaticDSA(nn.Module):
         )
         head_weight = self.indexer.weights_proj(x).float() * self.indexer.n_heads**-0.5
         score = torch.matmul(head_weight.unsqueeze(-2), score).squeeze(-2)
-        # Head weights are signed; do not assume ReLU makes the final score positive.
-        score = score - self.score_min(score)
-        score = score * pool_valid + (pool_valid - 1.0) * 32768.0
+        # Use the FP16 finite minimum for invalid pools without shifting
+        # valid scores; scores below -32768 must still outrank padding.
+        score = score * pool_valid + (pool_valid - 1.0) * 65504.0
         selected = self.topk(score)[1]
         selected_valid = self.gather_validity(pool_valid, selected)
         indices = (selected.unsqueeze(-1) * self.ratio + self.pool_offsets).flatten(-2)
@@ -335,6 +331,10 @@ class StaticGlm53ForCausalLM(nn.Module):
         self.layers = nn.ModuleList(
             StaticDecoder(layer, spec, input_length, chunk_size) for layer in text_model.layers[: len(spec.layer_types)]
         )
+        # Stable execution boundaries let decode reuse prefill's block placement.
+        self.layer_tags = nn.ModuleList(
+            [xhnn.XHTag(f"layer_{index}", "LLM", f"layer_{index}") for index in range(len(self.layers))]
+        )
         self.norm, self.lm_head = StaticRMSNorm(text_model.norm), lm_head
         self.last_token = xhnn.DynamicSlice([1], [1], [1])
 
@@ -370,9 +370,10 @@ class StaticGlm53ForCausalLM(nn.Module):
         )
         streams = inputs_embeds.unsqueeze(2).expand(1, -1, self.hc_mult, -1)
         cursor, next_caches = 0, []
-        for layer in self.layers:
+        for index, layer in enumerate(self.layers):
             count = 2 if layer.kind == LINEAR else 4
             streams, updated = layer(streams, controls, caches[cursor : cursor + count])
+            streams = self.layer_tags[index](streams)
             next_caches.extend(updated)
             cursor += count
         hidden = self.norm(streams.mean(2))

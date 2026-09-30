@@ -57,12 +57,13 @@ def audit_glm53_hmonnx(root, metadata):
     expected_gates = 3 * kinds.count("linear_attention")
     expected_projections = 2 * kinds.count("deepseek_sparse_attention")
     expected_convolutions = kinds.count("linear_attention")
+    expected_sinkhorn = 2 * len(kinds)
     report = {}
     for stage in ("prefill", "decode"):
         graph = onnx.load(root / metadata[stage + "_hmonnx"], load_external_data=False)
         initializers = {value.name for value in graph.graph.initializer}
         moe_count = gate_count = w8_count = 0
-        projection_count = convolution_count = 0
+        projection_count = convolution_count = sinkhorn_count = 0
         for node in graph.graph.node:
             attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
             if node.op_type == "MoeBlock":
@@ -100,6 +101,13 @@ def audit_glm53_hmonnx(root, metadata):
                 if (attrs.get("hmfp_weight_man_bit"), attrs.get("hmfp_act_man_bit")) != (8, 16):
                     raise ValueError(f"{stage}: KDA convolution is not W8 A16: {node.name}")
                 convolution_count += 1
+            elif node.op_type == "MHCSinkhorn":
+                if (
+                    attrs.get("sinkhorn_iters") != config["hc_sinkhorn_iters"]
+                    or abs(attrs.get("eps", float("inf")) - config["hc_eps"]) > 1e-10
+                ):
+                    raise ValueError(f"{stage}: invalid mHC Sinkhorn parameters: {node.name}")
+                sinkhorn_count += 1
         if (moe_count, gate_count) != (expected_moe, expected_gates):
             raise ValueError(
                 f"{stage}: missing MoE/KDA gates: {(moe_count, gate_count)} != {(expected_moe, expected_gates)}"
@@ -109,12 +117,15 @@ def audit_glm53_hmonnx(root, metadata):
                 f"{stage}: missing DSA projections/KDA convolutions: "
                 f"{(projection_count, convolution_count)} != {(expected_projections, expected_convolutions)}"
             )
+        if sinkhorn_count != expected_sinkhorn:
+            raise ValueError(f"{stage}: missing mHC Sinkhorn operators: {sinkhorn_count} != {expected_sinkhorn}")
         report[stage] = {
             "w4g64_moe_blocks": moe_count,
             "w8_linears": w8_count,
             "floating_gate_linears": gate_count,
             "w8_constant_matmuls": projection_count,
             "w8_convolutions": convolution_count,
+            "mhc_sinkhorn_blocks": sinkhorn_count,
         }
     vision = metadata["glm53_vision"]
     for component in vision["components"]:

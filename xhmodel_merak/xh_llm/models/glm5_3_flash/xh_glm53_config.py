@@ -10,7 +10,7 @@ class XHGlm53ModelConfig(TextLLMModelConfig):
         model_name="glm5_3_flash",
         model_type="Glm5NextForConditionalGeneration",
         batch_size=1,
-        context_max_length=4096,
+        context_max_length=262144,
         prefill_chunk_length=256,
         linear_chunk_size=64,
         num_logits_to_keep=1,
