@@ -19,10 +19,22 @@ python -m pip install -v -e . --no-index --no-deps --no-build-isolation
 uv pip install -e . --no-index --no-deps --no-build-isolation --link-mode=copy
 ```
 
+默认包保留 worker 运行时使用的 Transformers 版本契约。完整量化和导出工具链
+通过 `.[export]` 安装；已有服务或量化环境继续使用上述 `--no-deps` 命令，避免
+pip 替换已经按 CUDA/Torch ABI 配置的二进制包。
+
 ## 统一模型接口
 
 查模型、查看可改参数、构建产物和推理的可运行示例见
 [examples_merak/unified_api](examples_merak/unified_api/README.md)。
+
+## vLLM Merak 插件
+
+HMONNX 的 vLLM 后端源码以
+[vllm_merak](vllm_merak/README.md) 作为唯一维护入口。
+它仍通过 `vllm.general_plugins` 和 `vllm.platform_plugins` 接入 vLLM，不会随
+ModelZoo 基础包自动安装或导入。安装、运行环境与验收命令见插件 README，
+迁移来源见 [SOURCE_SNAPSHOT.md](vllm_merak/SOURCE_SNAPSHOT.md)。
 
 ## HM-Eval 评测平台使用方式
 

@@ -1,0 +1,44 @@
+schema_version = 1
+default_profile = "vllm_023_local"
+
+# This is the environment used to accept the repository migration.  Keep the
+# binary runtime stack external to the plugin package: resolving these packages
+# during an editable plugin install can replace Torch/vLLM wheels and break the
+# xhquant CUDA-extension ABI.
+[profiles.vllm_023_local]
+status = "verified"
+python = "3.12"
+description = "ModelZoo CUDA-target service acceptance environment"
+
+[profiles.vllm_023_local.runtime]
+target = "cuda"
+cuda_required = true
+required_modules = ["vllm._C_stable_libtorch"]
+required_torch_ops = ["_C.apply_repetition_penalties_"]
+
+[profiles.vllm_023_local.packages]
+vllm-merak = "0.20.0"
+torch = "2.11.0+cu129"
+transformers = "5.13.0"
+onnx = "1.22.0"
+xhmodel-zoo = "1.0.0"
+xhquanttool = "0.9.2"
+compressed-tensors = "0.17.0"
+fastapi = "0.136.0"
+llguidance = "1.7.0"
+
+[profiles.vllm_023_local.package_specifiers]
+vllm = ">=0.23,<0.24"
+
+# This profile records the separately validated DeepSeek V4 deployment stack.
+# It is documented here for reproducibility but is not the default local gate.
+[profiles.deepseek_v4_vllm_0271]
+status = "documented"
+python = "3.12"
+description = "DeepSeek V4 deployment profile documented on 2026-08-20"
+
+[profiles.deepseek_v4_vllm_0271.packages]
+vllm-merak = "0.20.0"
+vllm = "0.27.1"
+torch = "2.13.0+cu129"
+transformers = "5.13.0"

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from xhmodel_merak.xh_llm.models.qwen3_5.workflow import Qwen35Workflow
-from xhmodel_merak.xh_llm.workflows.result import QuantResult
+from xhmodel_merak.xh_llm.workflows.result import ExportResult, QuantResult
 
 
 QWEN35_AUTOROUND_PROVENANCE = "qwen35_autoround_recipe_provenance.json"
@@ -20,6 +21,57 @@ PROVENANCE_ALIASES = {
     QWEN35_AUTOROUND_PROVENANCE: WEMM_AUTOROUND_PROVENANCE,
     QWEN35_GPTQ_PROVENANCE: WEMM_GPTQ_PROVENANCE,
 }
+
+
+def finalize_wemm_merak_runtime_config(export_result: ExportResult) -> Path:
+    """Turn the shared Qwen runtime entry into a WeMM pooling entry.
+
+    Qwen3.5 owns the common HMONNX release layout.  WeMM keeps that layout but
+    has a different public runtime contract: prefill hidden states are pooled
+    into an embedding and decode is never entered.  Record that distinction in
+    the release config instead of requiring every deployment command to supply
+    ``--runner pooling`` manually.
+    """
+
+    meta_path = Path(XHWeMMEmbeddingWorkflow._find_golden_meta_file(export_result))
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    if not isinstance(metadata, dict):
+        raise TypeError(f"WeMM golden metadata must be an object: {meta_path}")
+
+    expected = {
+        "embedding_output": "hidden_states",
+        "embedding_pooling": "last_token",
+        "embedding_normalize": True,
+    }
+    for field, value in expected.items():
+        if metadata.get(field) != value:
+            raise ValueError(
+                f"WeMM Merak runtime requires {field}={value!r}, got {metadata.get(field)!r} in {meta_path}"
+            )
+    embedding_dimension = metadata.get("embedding_dimension")
+    if type(embedding_dimension) is not int or embedding_dimension <= 0:
+        raise ValueError(
+            "WeMM Merak runtime requires a positive integer embedding_dimension, "
+            f"got {embedding_dimension!r} in {meta_path}"
+        )
+
+    config_path = meta_path.parent / "merak_config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict):
+        raise TypeError(f"WeMM Merak config must be an object: {config_path}")
+    config.update(
+        {
+            "architectures": ["WeMMEmbeddingMerakForEmbedding"],
+            "runner_type": "pooling",
+        }
+    )
+    temporary_path = config_path.with_name(f".{config_path.name}.tmp")
+    temporary_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=4) + "\n",
+        encoding="utf-8",
+    )
+    temporary_path.replace(config_path)
+    return config_path
 
 
 class XHWeMMEmbeddingWorkflow(Qwen35Workflow):  # noqa: N801
@@ -39,6 +91,22 @@ class XHWeMMEmbeddingWorkflow(Qwen35Workflow):  # noqa: N801
         if quant_result.quanted_model_dir:
             self.ensure_quant_provenance_aliases(quant_result.quanted_model_dir)
         return quant_result
+
+    def export(
+        self,
+        quant_result: QuantResult,
+        output_dir: str,
+        device: str,
+        config_overrides: Mapping[str, Any] | None = None,
+    ) -> ExportResult:
+        export_result = super().export(
+            quant_result=quant_result,
+            output_dir=output_dir,
+            device=device,
+            config_overrides=config_overrides,
+        )
+        finalize_wemm_merak_runtime_config(export_result)
+        return export_result
 
     @staticmethod
     def ensure_quant_provenance_aliases(quant_model_dir: str | Path) -> list[Path]:
@@ -128,4 +196,5 @@ __all__ = [
     "WEMM_AUTOROUND_PROVENANCE",
     "WEMM_GPTQ_PROVENANCE",
     "XHWeMMEmbeddingWorkflow",
+    "finalize_wemm_merak_runtime_config",
 ]

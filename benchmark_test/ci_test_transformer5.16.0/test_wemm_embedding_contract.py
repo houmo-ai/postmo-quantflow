@@ -15,7 +15,11 @@ from xhmodel_merak.model_build.resolver import resolve_build_plan
 from xhmodel_merak.model_catalog.registry import get_recipe
 from xhmodel_merak.xh_llm.kv_cache_mixin import CacheList
 from xhmodel_merak.xh_llm.models.wemm_embedding.data_preprocess import WeMMEmbeddingDataPreprocess
-from xhmodel_merak.xh_llm.models.wemm_embedding.processor import video_frame_grids
+from xhmodel_merak.xh_llm.models.wemm_embedding.processor import (
+    normalize_embedding_pooling_anchor,
+    validate_embedding_pooling_anchor,
+    video_frame_grids,
+)
 
 
 @pytest.mark.parametrize(
@@ -64,6 +68,72 @@ def test_wemm_video_frame_grids_preserve_patch_order_and_reject_mismatch():
     assert [part.shape[0] for part in torch.split(patches, [int(grid.prod()) for grid in frame_grids])] == [4, 4, 8]
     with pytest.raises(ValueError, match="do not match"):
         video_frame_grids(patches[:-1], grids, 2)
+
+
+@pytest.mark.parametrize(
+    ("padding_side", "input_ids", "attention_mask", "expected"),
+    (
+        ("right", [[3, 9, 11, 0]], [[1, 1, 1, 0]], [[3, 11, 9, 0]]),
+        ("left", [[0, 4, 9, 11]], [[0, 1, 1, 1]], [[0, 4, 11, 9]]),
+    ),
+)
+def test_wemm_processor_moves_transformers_turn_suffix_before_pooling_anchor(
+    padding_side,
+    input_ids,
+    attention_mask,
+    expected,
+):
+    class Tokenizer:
+        pad_token_id = 0
+
+        @staticmethod
+        def encode(text, *, add_special_tokens):
+            assert text == "<embedding>"
+            assert add_special_tokens is False
+            return [9]
+
+    tokenizer = Tokenizer()
+    tokenizer.padding_side = padding_side
+    model_inputs = {
+        "input_ids": torch.tensor(input_ids),
+        "attention_mask": torch.tensor(attention_mask),
+    }
+
+    normalize_embedding_pooling_anchor(model_inputs, tokenizer)
+    validate_embedding_pooling_anchor(model_inputs, tokenizer)
+
+    torch.testing.assert_close(model_inputs["input_ids"], torch.tensor(expected))
+
+
+@pytest.mark.parametrize(
+    ("input_ids", "expected_ids", "expected_mask"),
+    (
+        ([[1, 2, 3]], [[1, 2, 3, 9]], [[1, 1, 1, 1]]),
+        ([[1, 9, 9]], [[1, 9, 0]], [[1, 1, 0]]),
+    ),
+)
+def test_wemm_processor_normalizes_missing_or_duplicate_pooling_anchor(
+    input_ids,
+    expected_ids,
+    expected_mask,
+):
+    class Tokenizer:
+        pad_token_id = 0
+        padding_side = "right"
+
+        @staticmethod
+        def encode(_text, *, add_special_tokens):
+            assert add_special_tokens is False
+            return [9]
+
+    model_inputs = {
+        "input_ids": torch.tensor(input_ids),
+        "attention_mask": torch.ones(1, 3, dtype=torch.long),
+    }
+    normalize_embedding_pooling_anchor(model_inputs, Tokenizer())
+    validate_embedding_pooling_anchor(model_inputs, Tokenizer())
+    torch.testing.assert_close(model_inputs["input_ids"], torch.tensor(expected_ids))
+    torch.testing.assert_close(model_inputs["attention_mask"], torch.tensor(expected_mask))
 
 
 def test_wemm_video_positions_and_features_use_local_preprocessor():

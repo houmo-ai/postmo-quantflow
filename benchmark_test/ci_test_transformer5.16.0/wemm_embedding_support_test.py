@@ -1199,6 +1199,60 @@ def test_wemm_yaml_fake_artifacts_match_recipe_metadata(tmp_path, size, expected
     assert metadata["context_max_length"] == 2048
 
 
+def test_wemm_export_finalizes_pooling_merak_config(monkeypatch, tmp_path):
+    from xhmodel_merak.xh_llm.models.qwen3_5.workflow import Qwen35Workflow
+    from xhmodel_merak.xh_llm.models.wemm_embedding.workflow import XHWeMMEmbeddingWorkflow
+    from xhmodel_merak.xh_llm.workflows.result import ExportResult
+
+    release_dir = tmp_path / "release"
+    release_dir.mkdir()
+    (release_dir / "golden_meta_info.json").write_text(
+        json.dumps(
+            {
+                "embedding_output": "hidden_states",
+                "embedding_pooling": "last_token",
+                "embedding_normalize": True,
+                "embedding_dimension": 2048,
+                "model_config": {"model_type": "WeMMEmbedding"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (release_dir / "merak_config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["MerakForCausalLM"],
+                "config_format": "merak_llm",
+                "load_format": "merak_llm",
+                "xh_model": {
+                    "model_type": "hmonnx",
+                    "meta_info": "golden_meta_info.json",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = ExportResult(work_dir=str(release_dir), config_file="unused.yaml")
+    monkeypatch.setattr(Qwen35Workflow, "export", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(
+        XHWeMMEmbeddingWorkflow,
+        "_find_golden_meta_file",
+        staticmethod(lambda _result: str(release_dir / "golden_meta_info.json")),
+    )
+
+    workflow = object.__new__(XHWeMMEmbeddingWorkflow)
+    actual = workflow.export(
+        quant_result=None,
+        output_dir=str(tmp_path),
+        device="cpu",
+    )
+
+    assert actual is result
+    config = json.loads((release_dir / "merak_config.json").read_text(encoding="utf-8"))
+    assert config["architectures"] == ["WeMMEmbeddingMerakForEmbedding"]
+    assert config["runner_type"] == "pooling"
+
+
 def test_load_hmonnx_embedder_uses_resolved_metadata(monkeypatch, tmp_path):
     from examples_merak.llm.wemm_embedding.runtime_utils import load_hmonnx_embedder
 

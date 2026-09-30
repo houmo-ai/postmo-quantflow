@@ -1,0 +1,13 @@
+{
+    "architectures": [
+        "MerakForCausalLM"
+    ],
+    "config_format": "merak_llm",
+    "load_format": "merak_llm",
+    "xh_model": {
+        "model_type": "hmonnx",
+        "meta_info": "golden_meta_info.json"
+    },
+    "enable_page_attention": true,
+    "model_type": "merak_llm"
+}

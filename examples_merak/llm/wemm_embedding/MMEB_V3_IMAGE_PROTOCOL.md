@@ -11,7 +11,7 @@
 - 评测任务：官方 `image.yaml` 原样摘出的 `Visual7W` 和 `ChartQA`，见 [配置一](mmeb_v3_image_first.yaml)、[配置二](mmeb_v3_image_chartqa.yaml)。每项使用完整 test 集 1,000 条，不截断查询或候选。输出保留官方逐任务分数及查询、候选向量。
 - 当前脚本覆盖上述两项图像任务；完整 `image.yaml` 还包含其他图像任务，其中 MCMR 需另行下载 MMEB-v3 的 `image_tasks/MCMR.tar.gz`。
 - 输入图像：HF 与 HMONNX 都不设置 `resized_height` / `resized_width`，保持原图宽高比，并使用相同的 `min_pixels=65536`、`max_pixels=1572864`。最大像素数对应 HMONNX 的 m1536 档位容量。HMONNX 按实际 patch token 数选择最小可容纳档位。
-- 两端均使用官方 WeMM 指令文本、原始样本顺序、`pooling=last`、L2 归一化和相同候选池。HF 与 HMONNX 输出目录隔离；比较脚本检查查询标签与候选 ID 的顺序一致。
+- 两端均使用官方 WeMM 指令文本、原始样本顺序、最后有效 `<embedding>` token pooling、L2 归一化和相同候选池。HF 与 HMONNX 输出目录隔离；比较脚本检查查询标签与候选 ID 的顺序一致。
 
 ## 接入方式
 

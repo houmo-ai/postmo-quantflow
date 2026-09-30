@@ -8,7 +8,7 @@ WeMM-Embedding 的适配目标不是复制一套 Qwen3.5，而是在复用已维
 
 1. 导出图输出 hidden states，不输出词表 logits；
 2. 一个输入 item 只产生一行 embedding；
-3. pooling 使用最后一个有效 token；
+3. 每条输入的最后一个有效 token 必须是 `<embedding>`，pooling 使用该 token；
 4. 最终 embedding 使用 FP32 L2 归一化；
 5. embedding 维度来自 checkpoint，而不是写死为某个规格；
 6. 当前运行时顺序重复执行 prefill 图并复用缓存，不对外提供生成式 decode；
@@ -38,7 +38,7 @@ WeMM-Embedding 的适配目标不是复制一套 Qwen3.5，而是在复用已维
 3. 对完整输入生成文本或多模态位置编码；
 4. 按 `prefill_chunk_length` 切分，尾段 padding 到固定图长度；
 5. 顺序执行 HMONNX prefill，并在各段之间复用 KV、卷积和 recurrent cache；
-6. 从最后一段中选择最后一个有效 token 的 hidden state；
+6. 校验最后一个有效 token 是 `<embedding>`，并从最后一段中选择该 token 的 hidden state；
 7. 转为 FP32 并执行 L2 normalize；
 8. 校验输出 shape 为 `[batch, embedding_dimension]`。
 

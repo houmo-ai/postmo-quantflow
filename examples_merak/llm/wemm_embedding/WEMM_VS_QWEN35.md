@@ -11,7 +11,7 @@ WeMM-Embedding 使用 Qwen3.5 多模态主干和相近的 remote-code 模块树�
 | `lm_head` | 导出时替换为 `Identity` | 保留词表投影层 |
 | `num_logits_to_keep` | 0 | 通常为 1 或生成配置要求的值 |
 | 输出图语义 | 全序列 hidden states | prefill/decode logits、cache/state |
-| 后处理 | 最后有效 token pooling + FP32 L2 normalize | sampling/argmax、token decode |
+| 后处理 | 最后有效 `<embedding>` token pooling + FP32 L2 normalize | sampling/argmax、token decode |
 | 公开接口 | `embed()`、`embed_items()`、`embed_texts()`、`embed_images()` | `generate()` 或逐 token prefill/decode |
 | decode | 不支持，也不需要 | 生成流程的核心阶段 |
 | page attention | 不属于当前 embedding runtime | 可用于生成式 cache 管理 |
@@ -38,7 +38,7 @@ WeMM 单独注册 `WeMMEmbedding`，并实现以下行为：
 1. 导出包装完成后把 `lm_head` 替换为 `Identity`；
 2. 将语言图输出定义为 `hidden_states`；
 3. 从 checkpoint 动态读取 embedding dimension；
-4. 运行时选择最后一个有效 token；
+4. 运行时校验并选择最后一个有效 `<embedding>` token；
 5. 使用 FP32 执行 L2 normalize；
 6. 拒绝词表维度 logits，避免生成式旧图被误用；
 7. processor 不追加用于生成回答的 generation prompt；

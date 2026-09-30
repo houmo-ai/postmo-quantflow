@@ -1,6 +1,16 @@
 [project]
 authors = [{ name = "hui.li", email = "hui.li@houmo.ai" }]
 dependencies = [
+  "transformers (>=4.57.0,<5.17.0)",
+]
+description = "Quanted Model Zoo toolkit for XH2a."
+name = "xhmodel_zoo"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+version = "1.0.0"
+
+[project.optional-dependencies]
+export = [
   "black",
   "yapf",
   "ipython",
@@ -71,11 +81,6 @@ dependencies = [
   # "peft (>=0.17.0)",
   # "diffusers (>=0.37.0,<0.38.0)",
 ]
-description = "Quanted Model Zoo toolkit for XH2a."
-name = "xhmodel_zoo"
-readme = "README.md"
-requires-python = ">=3.12,<3.13"
-version = "1.0.0"
 
 [tool.poetry]
 package-mode = true

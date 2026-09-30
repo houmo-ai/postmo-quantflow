@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-merak"
+description = "Merak plugin for vLLM"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+version = "0.20.0"
+dependencies = []
+requires-python = ">=3.12,<3.13"
+
+[project.entry-points."vllm.general_plugins"]
+merak = "vllm_merak:register_plugins"
+wemm = "vllm_merak.native_wemm:register"
+
+[project.entry-points."vllm.platform_plugins"]
+merak = "vllm_merak.platform:register"
+
+[tool.setuptools.packages.find]
+where = ["."] # list of folders that contain the packages (["."] by default)
+include = [
+    "vllm_merak*",
+] # package names should match these glob patterns (["*"] by default)
+exclude = [] # exclude packages matching these glob patterns (empty by default)
+namespaces = false # to disable scanning PEP 420 namespaces (true by default)

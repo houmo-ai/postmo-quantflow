@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "vllm-merak-plugin-package",
+      "patterns": [
+        "vllm_merak/**",
+        "benchmark_test/ci_test_transformer5.16.0/test_vllm_merak_plugin_package.py"
+      ]
+    }
+  ]
+}
