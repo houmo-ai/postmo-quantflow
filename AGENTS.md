@@ -10,6 +10,8 @@
 
 - 当前实现、配置、示例分别在 `xhmodel_merak/`、`configs_merak/`、`examples_merak/`。
   历史根目录由 [CI policy](benchmark_test/ci_test_transformer5.16.0/impact_policy.json) 冻结。
+- vLLM Merak 插件位于 `vllm_merak/`；后续插件开发、修复和集成在本仓库进行，
+  不再向旧的独立 `vllm-merak` 仓库增加改动。插件仍保留独立安装入口。
 - 修改 Merak 的入口、分层或模型接入时，先读 [Merak 架构](docs/architecture/merak.md)。
   保持 workflow 编排、模型语义、图表达和 runtime 的职责边界。
 - 修改已注册模型或统一接口时，同时遵循 [接口接入约定](xhmodel_merak/model_integrations/README.md)；

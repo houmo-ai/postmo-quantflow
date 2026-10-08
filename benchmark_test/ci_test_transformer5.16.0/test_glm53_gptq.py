@@ -12,6 +12,8 @@ from safetensors import safe_open
 
 from xhmodel_merak.model_catalog import get_recipe
 from xhmodel_merak.xh_llm.models.glm5_3_flash.checkpoint import Glm53Checkpoint
+from xhmodel_merak.xh_llm.models.glm5_3_flash.contract import DSA
+from xhquant.xhonnxruntime.parsers.llm_cache import LLMCache
 
 
 @pytest.fixture
@@ -156,12 +158,58 @@ def test_workflow_quant_calls_public_recipe_and_preserves_owned_root(tmp_path, m
     assert Path(result.meta["calibration"]["jsonl"]).is_file()
 
 
-def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoint, tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_selection", [False, True], ids=["pooled", "legacy"])
+def test_public_streamed_build_move_load_and_generate(
+    autoround_packed_checkpoint, tmp_path, monkeypatch, legacy_selection
+):
     from test_glm53_multimodal import processor_inputs
     from xhmodel_merak.model_build import build_model
     from xhmodel_merak.model_build import checkpoint as checkpoint_api, resolver
     from xhmodel_merak.model_integrations.glm53.artifact import audit_glm53_hmonnx, validate_glm53_bundle
     from xhmodel_merak.xh_llm.hmonnx.auto_llm_hmonnx_model import AutoLLMHONNXModel
+
+    if legacy_selection:
+        import xhquant.nn as xhnn
+
+        from xhmodel_merak.xh_llm.models.deepseek_v4.static_cache import LatentCacheGather
+        from xhmodel_merak.xh_llm.models.glm5_3_flash.glm53_model import XHGlm53Model
+        from xhmodel_merak.xh_llm.models.glm5_3_flash.modeling import StaticDSA
+
+        class LegacySelection(torch.nn.Module):
+            """The pre-fusion MatMul/ReLU/TopK/Gather graph and its state ABI."""
+
+            def __init__(self, spec, scale, length):
+                super().__init__()
+                self.scale, self.length, self.ratio = scale, length, spec.pool_size
+                self.topk = xhnn.TopK(spec.selected_pools, axis=-1)
+                self.gather_validity = xhnn.GatherElements(axis=2)
+                self.gather = LatentCacheGather(feature_dim=spec.latent_dim)
+                self.register_buffer("offsets", torch.arange(self.ratio, dtype=torch.int32), persistent=False)
+
+            def forward(self, query, pool, payload, validity, weights):
+                scores = torch.relu(query.float() @ pool.float().transpose(1, 2).unsqueeze(1) * self.scale)
+                scores = (weights.float() @ scores).squeeze(-2)
+                scores = scores * validity + (validity - 1.0) * 65504.0
+                selected = self.topk(scores)[1]
+                selected_valid = self.gather_validity(validity, selected)
+                indices = (selected.unsqueeze(-1) * self.ratio + self.offsets).flatten(-2)
+                mask = selected_valid.unsqueeze(-1).expand(1, self.length, -1, self.ratio).flatten(-2)
+                return self.gather(payload, indices), mask
+
+        initialize = StaticDSA.__init__
+        extra_metadata = XHGlm53Model._extra_export_metadata
+
+        def initialize_legacy(self, source, spec, input_length):
+            initialize(self, source, spec, input_length)
+            self.select_kv = LegacySelection(spec, source.indexer.softmax_scale, input_length)
+
+        def legacy_metadata(self, output_dir, meta_info):
+            result = extra_metadata(self, output_dir, meta_info)
+            del result.glm53_dsa_selection
+            return result
+
+        monkeypatch.setattr(StaticDSA, "__init__", initialize_legacy)
+        monkeypatch.setattr(XHGlm53Model, "_extra_export_metadata", legacy_metadata)
 
     source, checkpoint, reference, _ = autoround_packed_checkpoint
     # Relax only release dimensions for this synthetic native model. All real
@@ -207,7 +255,7 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
     assert export_index["quant_embedding_bin"]["type"] == "embedding"
     assert export_index["golden_meta_info"] == {"path": "golden_meta_info.json", "type": "json"}
     report = audit_glm53_hmonnx(moved, meta)
-    assert report["prefill"] == {
+    expected_report = {
         "w4g64_moe_blocks": 1,
         "w8_linears": 26,
         "floating_gate_linears": 3,
@@ -215,7 +263,21 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
         "w8_convolutions": 1,
         "mhc_sinkhorn_blocks": 4,
     }
+    if not legacy_selection:
+        expected_report["sparse_kv_select_blocks"] = 1
+    assert report["prefill"] == expected_report
     assert report["decode"] == report["prefill"] and report["vision_components"] == 3
+    if legacy_selection:
+        assert "glm53_dsa_selection" not in meta
+        for stage in ("prefill", "decode"):
+            import onnx
+
+            graph = onnx.load(moved / meta[f"{stage}_hmonnx"], load_external_data=False)
+            assert not any(node.op_type == "SparseAttentionSelectKV" for node in graph.graph.node)
+            assert any(node.op_type == "TopK" for node in graph.graph.node)
+        monkeypatch.delattr(xhnn, "SparseAttentionSelectKVPool")
+    else:
+        assert meta["glm53_dsa_selection"] == "hmfp_pool"
     # A saved constant projection silently left at W16 used to escape the
     # Linear/MoE-only audit. Corrupt its real graph attribute, then restore it.
     import onnx
@@ -236,6 +298,20 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
     monkeypatch.setenv("XHQUANT_PACKED_W4", "1")
     monkeypatch.setenv("XHQUANT_DISABLE_INITIALIZER_DIGEST_CACHE", "1")
     model = AutoLLMHONNXModel.from_pretrained(str(meta_path), device_map=["cuda:0"])
+    for graph_model in (model.prefill_model, model.decode_model):
+        writers = [
+            module
+            for module in graph_model.hmonnx_session.graph_module.modules()
+            if isinstance(module, LLMCache) and not module.only_handle_old_cache and module.attention_max_length < 0
+        ]
+        assert len(writers) == 2 * model.cache_spec.layer_types.count(DSA)
+        assert {module.input_names[3] for module in writers} == {
+            f"layer_{i}_{suffix}_input"
+            for i, kind in enumerate(model.cache_spec.layer_types)
+            if kind == DSA
+            for suffix in ("latent", "pool")
+        }
+        assert all(module.reuse_output_storage for module in writers)
     reference = reference.cuda().eval()
     processed = processor_inputs(model.get_processor()).to(model.device)
     ids = processed["input_ids"].cuda()
@@ -305,3 +381,14 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
 
     with pytest.raises(ModelError, match="Invalid GLM vision path"):
         validate_glm53_bundle(moved, meta)
+
+
+def test_pooled_build_requires_frontend_only_when_building(monkeypatch):
+    import xhquant.nn as xhnn
+
+    from xhmodel_merak.xh_llm.models.glm5_3_flash.glm53_model import XHGlm53Model
+
+    monkeypatch.delattr(xhnn, "SparseAttentionSelectKVPool")
+    # Capability failure precedes configuration/checkpoint access.
+    with pytest.raises(RuntimeError, match="export requires xhquant.nn.SparseAttentionSelectKVPool"):
+        XHGlm53Model(None)

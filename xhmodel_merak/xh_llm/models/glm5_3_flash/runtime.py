@@ -6,14 +6,16 @@ import torch
 
 from ...kv_cache_mixin import KVCacheMixin
 from ...llm_data_processor import BaseInputProcessorConfig, BaseLLMInputProcessor
-from .contract import build_transition
+from .contract import DSA, build_transition
 
 
 class Glm53CacheMixin(KVCacheMixin):
-    def __init__(self, spec, config):
+    def __init__(self, spec, config, *, inplace_step_staging=False):
         super().__init__(config)
         self.spec = spec
         self.caches = ()
+        self.inplace_step_staging = inplace_step_staging
+        self._staged_rows = None
 
     def prepare_kv_cache(self):
         if not self._cache_initialized:
@@ -26,6 +28,7 @@ class Glm53CacheMixin(KVCacheMixin):
 
     def clear_kv_cache(self):
         self.caches = ()
+        self._staged_rows = None
         self._cache_initialized = False
 
     def _set_device(self, device):
@@ -37,6 +40,8 @@ class Glm53CacheMixin(KVCacheMixin):
         self.caches = tuple(x.to(dtype) for x in self.caches)
 
     def commit(self, outputs):
+        from xhquant.core import CacheTensor
+
         values = tuple(outputs)
         if len(values) != len(self.caches) + 1:
             raise ValueError("GLM graph outputs do not match cache ABI")
@@ -44,8 +49,46 @@ class Glm53CacheMixin(KVCacheMixin):
             if old.shape != new.shape:
                 raise ValueError("GLM graph returned an incompatible cache shape")
         # No state is replaced until every output has passed validation.
-        self.caches = values[1:]
+        committed = list(values[1:])
+        if self.inplace_step_staging:
+            cursor = 0
+            for kind in self.spec.layer_types:
+                if kind == DSA:
+                    for index in (cursor, cursor + 1):
+                        if not isinstance(committed[index], CacheTensor):
+                            committed[index] = CacheTensor(committed[index])
+                cursor += len(self.spec.cache_suffixes(kind))
+        self.caches = tuple(committed)
+        self._staged_rows = None
         return values[0]
+
+    def stage_step(self, past_length, current_length):
+        if not self.inplace_step_staging:
+            return self.spec.stage_caches(self.caches)
+        if self._staged_rows is not None:
+            raise RuntimeError("GLM cache step is already staged")
+        if past_length < 0 or current_length <= 0 or past_length + current_length > self.spec.max_context_length:
+            raise ValueError("GLM cache step exceeds the configured context capacity")
+        pool_start = past_length // self.spec.pool_size
+        pool_count = (past_length % self.spec.pool_size + current_length) // self.spec.pool_size
+        staged_rows = []
+        cursor = 0
+        for kind in self.spec.layer_types:
+            if kind == DSA:
+                latent = self.caches[cursor].data
+                pool = self.caches[cursor + 1].data
+                staged_rows.append((latent, past_length, latent.narrow(2, past_length, current_length).clone()))
+                if pool_count:
+                    staged_rows.append((pool, pool_start, pool.narrow(2, pool_start, pool_count).clone()))
+            cursor += len(self.spec.cache_suffixes(kind))
+        self._staged_rows = staged_rows
+        return self.caches
+
+    def rollback_step(self):
+        if self._staged_rows is not None:
+            for cache, start, original in self._staged_rows:
+                cache.narrow(2, start, original.shape[2]).copy_(original)
+            self._staged_rows = None
 
 
 class Glm53DataPreprocess(BaseLLMInputProcessor):
@@ -66,9 +109,10 @@ class Glm53DataPreprocess(BaseLLMInputProcessor):
         if embeds is not None and embeds.shape[-1] != self.embed_tokens.weight.shape[-1]:
             raise ValueError("inputs_embeds has an incompatible language hidden dimension")
         n = value.shape[1]
+        past_length = int(data.get("past_seq_length", 0))
         transition = build_transition(
             self.cache_mixin.spec,
-            int(data.get("past_seq_length", 0)),
+            past_length,
             n,
             self.input_sequence_length,
             device=self._device or value.device,
@@ -80,7 +124,7 @@ class Glm53DataPreprocess(BaseLLMInputProcessor):
         if n < self.input_sequence_length:
             embeds = torch.nn.functional.pad(embeds, (0, 0, 0, self.input_sequence_length - n))
         self.cache_mixin.prepare_kv_cache()
-        return (embeds, *transition.values(), self.cache_mixin.spec.stage_caches(self.cache_mixin.caches))
+        return (embeds, *transition.values(), self.cache_mixin.stage_step(past_length, n))
 
 
 class Glm53Runner:

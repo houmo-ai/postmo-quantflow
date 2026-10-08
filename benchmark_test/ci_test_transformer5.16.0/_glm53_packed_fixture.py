@@ -31,7 +31,8 @@ def write_native_glm53(source_dir):
         )
     )
     config.vision_config.update(
-        dict(hidden_size=64, intermediate_size=128, depth=1, out_hidden_size=128, projection_intermediate_size=128)
+        # Keep a real 64-wide FlashAttention head while retaining the small fixture.
+        dict(hidden_size=64, num_heads=1, intermediate_size=128, depth=1, out_hidden_size=128, projection_intermediate_size=128)
     )
     source = Glm5NextForConditionalGeneration(config).eval().half()
     source.save_pretrained(source_dir)

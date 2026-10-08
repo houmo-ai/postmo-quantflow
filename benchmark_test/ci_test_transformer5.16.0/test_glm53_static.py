@@ -12,7 +12,8 @@ from transformers.models.glm5_next import modeling_glm5_next as hf_glm53
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextModel
 
-from xhmodel_merak.xh_llm.models.glm5_3_flash.contract import Glm53CacheSpec, build_transition
+from xhmodel_merak.xh_llm.models.glm5_3_flash import hmonnx_inference as glm_hmonnx
+from xhmodel_merak.xh_llm.models.glm5_3_flash.contract import DSA, Glm53CacheSpec, build_transition
 from xhmodel_merak.xh_llm.models.glm5_3_flash.modeling import (
     StaticDSA,
     StaticGlm53ForCausalLM,
@@ -21,8 +22,11 @@ from xhmodel_merak.xh_llm.models.glm5_3_flash.modeling import (
     StaticKPool,
     StaticMoE,
 )
-from xhmodel_merak.xh_llm.models.glm5_3_flash.runtime import Glm53Runner
+from xhmodel_merak.xh_llm.models.glm5_3_flash.runtime import Glm53CacheMixin, Glm53Runner
 from xhmodel_merak.xh_llm.models.ling_3_flash._kda_rule import chunk_kda, recurrent_kda_reference
+from xhquant.core import CacheTensor
+from xhquant.ops.xh.kv_cache import llm_cache_default_static, llm_cache_update_inplace
+from xhquant.xhonnxruntime.parsers.llm_cache import LLMCache
 
 
 def tiny_config():
@@ -67,6 +71,158 @@ def tiny_config():
         eos_token_id=1,
         swiglu_limit=1.0,
     )
+
+
+def test_inplace_dsa_cache_update_preserves_zero_padded_output():
+    reference = CacheTensor(torch.zeros(1, 1, 12, 3, dtype=torch.float16))
+    reused = CacheTensor(reference.data.clone())
+    for start, count in ((0, 3), (3, 1), (4, 0), (4, 4), (8, 4)):
+        values = torch.arange(12, dtype=torch.float16).reshape(1, 1, 4, 3) + start
+        position = torch.tensor([start])
+        length = torch.tensor([count])
+        expected = llm_cache_default_static(values, position, length, reference, 2, -1)
+        actual = llm_cache_update_inplace(values, position, length, reused, 2, -1)
+        assert actual.data_ptr() == reused.data_ptr()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert torch.count_nonzero(actual[:, :, start + count :]) == 0
+    with pytest.raises(ValueError, match="outside the fixed-capacity storage"):
+        llm_cache_update_inplace(values, torch.tensor([11]), torch.tensor([2]), reused, 2, -1)
+
+
+def test_inplace_step_staging_backs_up_only_written_dsa_rows():
+    spec = Glm53CacheSpec((DSA, DSA), 12, 2, 8, 4, 3, 2, 4, 8)
+    cache = Glm53CacheMixin(spec, object(), inplace_step_staging=True)
+    cache.caches = spec.initial_caches(dtype=torch.float16)
+    for layer in (0, 4):
+        cache.caches[layer].data[:, :, :3].fill_(layer + 1)
+    before = tuple(value.clone() for value in cache.caches)
+
+    staged = cache.stage_step(3, 2)
+    assert all(old is new for old, new in zip(cache.caches, staged, strict=True))
+    assert len(cache._staged_rows) == 4
+    assert sum(saved.numel() for _, _, saved in cache._staged_rows) < sum(value.numel() for value in cache.caches)
+    for tensor, start, saved in cache._staged_rows:
+        tensor.narrow(2, start, saved.shape[2]).fill_(42)
+    cache.rollback_step()
+    assert all(torch.equal(old, new) for old, new in zip(before, cache.caches, strict=True))
+
+    staged = cache.stage_step(5, 1)
+    assert len(cache._staged_rows) == 2  # No complete pool is written on this step.
+    logits = torch.ones(1, 1)
+    outputs = list(staged)
+    for i in (0, 1, 4, 5):
+        outputs[i] = staged[i].data
+    assert cache.commit((logits, *outputs)) is logits
+    assert all(isinstance(cache.caches[i], CacheTensor) for i in (0, 1, 4, 5))
+    assert all(cache.caches[i].data_ptr() == staged[i].data_ptr() for i in (0, 1, 4, 5))
+    assert cache._staged_rows is None
+
+
+@pytest.mark.parametrize("past,pool_rows", [(3, 1), (4, 0), (11, 1)])
+def test_inplace_dsa_rollback_at_pool_and_capacity_boundaries(past, pool_rows):
+    spec = Glm53CacheSpec((DSA,), 12, 2, 8, 4, 3, 2, 4, 8)
+    cache = Glm53CacheMixin(spec, object(), inplace_step_staging=True)
+    cache.caches = spec.initial_caches(dtype=torch.float16)
+    before = tuple(value.clone() for value in cache.caches)
+    staged = cache.stage_step(past, 1)
+    assert [(start, saved.shape[2]) for _, start, saved in cache._staged_rows] == (
+        [(past, 1)] + ([(past // 4, 1)] if pool_rows else [])
+    )
+    for tensor, start, saved in cache._staged_rows:
+        tensor.narrow(2, start, saved.shape[2]).fill_(42)
+    bad_outputs = [torch.ones(1, 1), *staged]
+    bad_outputs[-1] = torch.zeros(1)
+    with pytest.raises(ValueError, match="incompatible cache shape"):
+        cache.commit(bad_outputs)
+    cache.rollback_step()
+    assert cache._staged_rows is None
+    assert all(torch.equal(old, new) for old, new in zip(before, cache.caches, strict=True))
+    # A failed step can be retried at the same committed length.
+    cache.stage_step(past, 1)
+    cache.rollback_step()
+
+
+def test_inplace_dsa_cache_session_preflight_and_rollback(monkeypatch):
+    class Session:
+        def __init__(self, count, result=None, raise_after_enable=False):
+            self.graph_module = nn.ModuleList(LLMCache(axis=2) for _ in range(count))
+            self.result = result
+            self.raise_after_enable = raise_after_enable
+            self.calls = 0
+            self.alias_calls = 0
+            self.static_rhs_calls = []
+
+        def initialize(self):
+            pass
+
+        def enable_inplace_cache_updates(self):
+            self.calls += 1
+            for module in self.graph_module:
+                module.enable_inplace_output_reuse()
+            if self.raise_after_enable:
+                raise RuntimeError("enable failed")
+            return len(self.graph_module) if self.result is None else self.result
+
+        def enable_reused_cache_output_aliases(self):
+            self.alias_calls += 1
+            return 1
+
+        def enable_constant_matmul_rhs_cache(self, *, min_numel):
+            self.static_rhs_calls.append(min_numel)
+            return len(self.graph_module)
+
+    monkeypatch.setattr(glm_hmonnx, "HMONNXInferenceV2", Session)
+    spec = Glm53CacheSpec((DSA,), 12, 2, 8, 4, 3, 2, 4, 8)
+    assert all(torch.count_nonzero(cache.data) == 0 for cache in spec.initial_caches()[:2])
+    prefill, decode = Session(2), Session(2)
+    assert glm_hmonnx._enable_inplace_dsa_caches(prefill, decode, spec)
+    assert (prefill.calls, decode.calls) == (1, 1)
+    assert (prefill.alias_calls, decode.alias_calls) == (1, 1)
+    assert prefill.static_rhs_calls == decode.static_rhs_calls == [4_000_000]
+    assert all(module.reuse_output_storage for session in (prefill, decode) for module in session.graph_module)
+
+    two_dsa = Glm53CacheSpec((DSA, DSA), 12, 2, 8, 4, 3, 2, 4, 8)
+    prefill, decode = Session(4), Session(4)
+    glm_hmonnx._enable_inplace_dsa_caches(prefill, decode, two_dsa)
+    assert (prefill.calls, decode.calls) == (1, 1)
+
+    prefill, decode = Session(1), Session(2)
+    with pytest.raises(RuntimeError, match="prefill cache writer count mismatch"):
+        glm_hmonnx._enable_inplace_dsa_caches(prefill, decode, spec)
+    assert (prefill.calls, decode.calls) == (0, 0)
+
+    prefill, decode = Session(2), Session(1)
+    with pytest.raises(RuntimeError, match="decode cache writer count mismatch"):
+        glm_hmonnx._enable_inplace_dsa_caches(prefill, decode, spec)
+    assert (prefill.calls, decode.calls) == (0, 0)
+    assert not any(module.reuse_output_storage for module in prefill.graph_module)
+
+    prefill, decode = Session(2), Session(2, result=1)
+    with pytest.raises(RuntimeError, match="decode cache writer count mismatch"):
+        glm_hmonnx._enable_inplace_dsa_caches(prefill, decode, spec)
+    assert (prefill.calls, decode.calls) == (1, 1)
+    assert not any(module.reuse_output_storage for session in (prefill, decode) for module in session.graph_module)
+
+    for failing_side in ("prefill", "decode"):
+        prefill = Session(2, raise_after_enable=failing_side == "prefill")
+        decode = Session(2, raise_after_enable=failing_side == "decode")
+        with pytest.raises(RuntimeError, match="enable failed"):
+            glm_hmonnx._enable_inplace_dsa_caches(prefill, decode, spec)
+        assert (prefill.calls, decode.calls) == ((1, 0) if failing_side == "prefill" else (1, 1))
+        assert not any(module.reuse_output_storage for session in (prefill, decode) for module in session.graph_module)
+
+    with pytest.raises(RuntimeError, match="same HMONNX backend"):
+        glm_hmonnx._enable_inplace_dsa_caches(Session(2), object(), spec)
+    with pytest.raises(RuntimeError, match="same HMONNX backend"):
+        glm_hmonnx._enable_inplace_dsa_caches(object(), Session(2), spec)
+    glm_hmonnx._enable_inplace_dsa_caches(object(), object(), spec)
+    monkeypatch.setenv("XHMODEL_GLM53_INPLACE_CACHE_UPDATES", "0")
+    prefill, decode = Session(2), Session(2)
+    glm_hmonnx._enable_inplace_dsa_caches(prefill, decode, spec)
+    assert (prefill.calls, decode.calls) == (0, 0)
+    monkeypatch.setenv("XHMODEL_GLM53_INPLACE_CACHE_UPDATES", "invalid")
+    with pytest.raises(ValueError, match="must be 0 or 1"):
+        glm_hmonnx._enable_inplace_dsa_caches(prefill, decode, spec)
 
 
 @pytest.fixture
@@ -203,6 +359,22 @@ def test_complete_hybrid_blocks(hf_model):
             past += n
 
 
+def record_pool_selection(chosen):
+    def hook(module, args, result):
+        query, pool, payload, validity, weights = args
+        head_scores = torch.relu(query.float() @ pool.float().transpose(1, 2).unsqueeze(1) * module.score_scale)
+        scores = (weights.float() @ head_scores).squeeze(-2)
+        scores = scores * validity + (validity - 1.0) * 65504.0
+        indices = torch.topk(scores, module.candidate_topk, dim=-1).indices
+        token_ids = (indices[..., None] * 4 + torch.arange(4, device=indices.device)).flatten(-2)
+        expected_mask = validity.gather(-1, indices)[..., None].expand(*indices.shape, 4).flatten(-2)
+        torch.testing.assert_close(result[0], payload.reshape(-1, payload.shape[-1])[token_ids], rtol=0, atol=0)
+        torch.testing.assert_close(result[1], expected_mask, rtol=0, atol=0)
+        chosen.update(scores=scores.clone(), indices=indices.clone())
+
+    return hook
+
+
 @pytest.mark.parametrize("minimum_score", [-10.0, -40000.0, -65000.0])
 def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_score):
     original = hf_model.layers[3].self_attn
@@ -210,7 +382,7 @@ def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_sco
     spec = Glm53CacheSpec.from_config(hf_model.config, 64)
     core = StaticDSA(original, spec, 16)
     chosen = {}
-    hook = core.topk.register_forward_pre_hook(lambda m, a: chosen.update(scores=a[0].clone()))
+    hook = core.select_kv.register_forward_hook(record_pool_selection(chosen))
     x = torch.randn(1, 16, 32).abs() + 0.1
     t = build_transition(spec, 0, 16, 16)
     with torch.no_grad():
@@ -262,7 +434,7 @@ def test_dsa_tied_scores_select_valid_pools(hf_model):
     spec = Glm53CacheSpec.from_config(hf_model.config, 64)
     core = StaticDSA(original, spec, 16)
     chosen = {}
-    hook = core.topk.register_forward_hook(lambda m, a, v: chosen.update(indices=v[1].clone()))
+    hook = core.select_kv.register_forward_hook(record_pool_selection(chosen))
     x = torch.randn(1, 16, 32)
     t = build_transition(spec, 0, 16, 16)
     with torch.no_grad():
@@ -513,22 +685,12 @@ def test_w8_export_reload_and_generation(tmp_path, monkeypatch, mlp_type):
                 for n in tags] == [b"layer_0", b"layer_1"]
         assert not any(node.op_type == "ReduceMin" for node in graph.node)
         if mlp_type == "sparse":
-            nodes = {output: node for node in graph.node for output in node.output}
-            constants = {tensor.name: tensor for tensor in graph.initializer}
-            sparse_topk = next(
-                node for node in graph.node
-                if node.op_type == "TopK"
-                and any("attention.topk" in prop.value for prop in node.metadata_props)
-            )
-            masked_score = nodes[sparse_topk.input[0]]
-            mask_terms = [nodes[name] for name in masked_score.input]
-            mask_mul = next(term for term in mask_terms if any(
-                name in nodes and nodes[name].op_type == "Sub"
-                and "pool_validity" in nodes[name].input for name in term.input
-            ))
-            sentinel = next(constants[name] for name in mask_mul.input if name in constants)
-            assert sentinel.data_type == onnx.TensorProto.FLOAT16
-            assert onnx.numpy_helper.to_array(sentinel).item() == 65504.0
+            select = [node for node in graph.node if node.op_type == "SparseAttentionSelectKV"]
+            assert len(select) == 1
+            attrs = {a.name: onnx.helper.get_attribute_value(a) for a in select[0].attribute}
+            assert attrs["score_mode"] == b"hmfp_pool" and attrs["pool_size"] == 4
+            assert len(select[0].input) == 5 and len(select[0].output) == 2
+            assert "pool_validity" == select[0].input[3]
         assert len(graph.output) == (7 if mlp_type == "sparse" else 5)
         assert all(o.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16 for o in graph.output)
     monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")

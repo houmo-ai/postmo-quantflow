@@ -78,6 +78,10 @@ python -m examples_merak.unified_api.generate \
 默认每帧容量为 1024 patches；单图和单视频总预算均为 256 个合并 token。
 输入 token 与生成 token 的总长度不得超过导出的上下文容量。
 
+通过 vLLM-Merak 部署时，在启动服务前设置 `VLLM_MERAK_CUDA_GRAPH=1` 和
+`XHQUANT_W4_BACKEND=cuda`，启用 CUDA Graph 与单 token W8A16 CUDA 路径。
+首次请求会捕获 HMONNX CUDA Graph；测稳态解码速度前先完成一次预热请求。
+
 ## 搬移产物
 
 交付整个导出目录。使用 `rsync -aH` 保留 prefill/decode 权重的硬链接，避免重复占用磁盘：
@@ -87,3 +91,29 @@ rsync -aH work_dirs/glm53-w4g64/ /path/to/deploy/glm53-w4g64/
 ```
 
 推理时将 `--artifact-dir` 改为搬移后的目录即可。
+
+## vLLM 文本和图片服务
+
+在安装了 vLLM 和支持 `Glm5Next` 的 Transformers 环境中，从仓库根执行：
+
+```bash
+pip install -e ./vllm_merak
+export XHQUANT_HSUM_JIT=0
+export XHQUANT_PACKED_W4=1
+export XHQUANT_W4_BACKEND=cuda
+export XHQUANT_A16W16_SPLIT_OPT=1
+export VLLM_MERAK_PARALLEL_LINEAR_FUSION=0
+CUDA_VISIBLE_DEVICES=4,5,6,7 VLLM_PLUGINS=merak \
+  python vllm_merak/examples/vllm_chat_server.py \
+  --model "$GLM_ARTIFACT_DIR" --host 0.0.0.0 --port 18053 \
+  --served-model-name glm-5.3-flash-merak \
+  --trust-remote-code --config-format merak_llm --load-format merak_llm \
+  --use-v2 --auto-offload --cuda-graph --enforce-eager \
+  --max-model-len 262144 --max-num-seqs 1 --max-num-batched-tokens 256 \
+  --no-enable-prefix-caching --generation-config vllm --reasoning-parser glm45
+```
+
+`--max-model-len` 不得超过产物的导出上下文。服务通过 OpenAI
+`/v1/chat/completions` 接口接收文本和图片请求，`/v1/completions` 接收文本请求，
+每次执行一个请求，可接收多条排队请求。图片请求要求产物包含视觉组件，
+通过消息中的 `image_url` 传入图片。此部署入口不支持视频、推测解码或 prompt logprobs。

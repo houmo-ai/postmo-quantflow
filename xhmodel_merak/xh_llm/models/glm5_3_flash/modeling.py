@@ -204,10 +204,11 @@ class StaticDSA(nn.Module):
         self.pool = StaticKPool(source.indexer, input_length)
         self.writer = FixedCapacityCacheWriter()
         self.gather = LatentCacheGather(feature_dim=spec.latent_dim)
-        self.gather_validity = xhnn.GatherElements(axis=2)
-        self.topk = xhnn.TopK(spec.selected_pools, axis=-1)
-        self.register_buffer("pool_offsets", torch.arange(spec.pool_size, dtype=torch.int32), persistent=False)
-        self.ratio = spec.pool_size
+        self.select_kv = xhnn.SparseAttentionSelectKVPool(
+            spec.selected_pools,
+            source.indexer.softmax_scale,
+            spec.pool_size,
+        )
 
     def forward(
         self,
@@ -233,21 +234,10 @@ class StaticDSA(nn.Module):
         candidates, next_key, next_score = self.pool(x, offset, current_length, key_state, score_state)
         full_pool = self.writer(pool_cache, candidates, write_start, new_count)
         iq = self.indexer.wq_b(resid).reshape(1, self.length, self.indexer.n_heads, self.indexer.head_dim)
-        score = torch.relu(
-            torch.matmul(iq.float(), full_pool.float().transpose(1, 2).unsqueeze(1)) * self.indexer.softmax_scale
-        )
         head_weight = self.indexer.weights_proj(x).float() * self.indexer.n_heads**-0.5
-        score = torch.matmul(head_weight.unsqueeze(-2), score).squeeze(-2)
-        # Use the FP16 finite minimum for invalid pools without shifting
-        # valid scores; scores below -32768 must still outrank padding.
-        score = score * pool_valid + (pool_valid - 1.0) * 65504.0
-        selected = self.topk(score)[1]
-        selected_valid = self.gather_validity(pool_valid, selected)
-        indices = (selected.unsqueeze(-1) * self.ratio + self.pool_offsets).flatten(-2)
-        validity = selected_valid.unsqueeze(-1).expand(1, self.length, -1, self.ratio).flatten(-2)
-        indices = torch.cat((indices, tail_indices), -1)
+        selected_latent, validity = self.select_kv(iq, full_pool, full_latent, pool_valid, head_weight.unsqueeze(-2))
+        selected_latent = torch.cat((selected_latent, self.gather(full_latent, tail_indices)), -2)
         validity = torch.cat((validity, tail_valid), -1)
-        selected_latent = self.gather(full_latent, indices)
         # Absorb only the per-head K factor. No compressed index key participates in attention.
         latent_query = self.k_projection(query.transpose(1, 2), self.k_weight).transpose(1, 2)
         scores = torch.matmul(latent_query.float(), selected_latent.float().transpose(-1, -2)) * self.scaling

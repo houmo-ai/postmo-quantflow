@@ -42,7 +42,8 @@ def export_glm53_vision(model_dir, output_dir, capacity, *, device="cuda:0", chi
     hidden = torch.zeros(1, capacity, width, dtype=torch.float16)
     pixels = torch.zeros(1, capacity, patch_dim, dtype=torch.float16)
     cos = torch.ones(1, 1, capacity, dim, dtype=torch.float16)
-    sin, mask = torch.zeros_like(cos), torch.zeros(1, 1, 1, capacity, dtype=torch.float16)
+    sin = torch.zeros_like(cos)
+    valid_length = torch.tensor([capacity], dtype=torch.int32)
     components = []
     names = ["stem", *[f"block_{i:02d}" for i in range(config.depth)], "merger"]
     for name in names:
@@ -59,7 +60,7 @@ def export_glm53_vision(model_dir, output_dir, capacity, *, device="cuda:0", chi
             index = int(name.split("_")[1])
             reader.load_module(shell.blocks[index], f"model.visual.blocks.{index}.")
             wrapped = StaticVisionBlock(shell.blocks[index], capacity)
-            inputs, input_names = [hidden, cos, sin, mask], ["hidden_states", "rotary_cos", "rotary_sin", "key_mask"]
+            inputs, input_names = [hidden, cos, sin, valid_length], ["hidden_states", "rotary_cos", "rotary_sin", "valid_length"]
         wrapped.eval()
         frontend = to_frontend_graph(wrapped, "TorchFX", inputs)
         scheme = QuantScheme(quant_type="w8a16h0_sefp", target_device=chip_arch)
@@ -90,7 +91,7 @@ def export_glm53_vision(model_dir, output_dir, capacity, *, device="cuda:0", chi
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     result = {
-        "abi_version": 1,
+        "abi_version": 2,
         "directory": "vision",
         "max_patches_per_frame": capacity,
         "quant_type": "w8a16h0_sefp",

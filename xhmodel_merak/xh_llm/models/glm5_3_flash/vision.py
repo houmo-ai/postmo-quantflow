@@ -7,6 +7,7 @@
 
 import torch
 from torch import nn
+from xhquant.nn import FlashAttention
 
 from .modeling import StaticRMSNorm
 
@@ -36,22 +37,32 @@ class StaticVisionBlock(nn.Module):
         self.norm1, self.norm2 = StaticRMSNorm(source.norm1), StaticRMSNorm(source.norm2)
         self.q_norm, self.k_norm = StaticRMSNorm(source.attn.q_norm), StaticRMSNorm(source.attn.k_norm)
         self.qkv, self.proj, self.mlp = source.attn.qkv, source.attn.proj, source.mlp
+        self.attention = FlashAttention(
+            num_heads=self.heads,
+            scale=self.dim**-0.5,
+            is_causal=False,
+            q_bits=16,
+            k_bits=16,
+            v_bits=16,
+            s_bits=16,
+            p_bits=16,
+        )
 
     def _rotate(self, x, cos, sin):
         half = self.dim // 2
         rotated = torch.cat((-x[..., half:], x[..., :half]), dim=-1)
         return (x.float() * cos.float() + rotated.float() * sin.float()).to(x.dtype)
 
-    def forward(self, hidden_states, rotary_cos, rotary_sin, key_mask):
+    def forward(self, hidden_states, rotary_cos, rotary_sin, valid_length):
         qkv = self.qkv(self.norm1(hidden_states)).reshape(1, self.length, 3, self.heads, self.dim)
         q = self.q_norm(qkv[:, :, 0]).transpose(1, 2)
         k = self.k_norm(qkv[:, :, 1]).transpose(1, 2)
         v = qkv[:, :, 2].transpose(1, 2)
         q = self._rotate(q, rotary_cos, rotary_sin)
         k = self._rotate(k, rotary_cos, rotary_sin)
-        scores = torch.matmul(q, k.transpose(-1, -2)) * (self.dim**-0.5) + key_mask
-        probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
-        attended = torch.matmul(probs, v).transpose(1, 2).reshape(1, self.length, self.heads * self.dim)
+        # Host packing guarantees a valid prefix followed by padded keys.
+        attended = self.attention(q, k, v, current_input_length=valid_length, kv_valid_length=valid_length)
+        attended = attended.transpose(1, 2).reshape(1, self.length, self.heads * self.dim)
         hidden_states = hidden_states + self.proj(attended)
         return hidden_states + self.mlp(self.norm2(hidden_states))
 
@@ -83,10 +94,10 @@ class StaticVisionModel(nn.Module):
         self.blocks = nn.ModuleList([StaticVisionBlock(block, num_patches) for block in source.blocks])
         self.merger = StaticVisionMerger(source, num_patches)
 
-    def forward(self, pixel_values, rotary_cos, rotary_sin, key_mask):
+    def forward(self, pixel_values, rotary_cos, rotary_sin, valid_length):
         hidden_states = self.stem(pixel_values)
         for block in self.blocks:
-            hidden_states = block(hidden_states, rotary_cos, rotary_sin, key_mask)
+            hidden_states = block(hidden_states, rotary_cos, rotary_sin, valid_length)
         return self.merger(hidden_states)
 
 
@@ -139,9 +150,18 @@ def vision_grid_frames(pixels, grid, config, capacity):
 
 
 class Glm53VisionEncoder:
-    def __init__(self, stem, blocks, merger, config, capacity, *, device="cpu", dtype=torch.float16):
+    def __init__(self, stem, blocks, merger, config, capacity, *, device="cpu", dtype=torch.float16, abi_version=2):
         self.stem, self.blocks, self.merger = stem, blocks, merger
         self.config, self.capacity, self.device, self.dtype = config, capacity, device, dtype
+        if abi_version not in (1, 2):
+            raise ValueError("unsupported GLM-5.3 vision ABI")
+        self.abi_version = abi_version
+
+    def to(self, device):
+        for component in (self.stem, *self.blocks, self.merger):
+            component.to(device)
+        self.device = torch.device(device)
+        return self
 
     @staticmethod
     def _tensor(value):
@@ -156,8 +176,9 @@ class Glm53VisionEncoder:
                 patches, h, w, self.config, self.capacity, device=self.device, dtype=self.dtype
             )
             hidden = self._tensor(self.stem(values))
+            attention_input = mask if self.abi_version == 1 else torch.tensor([h * w], device=self.device, dtype=torch.int32)
             for block in self.blocks:
-                hidden = self._tensor(block(hidden, cos, sin, mask))
+                hidden = self._tensor(block(hidden, cos, sin, attention_input))
             output = self._tensor(self.merger(hidden))
             features.append(output[0, : h * w // self.config.spatial_merge_size**2])
         return torch.cat(features, dim=0)
@@ -199,7 +220,7 @@ def load_vision_encoder(vision, root, *, device="cuda:0"):
     from ....utils import calculate_file_md5
     from ...hmonnx.hmonnx_model import HMONNXModel
 
-    if vision.get("abi_version") != 1 or vision.get("dtype") != "float16":
+    if vision.get("abi_version") not in (1, 2) or vision.get("dtype") != "float16":
         raise ValueError("unsupported GLM-5.3 vision ABI or dtype")
     config = Glm5NextVisionConfig(**vision["vision_config"])
     expected = ["stem", *[f"block_{i:02d}" for i in range(config.depth)], "merger"]
@@ -213,7 +234,10 @@ def load_vision_encoder(vision, root, *, device="cuda:0"):
         if calculate_file_md5(str(path)) != component["md5"]:
             raise ValueError(f"vision graph checksum mismatch: {path}")
     components = [HMONNXModel(str(path), device_map=[device]) for path in paths]
-    return Glm53VisionEncoder(components[0], components[1:-1], components[-1], config, capacity, device=device)
+    return Glm53VisionEncoder(
+        components[0], components[1:-1], components[-1], config, capacity,
+        device=device, abi_version=vision["abi_version"],
+    )
 
 
 def create_glm53_processor(model_dir, capacity):

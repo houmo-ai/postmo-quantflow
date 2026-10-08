@@ -33,6 +33,10 @@ class XHGlm53Model(TextLLMModel):
     BUILD_HF_COMPATIBLE_FUNC = staticmethod(build_glm53_hf_compatible)
 
     def __init__(self, config):
+        import xhquant.nn as xhnn
+
+        if not hasattr(xhnn, "SparseAttentionSelectKVPool"):
+            raise RuntimeError("GLM-5.3 export requires xhquant.nn.SparseAttentionSelectKVPool; update xhquanttool")
         super().__init__(config)
         hf_config = AutoConfig.from_pretrained(self.hf_model_dir)
         self.cache_spec = Glm53CacheSpec.from_config(hf_config, config.context_max_length, config.max_layers)
@@ -155,6 +159,7 @@ class XHGlm53Model(TextLLMModel):
         meta_info.glm53_cache_spec = asdict(self.cache_spec)
         meta_info.glm53_state_abi_version = 1
         meta_info.glm53_export_mode = "streamed_ffn"
+        meta_info.glm53_dsa_selection = "hmfp_pool"
         meta_info.supported_modalities = ["text"]
         if getattr(self, "_vision_metadata", None) is not None:
             meta_info.glm53_vision = self._vision_metadata

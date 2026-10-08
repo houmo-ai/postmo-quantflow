@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "gdr-inverse-compiler-vp-contract",
+    "patterns": [
+      "benchmark_test/ci_test_transformer5.16.0/test_gdr_block_tri_inverse_vp.py",
+      "xhmodel_merak/xh_llm/models/qwen3_5/_gdr_ops.py"
+    ]
+  }]
+}

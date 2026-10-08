@@ -12,8 +12,8 @@ def validate_glm53_bundle(root, metadata):
     if metadata.get("glm53_state_abi_version") != 1 or metadata.get("glm53_export_mode") != "streamed_ffn":
         raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "Unsupported GLM hybrid state/export ABI")
     vision = metadata.get("glm53_vision")
-    if not isinstance(vision, dict) or vision.get("abi_version") != 1 or vision.get("dtype") != "float16":
-        raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "GLM multimodal artifact requires vision ABI 1")
+    if not isinstance(vision, dict) or vision.get("abi_version") not in (1, 2) or vision.get("dtype") != "float16":
+        raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "GLM multimodal artifact requires vision ABI 1 or 2")
     config = vision["vision_config"]
     names = ["stem", *[f"block_{i:02d}" for i in range(config["depth"])], "merger"]
     components = vision.get("components", [])
@@ -63,7 +63,7 @@ def audit_glm53_hmonnx(root, metadata):
         graph = onnx.load(root / metadata[stage + "_hmonnx"], load_external_data=False)
         initializers = {value.name for value in graph.graph.initializer}
         moe_count = gate_count = w8_count = 0
-        projection_count = convolution_count = sinkhorn_count = 0
+        projection_count = convolution_count = sinkhorn_count = select_count = 0
         for node in graph.graph.node:
             attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
             if node.op_type == "MoeBlock":
@@ -108,6 +108,18 @@ def audit_glm53_hmonnx(root, metadata):
                 ):
                     raise ValueError(f"{stage}: invalid mHC Sinkhorn parameters: {node.name}")
                 sinkhorn_count += 1
+            elif node.op_type == "SparseAttentionSelectKV":
+                expected_k = min(config["index_topk"] // 4, metadata["glm53_cache_spec"]["max_context_length"] // 4)
+                if (
+                    attrs.get("score_mode") != b"hmfp_pool"
+                    or attrs.get("pool_size") != 4
+                    or attrs.get("candidate_topk") != expected_k
+                    or len(node.input) != 5
+                    or len(node.output) != 2
+                    or abs(attrs.get("score_scale", float("inf")) - config["index_head_dim"] ** -0.5) > 1e-7
+                ):
+                    raise ValueError(f"{stage}: invalid pooled DSA SelectKV contract: {node.name}")
+                select_count += 1
         if (moe_count, gate_count) != (expected_moe, expected_gates):
             raise ValueError(
                 f"{stage}: missing MoE/KDA gates: {(moe_count, gate_count)} != {(expected_moe, expected_gates)}"
@@ -119,6 +131,10 @@ def audit_glm53_hmonnx(root, metadata):
             )
         if sinkhorn_count != expected_sinkhorn:
             raise ValueError(f"{stage}: missing mHC Sinkhorn operators: {sinkhorn_count} != {expected_sinkhorn}")
+        if (select_count or metadata.get("glm53_dsa_selection") == "hmfp_pool") and select_count != kinds.count(
+            "deepseek_sparse_attention"
+        ):
+            raise ValueError(f"{stage}: missing pooled DSA SelectKV operators: {select_count}")
         report[stage] = {
             "w4g64_moe_blocks": moe_count,
             "w8_linears": w8_count,
@@ -127,6 +143,8 @@ def audit_glm53_hmonnx(root, metadata):
             "w8_convolutions": convolution_count,
             "mhc_sinkhorn_blocks": sinkhorn_count,
         }
+        if select_count:
+            report[stage]["sparse_kv_select_blocks"] = select_count
     vision = metadata["glm53_vision"]
     for component in vision["components"]:
         graph = onnx.load(root / vision["directory"] / component["hmonnx"], load_external_data=False)
