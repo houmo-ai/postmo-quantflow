@@ -12,6 +12,7 @@ import gc
 import json
 import os
 import re
+import shutil
 import time
 from collections.abc import Collection
 from dataclasses import asdict, dataclass, field
@@ -225,6 +226,16 @@ def hmonnx_generate(
         )
     else:
         tokenizer, model_inputs = _build_text_inputs(hmonnx_model, prompt, think, runtime_device)
+
+    if golden:
+        _dump_golden_input(
+            meta_file=resolved_meta,
+            prompt=prompt,
+            image_path=str(image_path) if image_path is not None else None,
+            image_used=use_multimodal,
+            tokenizer=tokenizer,
+            model_inputs=model_inputs,
+        )
 
     streamer = TextStreamer(tokenizer) if stream_output else None
     hmonnx_model.to(runtime_device)
@@ -470,6 +481,69 @@ def _build_multimodal_inputs(hmonnx_model: Any, prompt: str, image_path: str, th
         },
     ]
     return tokenizer, processor.apply_chat_template(messages, enable_thinking=think).to(device)
+
+
+def _dump_golden_input(
+    *,
+    meta_file: str | Path,
+    prompt: str,
+    image_path: str | None,
+    image_used: bool,
+    tokenizer: Any,
+    model_inputs: Any,
+) -> Path:
+    """Save request-level preprocessing artifacts beside HMONNX golden directories."""
+    meta_path = Path(meta_file)
+    output_root = meta_path if meta_path.is_dir() else meta_path.parent
+    golden_input_dir = output_root / "golden_input"
+    if golden_input_dir.exists():
+        shutil.rmtree(golden_input_dir)
+    golden_input_dir.mkdir(parents=True)
+
+    (golden_input_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+
+    image_debug: dict[str, Any] | None = None
+    if image_path is not None:
+        path = Path(image_path).expanduser().resolve()
+        image_debug = {"path": str(path), "exists": path.is_file(), "used": image_used}
+        if path.is_file():
+            from PIL import Image
+
+            with Image.open(path) as image:
+                image_debug.update({"format": image.format, "mode": image.mode, "size": list(image.size)})
+            image_copy = golden_input_dir / f"input_image{path.suffix.lower()}"
+            shutil.copy2(path, image_copy)
+            image_debug["copy"] = image_copy.name
+
+    input_ids = model_inputs["input_ids"] if isinstance(model_inputs, dict) else model_inputs.input_ids
+    token_ids_tensor = input_ids.detach().cpu()
+    token_ids = token_ids_tensor.tolist()
+    rendered_text = tokenizer.decode(
+        token_ids[0],
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )
+    (golden_input_dir / "tokenizer_output.txt").write_text(rendered_text, encoding="utf-8")
+
+    import numpy as np
+
+    np.save(golden_input_dir / "token_ids.npy", token_ids_tensor.numpy())
+    (golden_input_dir / "input_meta.json").write_text(
+        json.dumps(
+            {
+                "prompt_file": "prompt.txt",
+                "image": image_debug,
+                "tokenizer_output_file": "tokenizer_output.txt",
+                "token_ids_file": "token_ids.npy",
+                "token_ids_shape": list(token_ids_tensor.shape),
+                "token_ids_dtype": str(token_ids_tensor.numpy().dtype),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return golden_input_dir
 
 
 def _tokens_per_second(output_tokens: int, latency_s: float) -> float:

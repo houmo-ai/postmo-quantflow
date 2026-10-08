@@ -157,7 +157,29 @@ HMONNX 路径。
 
 ## Golden
 
-golden 生成与 quant/export 分离，由 workflow 的 `dump_golden(export_result, device)` 接口完成。需要同时导出并生成 golden 时，在 workflow 脚本中加入 `--dump-golden`：
+使用真实音频生成可复现 golden 时，在 `hmonnx_demo.py` 中加入 `--golden`：
+
+```bash
+CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
+python examples_merak/asr/qwen3_asr/hmonnx_demo.py \
+  --config work_dirs/qwen3_asr_export/export_meta_info.json \
+  --audio <audio_file> \
+  --golden
+```
+
+组件图的实际输入、输出和 activation 分别写入发布根目录下的
+`encode/step_*`、`prefill/step_*`、`decode/step_*`（旧布局则写入 metadata 中模型所在的组件目录）。
+本次请求的输入来源写入同级 `golden_input/`：原始音频复制为 `input_audio.<原扩展名>`，并保存
+`prompt.txt`、保留 special token 的 `tokenizer_output.txt`、padding 前的二维 `token_ids.npy` 和
+`input_meta.json`。每次运行会先重建 `golden_input/`；多 chunk 推理时 tokenizer 文件对应最后一次
+prefill，`input_meta.json` 记录实际 prefill 次数，各组件的 `step_N` 对应第 N 次图执行。Host 侧 embedding 是 prefill 图输入，由
+`prefill/step_*` 捕获，不在 `golden_input/` 重复保存。
+
+为了至少产生一次 decode golden，`--max-new-tokens` 必须大于 0。TCIM 当前不支持 HMONNX node-level golden，因此
+`XHMODEL_INFERENCE_BACKEND=tcim` 与 `--golden` 同时使用会在推理前明确失败。
+
+workflow 的 `--dump-golden` 仍用于导出阶段的随机输入 smoke baseline，与上述真实音频 demo golden
+用途不同：
 
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \

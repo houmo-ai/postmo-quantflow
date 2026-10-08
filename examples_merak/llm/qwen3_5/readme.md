@@ -316,6 +316,44 @@ CUDA_VISIBLE_DEVICES=0 python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_gener
   --use-v2
 ```
 
+需要从同一次请求生成 HMONNX golden 时，在上述入口增加 `--golden`。decode golden 至少要让
+decode 图实际执行一次，因此 `--max-new-tokens` 不得小于 2：
+
+```bash
+ENABLE_HMINFERENCE_V2=1 \
+python examples_merak/llm/qwen3_5/qwen3_5_xh_hmonnx_generate.py \
+  --config <export_dir>/golden_meta_info.json \
+  --prompt "用中文介绍一下北京。" \
+  --golden \
+  --no-sample \
+  --max-new-tokens 2
+```
+
+`--golden` 除了把 HMONNX 图输入、输出及导出图暴露的 activation 写入
+`prefill/step_*`、`decode/step_*` 和本次命中的 `visual_m*/step_*`，还会把本次请求在
+prefill 前的原始输入保存到同级 `golden_input/`：
+
+```text
+<export_dir>/
+├── golden_input/
+│   ├── prompt.txt
+│   ├── input_image.<原扩展名>   # 本次实际提供图片时
+│   ├── tokenizer_output.txt
+│   ├── token_ids.npy
+│   └── input_meta.json
+├── prefill/
+│   └── step_0/
+└── decode/
+    └── step_0/
+```
+
+其中 `tokenizer_output.txt` 保留 chat template 的 special tokens 和原始换行；
+`token_ids.npy` 是 padding 到静态 prefill 长度之前的二维 token IDs。Host 侧 embedding 结果
+仍属于 HMONNX prefill 图输入，按当前图 ABI 保存为 `prefill/step_*/input_1.npy`；embedding
+权重由 metadata 中的 `quant_embedding`/`token_embedding_file` 指向，不复制到
+`golden_input/`。`golden_input/` 只记录整次请求和 prefill 前处理，不创建 decode 子目录；
+每次运行 `--golden` 会清理并覆盖上一轮内容。不传 `--golden` 时不会创建或修改该目录。
+
 首版 TCIM 适配用于 Qwen3.5-9B 普通 prefill/decode 与 visual gears，不包含 MTP、DFlash 或
 其他 speculative 路径。先用已编译 HMM 生成独立 metadata：
 

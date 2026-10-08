@@ -8,7 +8,9 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import pytest
+import torch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -239,6 +241,61 @@ def test_build_text_inputs_disables_token_type_ids(monkeypatch):
     assert calls["device"] == "cuda:6"
 
 
+def test_preprocess_debug_saves_raw_input_rendered_text_and_token_ids(monkeypatch, tmp_path: Path):
+    runtime = _load_runtime_module(monkeypatch)
+    image_path = tmp_path / "input.png"
+    meta_path = tmp_path / "golden_meta_info.json"
+    meta_path.write_text("{}", encoding="utf-8")
+    from PIL import Image
+
+    Image.new("RGB", (3, 2)).save(image_path)
+
+    class Tokenizer:
+        def decode(self, token_ids, **kwargs):
+            assert token_ids == [11, 12, 13]
+            assert kwargs == {
+                "skip_special_tokens": False,
+                "clean_up_tokenization_spaces": False,
+            }
+            return "<|im_start|>user\nhello<|im_end|>"
+
+    model_inputs = types.SimpleNamespace(input_ids=torch.tensor([[11, 12, 13]]))
+    golden_input_dir = runtime._dump_golden_input(
+        meta_file=meta_path,
+        prompt="hello",
+        image_path=str(image_path),
+        image_used=True,
+        tokenizer=Tokenizer(),
+        model_inputs=model_inputs,
+    )
+
+    assert golden_input_dir == tmp_path / "golden_input"
+    assert (golden_input_dir / "prompt.txt").read_text(encoding="utf-8") == "hello"
+    assert (golden_input_dir / "tokenizer_output.txt").read_text(encoding="utf-8") == (
+        "<|im_start|>user\nhello<|im_end|>"
+    )
+    assert torch.equal(
+        torch.from_numpy(np.load(golden_input_dir / "token_ids.npy")), torch.tensor([[11, 12, 13]])
+    )
+    assert (golden_input_dir / "input_image.png").read_bytes() == image_path.read_bytes()
+    debug_meta = json.loads((golden_input_dir / "input_meta.json").read_text(encoding="utf-8"))
+    assert debug_meta["image"]["used"] is True
+    assert debug_meta["image"]["size"] == [3, 2]
+
+    next_golden_input_dir = runtime._dump_golden_input(
+        meta_file=meta_path,
+        prompt="next",
+        image_path=None,
+        image_used=False,
+        tokenizer=Tokenizer(),
+        model_inputs=model_inputs,
+    )
+    assert next_golden_input_dir == tmp_path / "golden_input"
+    assert (next_golden_input_dir / "prompt.txt").read_text(encoding="utf-8") == "next"
+    assert not (next_golden_input_dir / "input_image.png").exists()
+    assert not (tmp_path / "golden_input/decode").exists()
+
+
 def test_hmonnx_generate_keeps_path_like_prompts_literal_and_preserves_supported_golden_limits(
     monkeypatch, tmp_path: Path
 ):
@@ -266,6 +323,33 @@ def test_hmonnx_generate_keeps_path_like_prompts_literal_and_preserves_supported
 
     assert calls["prompts"] == [str(prompt), str(prompt)]
     assert calls["max_new_tokens"] == [7, 1]
+
+
+def test_hmonnx_generate_dumps_request_input_only_with_golden(monkeypatch, tmp_path: Path):
+    runtime = _load_runtime_module(monkeypatch)
+    _install_fake_generation_dependencies(monkeypatch)
+    meta_file = tmp_path / "golden_meta_info.json"
+    meta_file.write_text("{}", encoding="utf-8")
+
+    runtime.hmonnx_generate(
+        meta_file=meta_file,
+        prompt="plain",
+        device="cpu",
+        max_new_tokens=2,
+        stream_output=False,
+    )
+    assert not (tmp_path / "golden_input").exists()
+
+    runtime.hmonnx_generate(
+        meta_file=meta_file,
+        prompt="golden",
+        device="cpu",
+        max_new_tokens=2,
+        golden=True,
+        stream_output=False,
+    )
+    assert (tmp_path / "golden_input/prompt.txt").read_text(encoding="utf-8") == "golden"
+    assert not (tmp_path / "golden_input/decode").exists()
 
 
 def test_hmonnx_generate_rejects_decode_golden_without_a_decode_step(monkeypatch, tmp_path: Path):

@@ -17,6 +17,8 @@ ASR_DEMOS = (
     REPO_ROOT / "examples_merak/asr/qwen3_asr/hmonnx_demo.py",
     REPO_ROOT / "examples_merak/asr/qwen3_asr/hmonnx_demo_chunk_prefix.py",
 )
+ASR_GOLDEN_DEMO = ASR_DEMOS[0]
+ASR_GOLDEN_UTILS = REPO_ROOT / "examples_merak/asr/qwen3_asr/golden_utils.py"
 
 
 def _load_source(path: Path, module_name: str):
@@ -71,6 +73,82 @@ def test_qwen3_asr_demo_resolves_config_cache_and_embedding_aliases(tmp_path, de
     assert args.config == str(config)
     assert args.work_dir is None
     assert args.cache_len is None
+    if demo_path == ASR_GOLDEN_DEMO:
+        assert args.golden is False
+        assert module.parse_args(["--config", str(config), "--audio", "audio.wav", "--golden"]).golden is True
+    else:
+        assert not hasattr(args, "golden")
+
+
+def test_qwen3_asr_golden_input_overwrites_request_snapshot(tmp_path):
+    module = _load_source(ASR_GOLDEN_UTILS, "_qwen3_asr_golden_utils")
+    audio = tmp_path / "request.wav"
+    audio.write_bytes(b"first-audio")
+
+    recorder = module.GoldenInputRecorder(tmp_path, audio, 16_000, 8_000)
+    recorder.record_tokenizer(prompt="raw request", tokenizer_output="<special>request", token_ids=[[1, 2]])
+    stale = recorder.output_dir / "stale.txt"
+    stale.write_text("stale", encoding="utf-8")
+
+    audio.write_bytes(b"second-audio")
+    recorder = module.GoldenInputRecorder(tmp_path, audio, 16_000, 16_000)
+    recorder.record_tokenizer(prompt="next", tokenizer_output="<special>next", token_ids=[[3, 4, 5]])
+
+    assert not stale.exists()
+    assert (recorder.output_dir / "input_audio.wav").read_bytes() == b"second-audio"
+    assert (recorder.output_dir / "prompt.txt").read_text(encoding="utf-8") == "next"
+    assert (recorder.output_dir / "tokenizer_output.txt").read_text(encoding="utf-8") == "<special>next"
+    np.testing.assert_array_equal(np.load(recorder.output_dir / "token_ids.npy"), [[3, 4, 5]])
+    meta = json.loads((recorder.output_dir / "input_meta.json").read_text(encoding="utf-8"))
+    assert meta["sample_rate"] == 16_000
+    assert meta["sample_count"] == 16_000
+    assert meta["prefill_count"] == 1
+    assert meta["token_snapshot"] == "last_prefill"
+
+
+def test_qwen3_asr_golden_uses_component_root_and_rejects_unsupported_backend(tmp_path):
+    module = _load_source(ASR_GOLDEN_UTILS, "_qwen3_asr_golden_session")
+
+    class Session:
+        def __init__(self, reject=False):
+            self.reject = reject
+            self.golden_dir = None
+            self.step = 7
+            self._save_golden = False
+            self.initialized = False
+
+        @property
+        def save_golden(self):
+            return self._save_golden
+
+        @save_golden.setter
+        def save_golden(self, value):
+            if value and self.reject:
+                raise NotImplementedError("save_golden is not supported")
+            self._save_golden = value
+
+        def reset_step(self):
+            self.step = 0
+
+        def initialize(self):
+            self.initialized = True
+
+    model = tmp_path / "prefill/hmonnx/model.onnx"
+    stale_step = tmp_path / "prefill/step_9"
+    stale_step.mkdir(parents=True)
+    session = Session()
+    module.enable_component_golden(session, model)
+    assert session.golden_dir == str(tmp_path / "prefill")
+    assert session.save_golden is True
+    assert session.step == 0
+    assert session.initialized is True
+    assert not stale_step.exists()
+
+    protected_step = tmp_path / "prefill/step_8"
+    protected_step.mkdir()
+    with pytest.raises(NotImplementedError, match="not supported"):
+        module.enable_component_golden(Session(reject=True), model)
+    assert protected_step.is_dir()
 
 
 def test_backend_factory_is_lazy_and_defaults_to_hmonnx(monkeypatch):

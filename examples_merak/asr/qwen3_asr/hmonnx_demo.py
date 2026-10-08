@@ -3,6 +3,11 @@ import json
 import re
 from pathlib import Path
 
+try:
+    from examples_merak.asr.qwen3_asr.golden_utils import GoldenInputRecorder, enable_component_golden
+except ModuleNotFoundError:
+    from golden_utils import GoldenInputRecorder, enable_component_golden
+
 
 SAMPLE_RATE = 16000
 
@@ -47,6 +52,7 @@ def _load_artifacts(config_or_dir: Path) -> dict:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     return {
         "meta": meta,
+        "work_dir": work_dir,
         "encoder": work_dir / meta["encoder"]["hmonnx_file"],
         "prefill": work_dir / meta["prefill_onnx_file"],
         "decode": work_dir / meta["decode_onnx_file"],
@@ -64,17 +70,21 @@ class HMONNXQwen3ASRChunkRunner:
         max_audio_length: int | None,
         cache_len: int | None,
         max_new_tokens: int,
+        golden: bool = False,
     ):
         import torch
         import torch.nn as nn
         from qwen_asr.core.transformers_backend import Qwen3ASRProcessor
         from transformers import AutoConfig, AutoTokenizer
-        from xhmodel_merak.exec_backends import CacheTensor, HMONNXInference as InferenceEngine
+        from xhmodel_merak.exec_backends import CacheTensor, HMONNXGoldenInference, HMONNXInference
 
         self.torch = torch
         self.cache_tensor_cls = CacheTensor
         self.device = torch.device(device if device else ("cuda:0" if torch.cuda.is_available() else "cpu"))
         self.max_new_tokens = int(max_new_tokens)
+        self.golden = bool(golden)
+        self.golden_input_recorder = None
+        inference_engine = HMONNXGoldenInference if self.golden else HMONNXInference
 
         artifacts = _load_artifacts(work_dir)
         meta = artifacts["meta"]
@@ -91,12 +101,17 @@ class HMONNXQwen3ASRChunkRunner:
             if not artifacts[key].exists():
                 raise FileNotFoundError(artifacts[key])
 
-        self.encoder_sess = InferenceEngine(str(artifacts["encoder"]))
+        self.encoder_sess = inference_engine(str(artifacts["encoder"]))
         self.encoder_sess.to(str(self.device))
-        self.prefill_sess = InferenceEngine(str(artifacts["prefill"]))
+        self.prefill_sess = inference_engine(str(artifacts["prefill"]))
         self.prefill_sess.to(str(self.device))
-        self.decode_sess = InferenceEngine(str(artifacts["decode"]))
+        self.decode_sess = inference_engine(str(artifacts["decode"]))
         self.decode_sess.to(str(self.device))
+        if self.golden:
+            enable_component_golden(self.encoder_sess, artifacts["encoder"])
+            enable_component_golden(self.prefill_sess, artifacts["prefill"])
+            enable_component_golden(self.decode_sess, artifacts["decode"])
+        self.work_dir = artifacts["work_dir"]
 
         cfg_dir = str(artifacts["config"])
         self.processor = Qwen3ASRProcessor.from_pretrained(cfg_dir, fix_mistral_regex=True)
@@ -181,6 +196,13 @@ class HMONNXQwen3ASRChunkRunner:
     def transcribe_chunk(self, audio_array) -> str:
         torch = self.torch
         text_input_ids, audio_embeds = self._encode_audio(audio_array)
+        if self.golden_input_recorder is not None:
+            self.golden_input_recorder.record_tokenizer(
+                prompt='[{"role":"system","content":"You are a helpful assistant."},'
+                '{"role":"user","content":[{"type":"audio","audio":"input_audio"}]}]',
+                tokenizer_output=self.prompt,
+                token_ids=text_input_ids,
+            )
         final_inputs_embeds = self._build_inputs_embeds(text_input_ids, audio_embeds)
 
         length = min(final_inputs_embeds.shape[1], self.max_prefill)
@@ -241,14 +263,16 @@ def parse_args(argv=None):
     parser.add_argument("--max-audio-length", "--max_audio_length", dest="max_audio_length", type=int, default=None)
     parser.add_argument("--cache-len", "--cache_len", dest="cache_len", type=int)
     parser.add_argument("--max-new-tokens", "--max_new_tokens", dest="max_new_tokens", type=int, default=128)
+    parser.add_argument("--golden", action="store_true", help="Dump HMONNX graph golden and golden_input")
     return parser.parse_args(argv)
 
 
 def main(args=None) -> None:
+    args = parse_args() if args is None else args
+
     import librosa
     import numpy as np
 
-    args = parse_args() if args is None else args
     audio_path = Path(args.audio)
     if not audio_path.exists():
         raise FileNotFoundError(audio_path)
@@ -262,8 +286,13 @@ def main(args=None) -> None:
         max_audio_length=args.max_audio_length,
         cache_len=args.cache_len,
         max_new_tokens=args.max_new_tokens,
+        golden=args.golden,
     )
     audio, sr = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
+    if args.golden:
+        runner.golden_input_recorder = GoldenInputRecorder(
+            runner.work_dir, audio_path, sr, len(audio)
+        )
     chunk_seconds = runner.max_audio_length / 100.0
     chunk_size = int(sr * chunk_seconds)
     n_chunks = max(1, (len(audio) + chunk_size - 1) // chunk_size)
