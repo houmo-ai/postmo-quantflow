@@ -209,6 +209,9 @@ internal:
     summary: Qwen3 TTS 12Hz 0.6B Base A20 Merak workflow 卡片。
     demo:
       kind: metadata_only
+      experiment_commits:
+        xh2modelzoo: f15de10d7197bb31c6834136d5b321058af0e385
+        xhquanttool: f68937922e682ff5a101401569911c46c3e3d22c
     limitations:
     - 导出使用 FP16；comparisons 的 float 列为 CV3-EVAL HF BF16 基线。A20 性能尚未测试；W8A8 精度为 CV3-EVAL zero-shot zh 的 500 条结果，部分业务 IO 需要人工确认。
     evidence:
