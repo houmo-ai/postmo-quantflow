@@ -1,6 +1,6 @@
 # Attention 的图表达
 
-适用范围：当前 Merak 的 Qwen3.5/Next hybrid attention、Gemma4 视觉和 Kokoro ALBERT 路径。
+适用范围：当前 Merak 的 Qwen3.5/Next hybrid attention、GLM-5.3、Gemma4 视觉和 Kokoro ALBERT 路径。
 这些是有具体使用方的契约，不是所有 attention 或所有芯片的统一限制。
 
 ## FlashAttention：布局与五路精度
@@ -50,3 +50,53 @@ Kokoro 的 Host mask 使用 FP16 可表示的有限值 `0 / -65504`，
 这些专门断言尚不在当前 CI，不能据此标为 CI 已覆盖。
 移除改写前应在目标 SDK 上同时比较 eager 数值、导出节点及实际执行结果；
 仅看到普通 ONNX 可运行不足以证明目标 lowering 仍正确。
+
+## GLM-5.3：KDA scan 与 C4 SelectKV
+
+GLM 的 prefill 默认使用单输出 `GDRChunkScan`，decode 默认使用单输出
+`GDRRecurrentScan`。两者接受每个 key channel 的 decay，Q/K 由 GLM 的
+`rsqrt(sum(x*x)+1e-6)` 归一化，不能再套一次 Ling 的 `F.normalize`。
+ChunkScan 的输入 `initial_state` 是原始 CacheTensor，算子就地写回最终状态；
+Host 在调用前备份该状态，失败时回滚，成功后用于后续 prefill/decode。
+ChunkScan 的 `matmul_input_bit=16` 配置内部 TE MatMul 为 A16/W16；
+默认 8 保留其他调用者的旧语义。`GDRBlockTriInverse` 仍按 VP 实现，不增加 bit 属性。
+
+`SparseAttentionSelectKV` 沿用 VP 的 Mul → feature ReduceSum → ReLU LUT →
+head Mul/ReduceSum → scale → stable TopK → Gather，仅返回 selected latent。
+默认 `pool_size=1` 保持旧 decode 契约；GLM 使用 `pool_size=4`：选中
+pool p 后，依次取原始 latent 的 `4p、4p+1、4p+2、4p+3` 行。
+压缩 index key 只参与选择，attention 仍消费原始 latent。
+
+| 输入 | GLM 的布局和单位 |
+| --- | --- |
+| query | `[1,H,Tq,Dindex]` |
+| index_key_cache | `[1,1,Npool,Dindex]`，完整 pool 的压缩 index key |
+| payload_cache | `[1,1,Ntoken,Dlatent]`，原始 token latent |
+| valid_length | int32 scalar，已写入的完整 pool 数 |
+| head_weights | `[1,H,Tq,1]`，可选 |
+| query_valid_length | int32 `[1,Tq]`，每个 query 可见的完整 pool 数 |
+| selected_kv（唯一输出） | `[1,Tq,Kpool*4,Dlatent]` |
+
+第六个输入限制每个 query 的候选前缀。无效候选在 TopK 前设为 `-inf`，
+stable TopK 使有效候选排在前面；不足 Kpool 时，剩余输出槽位置零。
+因此第 t 个 query 的有效 latent 数为 `min(query_valid_length[t],Kpool)*4`，
+Host 根据该有效前缀和最多三个尾部 token 的有效性，预先生成
+`dsa_attention_mask`，形状为 `[1,Tq,1,Kpool*4+3]`，有效位置为 `0`，
+无效位置为 FP16 有限值 `-65504`，广播到各个 attention head。
+图中使用 `xhquant.nn.MaskedAdd(saturate=True)` 加到 attention scores 后再做 Softmax，
+不在图中比较 slot index 或乘分数清零，不需要 SelectKV 返回第二个输出。
+未形成完整 pool 的尾部 token 仍单独 gather；右侧 padding query 的有效 pool 数为零、
+mask 全为 `-65504`，最终 attention 输出按 query validity 清零。
+
+DSA 的 latent/pool KV cache 从图入口、`KVcache(axis=2)` 写回到 SelectKV
+和图出口统一保持 `[1,1,N,D]`，不对整个 cache 做 squeeze、unsqueeze 或 reshape。
+尾部直接在四维 latent cache 的 axis 2 上 Gather，只有选中的行重排为 query 槽位。
+KDA recurrent state 保持 `[1,H,Dk,Dv]`；卷积状态和四个 token 的压缩边界状态
+属于辅助状态，沿用各自的三维布局。
+
+Host control 由旧的 `[1,Tq,Npool]` 浮点 `pool_validity` 改为 `[1,Tq]`
+int32 `pool_valid_length`；ABI 3 将 `tail_validity` 替换为 Host 准备的四维
+`dsa_attention_mask`。旧开发图必须重新导出，加载端拒绝旧的 state ABI。
+原 `hmfp_pool` 双输出分支已移除。部署前同时更新 ModelZoo 和 xhquanttool。
+数值、原始 token 展开和续接验证见
+[当前 GLM 静态图测试](../../../benchmark_test/ci_test_transformer5.16.0/test_glm53_static.py)。

@@ -17,10 +17,53 @@ CONTROL_NAMES = (
     "pool_new_count",
     "pool_write_start",
     "query_validity",
-    "pool_validity",
+    "pool_valid_length",
     "tail_indices",
-    "tail_validity",
+    "dsa_attention_mask",
 )
+
+
+def validate_state_abi(version):
+    if version != 3:
+        raise ValueError(f"Unsupported GLM-5.3 state ABI {version!r}; expected 3. Re-export the older graph.")
+
+
+def validate_state_graph(graph, spec, stage):
+    """Check the DSA control/selection ABI without materializing weights."""
+    import onnx
+
+    expected = spec.layer_types.count(DSA)
+    if not expected:
+        return
+    inputs = {value.name: value for value in graph.input}
+    mask = inputs.get("dsa_attention_mask")
+    if mask is None:
+        raise ValueError(f"{stage}: GLM state ABI 3 requires dsa_attention_mask; re-export the older graph")
+    query_length = graph.input[0].type.tensor_type.shape.dim[1].dim_value
+    shape = [dim.dim_value for dim in mask.type.tensor_type.shape.dim]
+    if shape != [1, query_length, 1, spec.selected_pools * 4 + 3]:
+        raise ValueError(f"{stage}: invalid GLM state ABI 3 attention mask shape: {shape}")
+    lengths = inputs.get("pool_valid_length")
+    if lengths is None or lengths.type.tensor_type.elem_type != onnx.TensorProto.INT32:
+        raise ValueError(f"{stage}: GLM state ABI 3 requires int32 pool_valid_length")
+    if [dim.dim_value for dim in lengths.type.tensor_type.shape.dim] != [1, query_length]:
+        raise ValueError(f"{stage}: invalid GLM state ABI 3 pool_valid_length shape")
+    selections = [node for node in graph.node if node.op_type == "SparseAttentionSelectKV"]
+    if len(selections) != expected:
+        raise ValueError(
+            f"{stage}: GLM state ABI 3 requires VP SelectKV for all {expected} DSA layers; "
+            "re-export legacy TopK selection graphs"
+        )
+    for node in selections:
+        attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
+        if (
+            attrs.get("score_mode") != b"vp"
+            or attrs.get("pool_size") != 4
+            or len(node.input) != 6
+            or len(node.output) != 1
+            or node.input[5] != "pool_valid_length"
+        ):
+            raise ValueError(f"{stage}: invalid GLM state ABI 3 VP SelectKV ports; re-export the older graph")
 
 
 @dataclass(frozen=True)
@@ -115,19 +158,21 @@ class Glm53CacheSpec:
             if kind == DSA:
                 state[-1].fill_(-32768.0)
                 state[0], state[1] = CacheTensor(state[0]), CacheTensor(state[1])
+            else:
+                state[1] = CacheTensor(state[1])
             result.extend(state)
         return tuple(result)
 
     def stage_caches(self, caches):
-        """LLMCache writes in place; stage its two persistent stores before a call."""
+        """Stage the stores mutated by LLMCache and GDRChunkScan before a call."""
         from xhquant.core import CacheTensor
 
         staged = list(caches)
         cursor = 0
         for kind in self.layer_types:
-            if kind == DSA:
-                for i in (cursor, cursor + 1):
-                    staged[i] = CacheTensor(caches[i].data.clone())
+            indices = (cursor, cursor + 1) if kind == DSA else (cursor + 1,)
+            for i in indices:
+                staged[i] = CacheTensor(caches[i].data.clone())
             cursor += len(self.cache_suffixes(kind))
         return tuple(staged)
 
@@ -164,11 +209,17 @@ def build_transition(spec, past_length, current_length, input_length, *, device=
     real = query_slots < current_length
     visible = past_length + query_slots + 1
     complete = visible // r
-    pool_valid = (torch.arange(spec.pool_capacity, device=device)[None, :] < complete[:, None]) & real[:, None]
+    pool_valid = torch.where(real, complete, 0).unsqueeze(0).to(torch.int32)
     tail_slots = torch.arange(r - 1, device=device)
     tail_valid = (tail_slots[None, :] < (visible % r)[:, None]) & real[:, None]
     tail = complete[:, None] * r + tail_slots[None, :]
     tail = torch.where(tail_valid, tail, 0).to(torch.int32)
+    selected_slots = torch.arange(spec.selected_pools * r, device=device)
+    selected_valid = selected_slots[None, :] < (pool_valid[0].clamp(max=spec.selected_pools) * r)[:, None]
+    attention_valid = torch.cat((selected_valid, tail_valid), dim=-1)
+    # SelectKV puts the valid selections first, so Host can prepare this mask
+    # without reading the selected indices or receiving another operator output.
+    attention_mask = torch.zeros_like(attention_valid, dtype=dtype).masked_fill(~attention_valid, -65504.0)
 
     def scalar(value):
         return torch.tensor([value], device=device, dtype=torch.int32)
@@ -181,8 +232,8 @@ def build_transition(spec, past_length, current_length, input_length, *, device=
         scalar((past_length % r + current_length) // r),
         scalar(past_length // r),
         real[None].to(dtype),
-        pool_valid[None].to(dtype),
+        pool_valid,
         tail[None],
-        tail_valid[None].to(dtype),
+        attention_mask[None, :, None, :],
     )
     return dict(zip(CONTROL_NAMES, values, strict=True))

@@ -50,14 +50,13 @@ class Glm53CacheMixin(KVCacheMixin):
                 raise ValueError("GLM graph returned an incompatible cache shape")
         # No state is replaced until every output has passed validation.
         committed = list(values[1:])
-        if self.inplace_step_staging:
-            cursor = 0
-            for kind in self.spec.layer_types:
-                if kind == DSA:
-                    for index in (cursor, cursor + 1):
-                        if not isinstance(committed[index], CacheTensor):
-                            committed[index] = CacheTensor(committed[index])
-                cursor += len(self.spec.cache_suffixes(kind))
+        cursor = 0
+        for kind in self.spec.layer_types:
+            indices = (cursor, cursor + 1) if kind == DSA else (cursor + 1,)
+            for index in indices:
+                if not isinstance(committed[index], CacheTensor):
+                    committed[index] = CacheTensor(committed[index])
+            cursor += len(self.spec.cache_suffixes(kind))
         self.caches = tuple(committed)
         self._staged_rows = None
         return values[0]
@@ -80,6 +79,9 @@ class Glm53CacheMixin(KVCacheMixin):
                 staged_rows.append((latent, past_length, latent.narrow(2, past_length, current_length).clone()))
                 if pool_count:
                     staged_rows.append((pool, pool_start, pool.narrow(2, pool_start, pool_count).clone()))
+            else:
+                state = self.caches[cursor + 1].data
+                staged_rows.append((state, 0, state.clone()))
             cursor += len(self.spec.cache_suffixes(kind))
         self._staged_rows = staged_rows
         return self.caches

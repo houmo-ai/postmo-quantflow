@@ -13,7 +13,7 @@ from xhquant import nn as xhnn
 
 from ..deepseek_v4.moe import ExactClampedSwiGLURoutedExperts
 from ..deepseek_v4.norm import build_xh_rms_norm, rms_norm_from_hf
-from ..deepseek_v4.static_cache import FixedCapacityCacheWriter, LatentCacheGather
+from ..deepseek_v4.static_cache import FixedCapacityCacheWriter
 from ..ling_3_flash._kda_rule import chunk_kda
 from .contract import LINEAR
 
@@ -76,6 +76,15 @@ class StaticKDA(nn.Module):
         from ..qwen3_5._gdr_ops import GDRBlockTriInverse
 
         self.tri_inverse = GDRBlockTriInverse(chunk_size, 8)
+        self.chunk_scan = xhnn.GDRChunkScan(
+            max(1, input_length // chunk_size),
+            self.heads,
+            self.dim,
+            self.dim,
+            chunk_size,
+            matmul_input_bit=16,
+        )
+        self.recurrent_scan = xhnn.GDRRecurrentScan()
         self.register_buffer(
             "eye",
             torch.eye(8)
@@ -111,12 +120,15 @@ class StaticKDA(nn.Module):
             else -rate * F.softplus(raw)
         ) * state_mask
         beta = torch.sigmoid(self.b_proj(hidden)).float() * mask
-        # Accumulate in FP32, then commit using the explicit cache input dtype.
         if self.length == 1:
-            state = recurrent_state.float() * log_decay[:, 0].exp().unsqueeze(-1)
-            memory = (state * k[:, 0].unsqueeze(-1)).sum(-2)
-            delta = (v[:, 0] - memory) * beta[:, 0].unsqueeze(-1)
-            state = state + k[:, 0].unsqueeze(-1) * delta.unsqueeze(-2)
+            state = self.recurrent_scan(
+                q.transpose(1, 2),
+                k.transpose(1, 2),
+                v.transpose(1, 2),
+                log_decay.transpose(1, 2),
+                beta.transpose(1, 2),
+                recurrent_state.float(),
+            )
             core = ((state * q[:, 0].unsqueeze(-1)).sum(-2) * self.dim**-0.5).unsqueeze(1)
         else:
             core, state = self._chunk(q, k, v, log_decay, beta, recurrent_state)
@@ -130,17 +142,17 @@ class StaticKDA(nn.Module):
         # KDA's factorization accepts already-normalized Q/K via an explicit
         # shared helper option, keeping normalization owned by this model.
         return chunk_kda(
-            q,
-            k,
-            v,
-            g,
-            beta,
+            q.to(state.dtype),
+            k.to(state.dtype),
+            v.to(state.dtype),
+            g.to(state.dtype),
+            beta.to(state.dtype),
             state,
             chunk_size=self.chunk_size,
             scale=self.dim**-0.5,
             block_tri_inverse_op=self.tri_inverse,
             eye_block_batched=self.eye,
-            chunk_scan_op=None,
+            chunk_scan_op=self.chunk_scan,
             batch_size=1,
             sequence_length=self.length,
             num_heads=self.heads,
@@ -202,13 +214,15 @@ class StaticDSA(nn.Module):
         self.v_projection = xhnn.MatMul()
         self.indexer = source.indexer
         self.pool = StaticKPool(source.indexer, input_length)
-        self.writer = FixedCapacityCacheWriter()
-        self.gather = LatentCacheGather(feature_dim=spec.latent_dim)
-        self.select_kv = xhnn.SparseAttentionSelectKVPool(
+        self.writer = FixedCapacityCacheWriter(keep_cache_dims=True)
+        self.gather = xhnn.Gather(axis=2)
+        self.select_kv = xhnn.SparseAttentionSelectKV(
             spec.selected_pools,
             source.indexer.softmax_scale,
             spec.pool_size,
         )
+        self.mask_add = xhnn.MaskedAdd(saturate=True)
+        self.pool_size = spec.pool_size
 
     def forward(
         self,
@@ -221,7 +235,7 @@ class StaticDSA(nn.Module):
         query_valid,
         pool_valid,
         tail_indices,
-        tail_valid,
+        attention_mask,
         latent_cache,
         pool_cache,
         key_state,
@@ -235,18 +249,29 @@ class StaticDSA(nn.Module):
         full_pool = self.writer(pool_cache, candidates, write_start, new_count)
         iq = self.indexer.wq_b(resid).reshape(1, self.length, self.indexer.n_heads, self.indexer.head_dim)
         head_weight = self.indexer.weights_proj(x).float() * self.indexer.n_heads**-0.5
-        selected_latent, validity = self.select_kv(iq, full_pool, full_latent, pool_valid, head_weight.unsqueeze(-2))
-        selected_latent = torch.cat((selected_latent, self.gather(full_latent, tail_indices)), -2)
-        validity = torch.cat((validity, tail_valid), -1)
+        selected_latent = self.select_kv(
+            iq.transpose(1, 2),
+            full_pool,
+            full_latent,
+            write_start + new_count,
+            head_weight.to(iq.dtype).transpose(1, 2).unsqueeze(-1),
+            pool_valid,
+        )
+        # Gather rows on axis 2 directly from the unchanged four-dimensional
+        # cache. Only the selected rows are reshaped into query slots.
+        selected_tail = self.gather(full_latent, tail_indices.reshape(-1)).reshape(
+            1, self.length, self.pool_size - 1, self.latent_dim
+        )
+        selected_latent = torch.cat((selected_latent, selected_tail), -2)
         # Absorb only the per-head K factor. No compressed index key participates in attention.
         latent_query = self.k_projection(query.transpose(1, 2), self.k_weight).transpose(1, 2)
         scores = torch.matmul(latent_query.float(), selected_latent.float().transpose(-1, -2)) * self.scaling
-        scores = scores * validity.unsqueeze(2) + (validity.unsqueeze(2) - 1.0) * 32768.0
-        probabilities = torch.softmax(scores, dim=-1) * validity.unsqueeze(2)
+        scores = self.mask_add(scores, attention_mask)
+        probabilities = torch.softmax(scores, dim=-1)
         context = torch.matmul(probabilities.to(selected_latent.dtype), selected_latent)
         values = self.v_projection(context.transpose(1, 2), self.v_weight.transpose(-1, -2)).transpose(1, 2)
         output = self.o_proj(values.reshape(1, self.length, -1)) * query_valid.unsqueeze(-1)
-        return output, full_latent.unsqueeze(1), full_pool.unsqueeze(1), next_key, next_score
+        return output, full_latent, full_pool, next_key, next_score
 
 
 class StaticMoE(nn.Module):
@@ -296,13 +321,13 @@ class StaticDecoder(nn.Module):
         )
 
     def forward(self, streams, controls, caches):
-        past, length, _, offset, count, start, valid, pool_valid, tail, tail_valid = controls
+        past, length, _, offset, count, start, valid, pool_valid, tail, attention_mask = controls
         post, comb, x = self.attn_hc(streams)
         x = self.input_norm(x)
         if self.kind == LINEAR:
             result = self.attention(x, length, valid, *caches)
         else:
-            result = self.attention(x, past, length, offset, count, start, valid, pool_valid, tail, tail_valid, *caches)
+            result = self.attention(x, past, length, offset, count, start, valid, pool_valid, tail, attention_mask, *caches)
         streams = post.unsqueeze(-1) * result[0].unsqueeze(2) + comb.transpose(-1, -2) @ streams
         post, comb, x = self.ffn_hc(streams)
         streams = post.unsqueeze(-1) * self.mlp(self.ffn_norm(x)).unsqueeze(2) + comb.transpose(-1, -2) @ streams
@@ -338,9 +363,9 @@ class StaticGlm53ForCausalLM(nn.Module):
         pool_new_count,
         pool_write_start,
         query_validity,
-        pool_validity,
+        pool_valid_length,
         tail_indices,
-        tail_validity,
+        dsa_attention_mask,
         caches,
     ):
         # FX sees the nested cache argument as a Proxy: unroll its known arity
@@ -354,9 +379,9 @@ class StaticGlm53ForCausalLM(nn.Module):
             pool_new_count,
             pool_write_start,
             query_validity,
-            pool_validity,
+            pool_valid_length,
             tail_indices,
-            tail_validity,
+            dsa_attention_mask,
         )
         streams = inputs_embeds.unsqueeze(2).expand(1, -1, self.hc_mult, -1)
         cursor, next_caches = 0, []

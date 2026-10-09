@@ -8,8 +8,18 @@ from xhmodel_merak.errors import ErrorCode, ModelError
 
 
 def validate_glm53_bundle(root, metadata):
+    from xhmodel_merak.xh_llm.models.glm5_3_flash.contract import (
+        Glm53CacheSpec,
+        validate_state_abi,
+        validate_state_graph,
+    )
+
     root = Path(root).resolve()
-    if metadata.get("glm53_state_abi_version") != 1 or metadata.get("glm53_export_mode") != "streamed_ffn":
+    try:
+        validate_state_abi(metadata.get("glm53_state_abi_version"))
+    except ValueError as exc:
+        raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, str(exc)) from exc
+    if metadata.get("glm53_export_mode") != "streamed_ffn":
         raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "Unsupported GLM hybrid state/export ABI")
     vision = metadata.get("glm53_vision")
     if not isinstance(vision, dict) or vision.get("abi_version") not in (1, 2) or vision.get("dtype") != "float16":
@@ -37,6 +47,14 @@ def validate_glm53_bundle(root, metadata):
     spec = metadata.get("glm53_cache_spec", {})
     if len(spec.get("layer_types", [])) != metadata["kv_cache"]["num_layers"]:
         raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "GLM state layer count mismatch")
+    import onnx
+
+    for stage in ("prefill", "decode"):
+        graph = onnx.load(root / metadata[stage + "_hmonnx"], load_external_data=False)
+        try:
+            validate_state_graph(graph.graph, Glm53CacheSpec(**spec), stage)
+        except ValueError as exc:
+            raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, str(exc)) from exc
 
 
 def validate_artifact(root, manifest, meta_file, recipe):
@@ -63,7 +81,8 @@ def audit_glm53_hmonnx(root, metadata):
         graph = onnx.load(root / metadata[stage + "_hmonnx"], load_external_data=False)
         initializers = {value.name for value in graph.graph.initializer}
         moe_count = gate_count = w8_count = 0
-        projection_count = convolution_count = sinkhorn_count = select_count = 0
+        projection_count = convolution_count = sinkhorn_count = select_count = scan_count = 0
+        chunk_count = recurrent_count = a16_matmul_count = 0
         for node in graph.graph.node:
             attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
             if node.op_type == "MoeBlock":
@@ -97,6 +116,7 @@ def audit_glm53_hmonnx(root, metadata):
                     kind = "constant RHS" if constant_rhs else "activation"
                     raise ValueError(f"{stage}: invalid {kind} MatMul precision: {node.name}")
                 projection_count += constant_rhs
+                a16_matmul_count += not constant_rhs
             elif node.op_type == "Conv2d":
                 if (attrs.get("hmfp_weight_man_bit"), attrs.get("hmfp_act_man_bit")) != (8, 16):
                     raise ValueError(f"{stage}: KDA convolution is not W8 A16: {node.name}")
@@ -108,14 +128,23 @@ def audit_glm53_hmonnx(root, metadata):
                 ):
                     raise ValueError(f"{stage}: invalid mHC Sinkhorn parameters: {node.name}")
                 sinkhorn_count += 1
+            elif node.op_type in ("GDRChunkScan", "GDRRecurrentScan"):
+                expected_scan = "GDRChunkScan" if stage == "prefill" else "GDRRecurrentScan"
+                if node.op_type != expected_scan or len(node.output) != 1:
+                    raise ValueError(f"{stage}: invalid KDA scan contract: {node.name}")
+                if stage == "prefill" and attrs.get("matmul_input_bit") != 16:
+                    raise ValueError(f"{stage}: KDA scan MatMul is not A16: {node.name}")
+                scan_count += 1
+                chunk_count += node.op_type == "GDRChunkScan"
+                recurrent_count += node.op_type == "GDRRecurrentScan"
             elif node.op_type == "SparseAttentionSelectKV":
                 expected_k = min(config["index_topk"] // 4, metadata["glm53_cache_spec"]["max_context_length"] // 4)
                 if (
-                    attrs.get("score_mode") != b"hmfp_pool"
+                    attrs.get("score_mode") != b"vp"
                     or attrs.get("pool_size") != 4
                     or attrs.get("candidate_topk") != expected_k
-                    or len(node.input) != 5
-                    or len(node.output) != 2
+                    or len(node.input) != 6
+                    or len(node.output) != 1
                     or abs(attrs.get("score_scale", float("inf")) - config["index_head_dim"] ** -0.5) > 1e-7
                 ):
                     raise ValueError(f"{stage}: invalid pooled DSA SelectKV contract: {node.name}")
@@ -129,12 +158,40 @@ def audit_glm53_hmonnx(root, metadata):
                 f"{stage}: missing DSA projections/KDA convolutions: "
                 f"{(projection_count, convolution_count)} != {(expected_projections, expected_convolutions)}"
             )
+        if scan_count != kinds.count("linear_attention"):
+            raise ValueError(f"{stage}: missing KDA scan operators: {scan_count}")
         if sinkhorn_count != expected_sinkhorn:
             raise ValueError(f"{stage}: missing mHC Sinkhorn operators: {sinkhorn_count} != {expected_sinkhorn}")
-        if (select_count or metadata.get("glm53_dsa_selection") == "hmfp_pool") and select_count != kinds.count(
+        if (select_count or metadata.get("glm53_dsa_selection") == "vp_pool") and select_count != kinds.count(
             "deepseek_sparse_attention"
         ):
             raise ValueError(f"{stage}: missing pooled DSA SelectKV operators: {select_count}")
+        mask_input = next((value for value in graph.graph.input if value.name == "dsa_attention_mask"), None)
+        if mask_input is None:
+            raise ValueError(f"{stage}: missing Host DSA attention mask")
+        shape = [dim.dim_value for dim in mask_input.type.tensor_type.shape.dim]
+        query_length = graph.graph.input[0].type.tensor_type.shape.dim[1].dim_value
+        selected_pools = min(config["index_topk"] // 4, metadata["glm53_cache_spec"]["max_context_length"] // 4)
+        if shape != [1, query_length, 1, selected_pools * 4 + 3]:
+            raise ValueError(f"{stage}: invalid Host DSA attention mask shape: {shape}")
+        masked_adds = [
+            node for node in graph.graph.node if node.op_type == "Add" and "dsa_attention_mask" in node.input
+        ]
+        masked_outputs = {name for node in masked_adds for name in node.output}
+        pairs = [node for node in masked_adds if any(name in masked_outputs for name in node.input)]
+        if len(masked_adds) != 2 * select_count or len(pairs) != select_count:
+            raise ValueError(f"{stage}: DSA mask must use two saturating MaskedAdd additions")
+        if any(
+            not any(attr.name == "saturate" and onnx.helper.get_attribute_value(attr) == 1 for attr in node.attribute)
+            for node in masked_adds
+        ):
+            raise ValueError(f"{stage}: DSA MaskedAdd is not saturating")
+        pair_outputs = {name for node in pairs for name in node.output}
+        if (
+            sum(node.op_type == "Softmax" and node.input[0] in pair_outputs for node in graph.graph.node)
+            != select_count
+        ):
+            raise ValueError(f"{stage}: DSA MaskedAdd must directly precede Softmax")
         report[stage] = {
             "w4g64_moe_blocks": moe_count,
             "w8_linears": w8_count,
@@ -142,6 +199,11 @@ def audit_glm53_hmonnx(root, metadata):
             "w8_constant_matmuls": projection_count,
             "w8_convolutions": convolution_count,
             "mhc_sinkhorn_blocks": sinkhorn_count,
+            "dsa_mask_add_pairs": len(pairs),
+            "gdr_chunk_scan_blocks": chunk_count,
+            "gdr_recurrent_scan_blocks": recurrent_count,
+            "a16_w16_matmuls": a16_matmul_count,
+            "a16_w16_chunk_scans": chunk_count,
         }
         if select_count:
             report[stage]["sparse_kv_select_blocks"] = select_count

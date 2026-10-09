@@ -92,7 +92,7 @@ def export_glm53_vision(model_dir, output_dir, capacity, *, device="cuda:0", chi
             torch.cuda.empty_cache()
     result = {
         "abi_version": 2,
-        "directory": "vision",
+        "directory": directory.name,
         "max_patches_per_frame": capacity,
         "quant_type": "w8a16h0_sefp",
         "dtype": "float16",
@@ -109,8 +109,8 @@ def attach_glm53_vision(text_meta, model_dir, output_dir, capacity, *, device="c
 
     source_meta = Path(text_meta).resolve()
     original = json.loads(source_meta.read_text())
-    if original.get("glm53_state_abi_version") != 1 or original.get("glm53_vision"):
-        raise ValueError("attach requires an existing GLM-5.3 text artifact with state ABI 1")
+    if original.get("glm53_state_abi_version") != 3 or original.get("glm53_vision"):
+        raise ValueError("attach requires an existing GLM-5.3 text artifact with state ABI 3")
     source_config = AutoConfig.from_pretrained(source_meta.parent / original["hf_config"])
     checkpoint_config = AutoConfig.from_pretrained(model_dir)
     for key in (
@@ -138,7 +138,7 @@ def attach_glm53_vision(text_meta, model_dir, output_dir, capacity, *, device="c
     # Same filesystem is intentional: never silently copy hundreds of GB.
     shutil.copytree(source_meta.parent, output, copy_function=os.link)
     vision = export_glm53_vision(
-        model_dir, output / "vision", capacity, device=device, chip_arch=original["model_config"]["chip_arch"]
+        model_dir, output / "visual", capacity, device=device, chip_arch=original["model_config"]["chip_arch"]
     )
     original["glm53_vision"] = vision
     original["supported_modalities"] = ["text", "image", "video"]

@@ -35,8 +35,8 @@ class XHGlm53Model(TextLLMModel):
     def __init__(self, config):
         import xhquant.nn as xhnn
 
-        if not hasattr(xhnn, "SparseAttentionSelectKVPool"):
-            raise RuntimeError("GLM-5.3 export requires xhquant.nn.SparseAttentionSelectKVPool; update xhquanttool")
+        if not hasattr(xhnn, "SparseAttentionSelectKV"):
+            raise RuntimeError("GLM-5.3 export requires xhquant.nn.SparseAttentionSelectKV; update xhquanttool")
         super().__init__(config)
         hf_config = AutoConfig.from_pretrained(self.hf_model_dir)
         self.cache_spec = Glm53CacheSpec.from_config(hf_config, config.context_max_length, config.max_layers)
@@ -157,9 +157,9 @@ class XHGlm53Model(TextLLMModel):
 
     def _extra_export_metadata(self, output_dir, meta_info):
         meta_info.glm53_cache_spec = asdict(self.cache_spec)
-        meta_info.glm53_state_abi_version = 1
+        meta_info.glm53_state_abi_version = 3
         meta_info.glm53_export_mode = "streamed_ffn"
-        meta_info.glm53_dsa_selection = "hmfp_pool"
+        meta_info.glm53_dsa_selection = "vp_pool"
         meta_info.supported_modalities = ["text"]
         if getattr(self, "_vision_metadata", None) is not None:
             meta_info.glm53_vision = self._vision_metadata
@@ -180,7 +180,7 @@ class XHGlm53Model(TextLLMModel):
 
             self._vision_metadata = export_glm53_vision(
                 self.hf_model_dir,
-                Path(output_dir) / "vision",
+                Path(output_dir) / "visual",
                 self.config.vision_max_patches,
                 device="cuda" if torch.cuda.is_available() else "cpu",
                 chip_arch=self.config.chip_arch,
@@ -202,7 +202,7 @@ class XHGlm53Model(TextLLMModel):
         directory = Path(info.exported_dir)
         if getattr(self, "_vision_metadata", None) is not None:
             directory.mkdir(parents=True, exist_ok=True)
-            (Path(output_dir) / "vision").rename(directory / "vision")
+            (Path(output_dir) / "visual").rename(directory / "visual")
         helper.export_prefill_decode_placeholder_layers(
             self._frontend_model.prefill,
             self._frontend_model.decode,

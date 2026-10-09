@@ -118,10 +118,15 @@ def test_public_glm53_plan_requires_low_memory_export(tmp_path):
 
     source = tmp_path / "source"
     source.mkdir()
-    (source / "config.json").write_text(json.dumps({
-        "model_type": "glm5_next", "architectures": ["Glm5NextForConditionalGeneration"],
-        "text_config": {"hidden_size": 4096, "num_hidden_layers": 45},
-    }))
+    (source / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "glm5_next",
+                "architectures": ["Glm5NextForConditionalGeneration"],
+                "text_config": {"hidden_size": 4096, "num_hidden_layers": 45},
+            }
+        )
+    )
     kwargs = dict(model_id="glm-5.3-flash", model_dir=str(source), output_dir=str(tmp_path / "output"))
     plan = resolve_build_plan(**kwargs)
     assert plan.low_memory is True
@@ -158,58 +163,12 @@ def test_workflow_quant_calls_public_recipe_and_preserves_owned_root(tmp_path, m
     assert Path(result.meta["calibration"]["jsonl"]).is_file()
 
 
-@pytest.mark.parametrize("legacy_selection", [False, True], ids=["pooled", "legacy"])
-def test_public_streamed_build_move_load_and_generate(
-    autoround_packed_checkpoint, tmp_path, monkeypatch, legacy_selection
-):
+def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoint, tmp_path, monkeypatch):
     from test_glm53_multimodal import processor_inputs
     from xhmodel_merak.model_build import build_model
     from xhmodel_merak.model_build import checkpoint as checkpoint_api, resolver
     from xhmodel_merak.model_integrations.glm53.artifact import audit_glm53_hmonnx, validate_glm53_bundle
     from xhmodel_merak.xh_llm.hmonnx.auto_llm_hmonnx_model import AutoLLMHONNXModel
-
-    if legacy_selection:
-        import xhquant.nn as xhnn
-
-        from xhmodel_merak.xh_llm.models.deepseek_v4.static_cache import LatentCacheGather
-        from xhmodel_merak.xh_llm.models.glm5_3_flash.glm53_model import XHGlm53Model
-        from xhmodel_merak.xh_llm.models.glm5_3_flash.modeling import StaticDSA
-
-        class LegacySelection(torch.nn.Module):
-            """The pre-fusion MatMul/ReLU/TopK/Gather graph and its state ABI."""
-
-            def __init__(self, spec, scale, length):
-                super().__init__()
-                self.scale, self.length, self.ratio = scale, length, spec.pool_size
-                self.topk = xhnn.TopK(spec.selected_pools, axis=-1)
-                self.gather_validity = xhnn.GatherElements(axis=2)
-                self.gather = LatentCacheGather(feature_dim=spec.latent_dim)
-                self.register_buffer("offsets", torch.arange(self.ratio, dtype=torch.int32), persistent=False)
-
-            def forward(self, query, pool, payload, validity, weights):
-                scores = torch.relu(query.float() @ pool.float().transpose(1, 2).unsqueeze(1) * self.scale)
-                scores = (weights.float() @ scores).squeeze(-2)
-                scores = scores * validity + (validity - 1.0) * 65504.0
-                selected = self.topk(scores)[1]
-                selected_valid = self.gather_validity(validity, selected)
-                indices = (selected.unsqueeze(-1) * self.ratio + self.offsets).flatten(-2)
-                mask = selected_valid.unsqueeze(-1).expand(1, self.length, -1, self.ratio).flatten(-2)
-                return self.gather(payload, indices), mask
-
-        initialize = StaticDSA.__init__
-        extra_metadata = XHGlm53Model._extra_export_metadata
-
-        def initialize_legacy(self, source, spec, input_length):
-            initialize(self, source, spec, input_length)
-            self.select_kv = LegacySelection(spec, source.indexer.softmax_scale, input_length)
-
-        def legacy_metadata(self, output_dir, meta_info):
-            result = extra_metadata(self, output_dir, meta_info)
-            del result.glm53_dsa_selection
-            return result
-
-        monkeypatch.setattr(StaticDSA, "__init__", initialize_legacy)
-        monkeypatch.setattr(XHGlm53Model, "_extra_export_metadata", legacy_metadata)
 
     source, checkpoint, reference, _ = autoround_packed_checkpoint
     # Relax only release dimensions for this synthetic native model. All real
@@ -243,6 +202,8 @@ def test_public_streamed_build_move_load_and_generate(
     meta_path = moved / "golden_meta_info.json"
     meta = json.loads(meta_path.read_text())
     validate_glm53_bundle(moved, meta)
+    assert not (moved / "vision").exists()
+    assert all(component["hmonnx"].startswith("visual/") for component in meta["glm53_vision"]["components"])
     assert all(meta[f"{stage}_hmonnx"].startswith(f"{stage}/") for stage in ("prefill", "decode"))
     assert (moved / "prefill/weights.bin").samefile(moved / "decode/weights.bin")
     export_index = json.loads((moved / "export_meta_info.json").read_text())
@@ -250,7 +211,8 @@ def test_public_streamed_build_move_load_and_generate(
         assert export_index[stage] == {"path": meta[f"{stage}_hmonnx"], "type": stage}
     for component in meta["glm53_vision"]["components"]:
         assert export_index[f"visual_{component['name']}"] == {
-            "path": component["hmonnx"], "type": "hmonnx",
+            "path": component["hmonnx"],
+            "type": "hmonnx",
         }
     assert export_index["quant_embedding_bin"]["type"] == "embedding"
     assert export_index["golden_meta_info"] == {"path": "golden_meta_info.json", "type": "json"}
@@ -262,26 +224,57 @@ def test_public_streamed_build_move_load_and_generate(
         "w8_constant_matmuls": 2,
         "w8_convolutions": 1,
         "mhc_sinkhorn_blocks": 4,
+        "dsa_mask_add_pairs": 1,
+        "a16_w16_matmuls": 8,
+        "gdr_chunk_scan_blocks": 1,
+        "gdr_recurrent_scan_blocks": 0,
+        "a16_w16_chunk_scans": 1,
     }
-    if not legacy_selection:
-        expected_report["sparse_kv_select_blocks"] = 1
+    expected_report["sparse_kv_select_blocks"] = 1
     assert report["prefill"] == expected_report
-    assert report["decode"] == report["prefill"] and report["vision_components"] == 3
-    if legacy_selection:
-        assert "glm53_dsa_selection" not in meta
-        for stage in ("prefill", "decode"):
-            import onnx
-
-            graph = onnx.load(moved / meta[f"{stage}_hmonnx"], load_external_data=False)
-            assert not any(node.op_type == "SparseAttentionSelectKV" for node in graph.graph.node)
-            assert any(node.op_type == "TopK" for node in graph.graph.node)
-        monkeypatch.delattr(xhnn, "SparseAttentionSelectKVPool")
-    else:
-        assert meta["glm53_dsa_selection"] == "hmfp_pool"
+    assert report["decode"] == {
+        **expected_report,
+        "a16_w16_matmuls": 6,
+        "gdr_chunk_scan_blocks": 0,
+        "gdr_recurrent_scan_blocks": 1,
+        "a16_w16_chunk_scans": 0,
+    }
+    assert report["vision_components"] == 3
+    assert meta["glm53_dsa_selection"] == "vp_pool"
+    assert meta["glm53_state_abi_version"] == 3
     # A saved constant projection silently left at W16 used to escape the
     # Linear/MoE-only audit. Corrupt its real graph attribute, then restore it.
     import onnx
 
+    prefill_path = moved / meta["prefill_hmonnx"]
+    saved_prefill = prefill_path.read_bytes()
+    for mutation, match in (("mask", "requires dsa_attention_mask"), ("selection", "legacy TopK")):
+        broken = onnx.load(prefill_path, load_external_data=False)
+        if mutation == "mask":
+            broken.graph.input.remove(next(value for value in broken.graph.input if value.name == "dsa_attention_mask"))
+        else:
+            next(node for node in broken.graph.node if node.op_type == "SparseAttentionSelectKV").op_type = "TopK"
+        try:
+            onnx.save(broken, prefill_path)
+            with pytest.raises(ValueError, match=match):
+                validate_glm53_bundle(moved, meta)
+            with pytest.raises(ValueError, match=match):
+                AutoLLMHONNXModel.from_pretrained(str(meta_path), device_map=["cuda:0"])
+        finally:
+            prefill_path.write_bytes(saved_prefill)
+    for mutation, match in (("type", "invalid KDA scan contract"), ("precision", "KDA scan MatMul is not A16")):
+        broken = onnx.load(prefill_path, load_external_data=False)
+        scan = next(node for node in broken.graph.node if node.op_type == "GDRChunkScan")
+        if mutation == "type":
+            scan.op_type = "GDRRecurrentScan"
+        else:
+            next(attr for attr in scan.attribute if attr.name == "matmul_input_bit").i = 8
+        try:
+            onnx.save(broken, prefill_path)
+            with pytest.raises(ValueError, match=match):
+                audit_glm53_hmonnx(moved, meta)
+        finally:
+            prefill_path.write_bytes(saved_prefill)
     graph_path = moved / meta["decode_hmonnx"]
     original_graph = graph_path.read_bytes()
     graph = onnx.load(graph_path, load_external_data=False)
@@ -341,6 +334,36 @@ def test_public_streamed_build_move_load_and_generate(
             )
         cosine = torch.nn.functional.cosine_similarity(actual.float().flatten(), expected.float().flatten(), dim=0)
         assert torch.isfinite(actual).all() and cosine > 0.98
+
+        # Run the real decode graph, fail after its cache writes, and verify
+        # that retrying the same token starts from exactly the original state.
+        model.set_decode()
+        cache_mixin = model.get_kvcache_mixin()
+        before = cache_mixin.caches
+        snapshots = tuple(value.data.clone() for value in before)
+        data = {"input_ids": ids[:, -1:], "past_seq_length": ids.shape[1]}
+        expected_decode = model.forward(*model.get_data_preprocessor()(data)).clone()
+        expected_caches = tuple(value.data.clone() for value in cache_mixin.caches)
+        cache_mixin.caches = before
+        for value, snapshot in zip(before, snapshots, strict=True):
+            value.data.copy_(snapshot)
+        execute_decode = model.decode_model.forward
+
+        def fail_after_decode(*args, **kwargs):
+            execute_decode(*args, **kwargs)
+            raise RuntimeError("injected failure after real decode cache writes")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(model.decode_model, "forward", fail_after_decode)
+            with pytest.raises(RuntimeError, match="injected failure"):
+                model.forward(*model.get_data_preprocessor()(data))
+        assert cache_mixin._staged_rows is None
+        for value, snapshot in zip(cache_mixin.caches, snapshots, strict=True):
+            assert torch.equal(value.data.view(torch.int16), snapshot.view(torch.int16))
+        retried = model.forward(*model.get_data_preprocessor()(data))
+        assert torch.equal(retried.view(torch.int16), expected_decode.view(torch.int16))
+        for value, expected_cache in zip(cache_mixin.caches, expected_caches, strict=True):
+            assert torch.equal(value.data.view(torch.int16), expected_cache.view(torch.int16))
     model.release_inference_model()
     del model, reference
     import gc
@@ -388,7 +411,7 @@ def test_pooled_build_requires_frontend_only_when_building(monkeypatch):
 
     from xhmodel_merak.xh_llm.models.glm5_3_flash.glm53_model import XHGlm53Model
 
-    monkeypatch.delattr(xhnn, "SparseAttentionSelectKVPool")
+    monkeypatch.delattr(xhnn, "SparseAttentionSelectKV")
     # Capability failure precedes configuration/checkpoint access.
-    with pytest.raises(RuntimeError, match="export requires xhquant.nn.SparseAttentionSelectKVPool"):
+    with pytest.raises(RuntimeError, match="export requires xhquant.nn.SparseAttentionSelectKV"):
         XHGlm53Model(None)

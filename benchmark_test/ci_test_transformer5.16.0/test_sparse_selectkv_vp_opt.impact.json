@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "sparse-selectkv-vp-runtime-contract",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/glm5_3_flash/modeling.py",
+        "examples_merak/llm/glm5_3_flash/verify_attention.py"
+      ]
+    }
+  ]
+}

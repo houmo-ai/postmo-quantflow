@@ -64,9 +64,9 @@ def run(model_dir, layer, device, dtype, output, lengths=(78, 1, 1, 1, 256, 55))
                     t["pool_new_count"],
                     t["pool_write_start"],
                     t["query_validity"],
-                    t["pool_validity"],
+                    t["pool_valid_length"],
                     t["tail_indices"],
-                    t["tail_validity"],
+                    t["dsa_attention_mask"],
                     *states,
                 )
             a, b = actual[:, :n].float(), expected.float()

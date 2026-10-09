@@ -7,7 +7,7 @@ from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceV2
 from xhquant.xhonnxruntime.parsers.llm_cache import LLMCache
 
 from ...hmonnx.text_llm_hmonnx_model import TextLLMHMONNXModel
-from .contract import DSA, Glm53CacheSpec
+from .contract import DSA, Glm53CacheSpec, validate_state_abi, validate_state_graph
 from .runtime import Glm53CacheMixin, Glm53DataPreprocess
 from .vision import create_glm53_processor, load_vision_encoder
 
@@ -68,10 +68,15 @@ class XHGlm53HMONNXModel(TextLLMHMONNXModel):
     def __init__(self, meta_info, **kwargs):
         if kwargs.get("enable_page_attention", False):
             raise ValueError("GLM-5.3 does not use PageAttention caches")
-        if getattr(meta_info, "glm53_state_abi_version", None) != 1:
-            raise ValueError("unsupported GLM-5.3 state ABI")
+        import onnx
+
+        validate_state_abi(getattr(meta_info, "glm53_state_abi_version", None))
+        spec = Glm53CacheSpec(**meta_info.glm53_cache_spec)
+        for stage in ("prefill", "decode"):
+            graph = onnx.load(getattr(meta_info, stage + "_hmonnx"), load_external_data=False)
+            validate_state_graph(graph.graph, spec, stage)
         super().__init__(meta_info, **kwargs)
-        self.cache_spec = Glm53CacheSpec(**meta_info.glm53_cache_spec)
+        self.cache_spec = spec
         # GLM begins each request with zeroed caches and only appends valid
         # rows, so their backing storage is the full-capacity graph output.
         inplace_step_staging = _enable_inplace_dsa_caches(

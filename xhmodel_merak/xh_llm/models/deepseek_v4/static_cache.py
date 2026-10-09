@@ -529,10 +529,14 @@ class FixedCapacityCacheWriter(nn.Module):
     The input values keep their fixed graph width, while valid_count controls
     how many leading rows are committed. Using LLMCache avoids materializing a
     full-capacity scatter/copy in the deployed graph.
+
+    keep_cache_dims preserves [B,1,C,D] for consumers such as GLM SelectKV.
+    The default [B,C,D] result retains the existing DeepSeek consumer contract.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, keep_cache_dims: bool = False) -> None:
         super().__init__()
+        self.keep_cache_dims = keep_cache_dims
         self.cache = xhnn.LLMCache(axis=2, attention_max_length=-1, inplace=True)
 
     def forward(
@@ -562,7 +566,7 @@ class FixedCapacityCacheWriter(nn.Module):
                 -1,
                 False,
             )
-        return updated.squeeze(1)
+        return updated if self.keep_cache_dims else updated.squeeze(1)
 
 
 class CSAIndexerTopK(nn.Module):

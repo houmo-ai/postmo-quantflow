@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "gdr-chunk-scan-optional-precision",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/glm5_3_flash/modeling.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_gdr_ops.py",
+        "xhmodel_merak/xh_llm/models/ling_3_flash/_kda_rule.py"
+      ]
+    }
+  ]
+}

@@ -3,6 +3,7 @@
 """Small real GLM blocks, including sparse selection and streaming state."""
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -12,6 +13,7 @@ from transformers.models.glm5_next import modeling_glm5_next as hf_glm53
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextModel
 
+from xhmodel_merak.xh_llm.models.deepseek_v4.static_cache import FixedCapacityCacheWriter
 from xhmodel_merak.xh_llm.models.glm5_3_flash import hmonnx_inference as glm_hmonnx
 from xhmodel_merak.xh_llm.models.glm5_3_flash.contract import DSA, Glm53CacheSpec, build_transition
 from xhmodel_merak.xh_llm.models.glm5_3_flash.modeling import (
@@ -71,6 +73,68 @@ def tiny_config():
         eos_token_id=1,
         swiglu_limit=1.0,
     )
+
+
+@pytest.mark.parametrize("version", [None, 1, 2])
+def test_old_glm_state_abi_is_rejected_before_loading(version, tmp_path):
+    from xhmodel_merak.model_integrations.glm53.artifact import validate_glm53_bundle
+
+    message = "state ABI.*expected 3"
+    with pytest.raises(ValueError, match=message):
+        validate_glm53_bundle(tmp_path, {"glm53_state_abi_version": version})
+    with pytest.raises(ValueError, match=message):
+        glm_hmonnx.XHGlm53HMONNXModel(SimpleNamespace(glm53_state_abi_version=version))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize(
+    "past,length,fixed,valid_slots",
+    [
+        (0, 5, 8, [[8], [8, 9], [8, 9, 10], [0, 1, 2, 3], [0, 1, 2, 3, 8], [], [], []]),
+        (7, 1, 1, [list(range(8))]),
+        (9, 3, 8, [list(range(10)), list(range(11)), list(range(8)), [], [], [], [], []]),
+    ],
+)
+def test_host_dsa_mask_covers_selected_pool_tail_and_padding(dtype, past, length, fixed, valid_slots):
+    spec = Glm53CacheSpec.from_config(tiny_config(), 64)
+    controls = build_transition(spec, past, length, fixed, dtype=dtype)
+    mask = controls["dsa_attention_mask"]
+    assert mask.shape == (1, fixed, 1, 11) and mask.dtype == dtype
+    assert torch.isfinite(mask).all()
+    assert set(mask.unique().tolist()) <= {0.0, -65504.0}
+    for row, expected in zip(mask[0, :, 0], valid_slots, strict=True):
+        assert torch.where(row == 0)[0].tolist() == expected
+
+
+def test_masked_add_suppresses_large_invalid_scores_before_softmax():
+    from xhquant.nn import MaskedAdd
+
+    scores = torch.tensor([[[[-60000.0, 60000.0]]]], dtype=torch.float16)
+    mask = torch.tensor([[[[0.0, -65504.0]]]], dtype=torch.float16)
+    masked = MaskedAdd(saturate=True)(scores, mask)
+    assert torch.isfinite(masked).all()
+    assert masked[0, 0, 0, 0] == scores[0, 0, 0, 0]
+    assert masked[0, 0, 0, 1] == -65504.0
+    torch.testing.assert_close(torch.softmax(masked.float(), -1), torch.tensor([[[[1.0, 0.0]]]]))
+
+
+@pytest.mark.parametrize("cache_tensor", [False, True])
+def test_fixed_capacity_writer_keeps_glm_cache_rank_and_deepseek_default(cache_tensor):
+    values = torch.arange(12, dtype=torch.float32).reshape(1, 4, 3)
+    storage = torch.zeros(1, 1, 12, 3)
+    cache = CacheTensor(storage) if cache_tensor else storage
+    start, count = torch.tensor([2]), torch.tensor([3])
+    legacy = FixedCapacityCacheWriter()(cache, values, start, count)
+    fixed = FixedCapacityCacheWriter(keep_cache_dims=True)(cache, values, start, count)
+    assert legacy.shape == (1, 12, 3)
+    assert fixed.shape == storage.shape
+    torch.testing.assert_close(fixed[:, 0], legacy, rtol=0, atol=0)
+    torch.testing.assert_close(fixed[:, :, 2:5], values[:, None, :3], rtol=0, atol=0)
+    assert torch.count_nonzero(fixed[:, :, :2]) == torch.count_nonzero(fixed[:, :, 5:]) == 0
+    if cache_tensor:
+        # CPU LLMCache returns a masked output while committing to the store;
+        # output aliasing is configured separately by the deployed V2 runtime.
+        torch.testing.assert_close(cache.data, fixed, rtol=0, atol=0)
 
 
 def test_inplace_dsa_cache_update_preserves_zero_padded_output():
@@ -329,9 +393,9 @@ def test_dsa_streaming_selects_original_tokens(hf_model):
                 t["pool_new_count"],
                 t["pool_write_start"],
                 t["query_validity"],
-                t["pool_validity"],
+                t["pool_valid_length"],
                 t["tail_indices"],
-                t["tail_validity"],
+                t["dsa_attention_mask"],
                 *state,
             )
             torch.testing.assert_close(actual[:, :n], expected, rtol=1e-4, atol=2e-5)
@@ -361,15 +425,15 @@ def test_complete_hybrid_blocks(hf_model):
 
 def record_pool_selection(chosen):
     def hook(module, args, result):
-        query, pool, payload, validity, weights = args
-        head_scores = torch.relu(query.float() @ pool.float().transpose(1, 2).unsqueeze(1) * module.score_scale)
-        scores = (weights.float() @ head_scores).squeeze(-2)
-        scores = scores * validity + (validity - 1.0) * 65504.0
-        indices = torch.topk(scores, module.candidate_topk, dim=-1).indices
+        from xhquant.ops.xh.sparse_attention_select_kv import sparse_attention_select_kv_scores
+
+        query, pool, payload, total, weights, lengths = args
+        scores = sparse_attention_select_kv_scores(query, pool, total, weights, module.score_scale, lengths)
+        indices = torch.argsort(scores, dim=-1, descending=True, stable=True)[..., : module.candidate_topk]
         token_ids = (indices[..., None] * 4 + torch.arange(4, device=indices.device)).flatten(-2)
-        expected_mask = validity.gather(-1, indices)[..., None].expand(*indices.shape, 4).flatten(-2)
-        torch.testing.assert_close(result[0], payload.reshape(-1, payload.shape[-1])[token_ids], rtol=0, atol=0)
-        torch.testing.assert_close(result[1], expected_mask, rtol=0, atol=0)
+        keep = torch.arange(module.candidate_topk * 4, device=indices.device) < lengths[..., None] * 4
+        expected = payload[0, 0][token_ids] * keep[..., None]
+        torch.testing.assert_close(result, expected, rtol=0, atol=0)
         chosen.update(scores=scores.clone(), indices=indices.clone())
 
     return hook
@@ -387,20 +451,34 @@ def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_sco
     t = build_transition(spec, 0, 16, 16)
     with torch.no_grad():
         outputs = core(
-            x, t["past_seq_length"], t["current_input_length"], t["pool_offset"],
-            t["pool_new_count"], t["pool_write_start"], t["query_validity"],
-            t["pool_validity"], t["tail_indices"], t["tail_validity"],
+            x,
+            t["past_seq_length"],
+            t["current_input_length"],
+            t["pool_offset"],
+            t["pool_new_count"],
+            t["pool_write_start"],
+            t["query_validity"],
+            t["pool_valid_length"],
+            t["tail_indices"],
+            t["dsa_attention_mask"],
             *spec.initial_caches()[-4:],
         )
-        valid = t["pool_validity"].bool()
+        valid = torch.arange(spec.pool_capacity) < t["pool_valid_length"].unsqueeze(-1)
         # Scale a real indexer's learned head weights to exercise scores
         # below the former -32768 sentinel, including near the FP16 limit.
         scale = minimum_score / chosen["scores"][valid].min().item()
         original.indexer.weights_proj.weight.mul_(scale)
         outputs = core(
-            x, t["past_seq_length"], t["current_input_length"], t["pool_offset"],
-            t["pool_new_count"], t["pool_write_start"], t["query_validity"],
-            t["pool_validity"], t["tail_indices"], t["tail_validity"],
+            x,
+            t["past_seq_length"],
+            t["current_input_length"],
+            t["pool_offset"],
+            t["pool_new_count"],
+            t["pool_write_start"],
+            t["query_validity"],
+            t["pool_valid_length"],
+            t["tail_indices"],
+            t["dsa_attention_mask"],
             *spec.initial_caches()[-4:],
         )
         pool = outputs[2].squeeze(1)
@@ -416,13 +494,10 @@ def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_sco
         if minimum_score < -32768:
             assert bool((raw_scores[valid] < -32768).any())
         torch.testing.assert_close(chosen["scores"][valid], raw_scores[valid])
-        assert bool((chosen["scores"][~valid] == torch.finfo(torch.float16).min).all())
-        assert torch.isfinite(chosen["scores"].to(torch.float16)).all()
-        selected = torch.topk(chosen["scores"], spec.selected_pools, dim=-1).indices
+        assert torch.isneginf(chosen["scores"][~valid]).all()
+        selected = chosen["indices"]
         selected_valid = valid.gather(-1, selected)
-        assert torch.equal(
-            selected_valid.sum(-1), valid.sum(-1).clamp(max=spec.selected_pools)
-        )
+        assert torch.equal(selected_valid.sum(-1), valid.sum(-1).clamp(max=spec.selected_pools))
     hook.remove()
 
 
@@ -446,18 +521,18 @@ def test_dsa_tied_scores_select_valid_pools(hf_model):
             t["pool_new_count"],
             t["pool_write_start"],
             t["query_validity"],
-            t["pool_validity"],
+            t["pool_valid_length"],
             t["tail_indices"],
-            t["tail_validity"],
+            t["dsa_attention_mask"],
             *spec.initial_caches()[-4:],
         )[0]
         selected = chosen["indices"]
-        valid = t["pool_validity"].gather(-1, selected.long()).bool()
+        valid = selected < t["pool_valid_length"].unsqueeze(-1)
         assert torch.equal(valid.sum(-1), torch.minimum(torch.arange(1, 17) // 4, torch.tensor(2))[None])
         assert bool((selected[..., 0] != selected[..., 1]).all())
         raw = (selected[..., None] * 4 + torch.arange(4)).flatten(-2)
         raw = raw.masked_fill(~valid[..., None].expand(1, 16, 2, 4).flatten(-2), -1)
-        raw = torch.cat((raw, t["tail_indices"].masked_fill(~t["tail_validity"].bool(), -1)), -1).int()
+        raw = torch.cat((raw, t["tail_indices"].masked_fill(t["dsa_attention_mask"][:, :, 0, -3:] != 0, -1)), -1).int()
         ref_hook = original.indexer.register_forward_hook(lambda m, a, v: raw)
         expected = original(x, attention_mask=torch.ones(1, 16, dtype=torch.bool))[0]
         ref_hook.remove()
@@ -487,9 +562,10 @@ def test_real_frontend(hf_model, p, n):
     core = StaticGlm53ForCausalLM(hf_model, nn.Linear(32, 64, bias=False), spec, p).eval()
     args = (torch.randn(1, p, 32), *build_transition(spec, 0, n, p).values(), spec.initial_caches())
     with torch.no_grad():
-        expected = core(*args)
-        graph = to_frontend_graph(core, FrontendType.TorchFX, args)
-        actual = graph(*args[:-1], *args[-1])
+        expected = core(*args[:-1], spec.stage_caches(args[-1]))
+        trace_args = (*args[:-1], spec.stage_caches(args[-1]))
+        graph = to_frontend_graph(core, FrontendType.TorchFX, trace_args)
+        actual = graph(*args[:-1], *spec.stage_caches(args[-1]))
     for a, b in zip(actual, expected, strict=True):
         torch.testing.assert_close(a, b, rtol=5e-4, atol=2e-5)
 
@@ -560,10 +636,14 @@ def test_256k_cache_capacity_and_final_chunk_controls():
     assert spec.pool_capacity == 65536
     assert spec.selected_pools == 512
     assert spec.cache_shapes("deepseek_sparse_attention")[:2] == (
-        (1, 1, 262144, 16), (1, 1, 65536, 8),
+        (1, 1, 262144, 16),
+        (1, 1, 65536, 8),
     )
     controls = build_transition(spec, 262141, 3, 256)
-    assert controls["pool_validity"].shape == (1, 256, 65536)
+    assert controls["pool_valid_length"].shape == (1, 256)
+    assert controls["pool_valid_length"].dtype == torch.int32
+    assert controls["pool_valid_length"][0, :3].tolist() == [65535, 65535, 65536]
+    assert not controls["pool_valid_length"][0, 3:].any()
     assert controls["pool_new_count"].item() == 1
     assert controls["pool_write_start"].item() == 65535
     assert controls["query_validity"].sum().item() == 3
@@ -587,6 +667,7 @@ def test_workflow_registration_and_configuration(tmp_path, hf_model):
     assert workflow.workflow_config.export["model"]["context_max_length"] == 262144
     assert XHGlm53ModelConfig().context_max_length == 262144
     from xhmodel_merak.model_catalog import get_recipe
+
     assert get_recipe("glm-5.3-flash").default_context_length == 262144
     quant = workflow.quant(str(tmp_path / "unused"), "cpu")
     assert quant.skipped
@@ -681,16 +762,58 @@ def test_w8_export_reload_and_generation(tmp_path, monkeypatch, mlp_type):
         assert [t.name for t in graph.output] == spec.output_names()
         assert not any("placeholder" in node.op_type.lower() for node in graph.node)
         tags = [node for node in graph.node if node.op_type == "Tag"]
-        assert [onnx.helper.get_attribute_value(next(a for a in n.attribute if a.name == "tag_name"))
-                for n in tags] == [b"layer_0", b"layer_1"]
+        assert [
+            onnx.helper.get_attribute_value(next(a for a in n.attribute if a.name == "tag_name")) for n in tags
+        ] == [b"layer_0", b"layer_1"]
         assert not any(node.op_type == "ReduceMin" for node in graph.node)
         if mlp_type == "sparse":
             select = [node for node in graph.node if node.op_type == "SparseAttentionSelectKV"]
             assert len(select) == 1
             attrs = {a.name: onnx.helper.get_attribute_value(a) for a in select[0].attribute}
-            assert attrs["score_mode"] == b"hmfp_pool" and attrs["pool_size"] == 4
-            assert len(select[0].input) == 5 and len(select[0].output) == 2
-            assert "pool_validity" == select[0].input[3]
+            assert attrs["score_mode"] == b"vp" and attrs["pool_size"] == 4
+            assert len(select[0].input) == 6 and len(select[0].output) == 1
+            assert "pool_valid_length" == select[0].input[5]
+            mask_input = next(value for value in graph.input if value.name == "dsa_attention_mask")
+            assert [dim.dim_value for dim in mask_input.type.tensor_type.shape.dim] == [
+                1,
+                8 if stage == "prefill" else 1,
+                1,
+                11,
+            ]
+            masked_adds = [node for node in graph.node if node.op_type == "Add" and "dsa_attention_mask" in node.input]
+            assert len(masked_adds) == 2
+            assert all(
+                {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}["saturate"] == 1
+                for node in masked_adds
+            )
+            assert any(node.op_type == "Softmax" and node.input == [masked_adds[-1].output[0]] for node in graph.node)
+            assert not any(node.op_type == "Less" for node in graph.node)
+            # The persistent stores keep their four-dimensional layout from
+            # the graph boundary through writers, selection and tail gather.
+            producer = {out: node for node in graph.node for out in node.output}
+            values = {value.name: value for value in (*graph.input, *graph.output)}
+            for suffix, select_input in (("pool", 1), ("latent", 2)):
+                cache_input = f"layer_1_{suffix}_input"
+                cache_output = f"layer_1_{suffix}_output"
+                shape_in = values[cache_input].type.tensor_type.shape.dim
+                shape_out = values[cache_output].type.tensor_type.shape.dim
+                assert len(shape_in) == len(shape_out) == 4
+                assert list(shape_in) == list(shape_out)
+                writer = producer[cache_output]
+                assert writer.op_type == "KVcache" and writer.input[3] == cache_input
+                assert select[0].input[select_input] == cache_output
+                assert not any(
+                    node.op_type in {"Reshape", "Squeeze", "Unsqueeze"}
+                    and any(name in node.input for name in (cache_input, cache_output))
+                    for node in graph.node
+                )
+            tail_gather = [
+                node for node in graph.node if node.op_type == "Gather" and node.input[0] == "layer_1_latent_output"
+            ]
+            assert len(tail_gather) == 1
+            assert next(a.i for a in tail_gather[0].attribute if a.name == "axis") == 2
+        scan_type = "GDRChunkScan" if stage == "prefill" else "GDRRecurrentScan"
+        assert sum(node.op_type == scan_type for node in graph.node) == (1 if mlp_type == "sparse" else 2)
         assert len(graph.output) == (7 if mlp_type == "sparse" else 5)
         assert all(o.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16 for o in graph.output)
     monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
@@ -760,3 +883,21 @@ def test_w8_export_reload_and_generation(tmp_path, monkeypatch, mlp_type):
             assert all(torch.isfinite(value).all() for value in outputs[1].values())
         finally:
             runtime_moe._buffers = original
+
+
+def test_inplace_kda_scan_state_is_transactional(hf_model):
+    spec = Glm53CacheSpec.from_config(hf_model.config, 64)
+    cache = Glm53CacheMixin(spec, object(), inplace_step_staging=True)
+    cache.caches = spec.initial_caches()
+    initial = tuple(x.data.clone() for x in cache.caches)
+    recurrent = [cache.caches[i] for i in (1, 3, 5)]
+    staged = cache.stage_step(0, 7)
+    assert all(isinstance(x, CacheTensor) for x in recurrent)
+    core = StaticGlm53ForCausalLM(hf_model, nn.Linear(32, 64, bias=False), spec, 8).eval()
+    with torch.no_grad():
+        core(torch.randn(1, 8, 32), *build_transition(spec, 0, 7, 8).values(), staged)
+    assert all(x is y for x, y in zip(recurrent, [staged[i] for i in (1, 3, 5)], strict=True))
+    assert all(torch.count_nonzero(x.data) for x in recurrent)
+    cache.rollback_step()
+    for old, new in zip(initial, cache.caches, strict=True):
+        torch.testing.assert_close(old, new.data, rtol=0, atol=0)
