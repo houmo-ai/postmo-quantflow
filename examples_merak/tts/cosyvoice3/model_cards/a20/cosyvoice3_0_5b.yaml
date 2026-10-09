@@ -11,11 +11,11 @@ external:
     status: verified
   compute:
     input_shape: [1, 256, 896]
-    prefill: null
-    decode: null
+    prefill: 0.189117
+    decode: 0.00101003
     unit: TFLOPs
-    status: missing
-    note: A20 性能尚未测试。
+    status: inferred
+    note: 主值为 CosyVoice3 LLM 的 256-token Prefill 和首 token Decode；多组件参数量包含 LLM、Flow、HiFT、SpeechTokenizer 与 CAM++。辅助 Flow DiT 的 2048-length 完整前向约 1.133871 TFLOPs，未混入 LLM Decode。
   precision:
     float_format: FP16
     quantized_format: w8a16_sefp
