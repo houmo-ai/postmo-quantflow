@@ -11,11 +11,11 @@ external:
     status: verified
   compute:
     input_shape: [1, 256, 4096]
-    prefill: null
-    decode: null
+    prefill: 3.596132
+    decode: 0.01528719
     unit: TFLOPs
-    status: missing
-    note: A20 性能尚未测试；静态导出使用 256-token 序列和最长 8 秒音频输入。
+    status: inferred
+    note: 主值按 input_shape [1,256,4096] 静态计算 Qwen3 LLM 的 256-token Prefill 与复用 256-token KV Cache 的首 token Decode；计入 36 层 Q/K/V/O、MLP、Attention MatMul 和末 token lm_head，MAC=2 FLOPs。独立 audio_encoder（8 秒音频、4×200 mel 帧，含卷积、32 层 Attention/FFN 和 audio_tower 投影）约 0.537689 TFLOPs；该图及独立 audio_tower、audio_decoder 均未计入主值。
   precision:
     float_format: FP16
     quantized_format: w8a8h1_sefp
