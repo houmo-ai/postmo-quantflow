@@ -10,12 +10,12 @@ external:
     unit: parameters
     status: verified
   compute:
-    input_shape: [1, 1500, 128]
-    prefill: null
-    decode: null
+    input_shape: [1, 728, 2048]
+    prefill: 2.394530
+    decode: 0.00391066
     unit: TFLOPs
-    status: missing
-    note: A20 导出使用 1500 帧音频输入和 728-token LLM Prefill；尚未完成该模型的静态 FLOPs 复核。
+    status: inferred
+    note: 与 0.6B A20 同一公式，仅代入 1.7B 的层数和维度；1500 帧、128 mel 音频经独立 Encoder 得 195 token，LLM Prefill 输入长 195+21+512=728，Decode 为复用 2048-token KV Cache 的首 token。主值仅计 LLM Linear、Attention MatMul 和末 token lm_head，MAC=2 FLOPs；独立 Encoder（含卷积）一次前向约 0.188928 TFLOPs，未计入主值。
   precision:
     float_format: FP16
     quantized_format: w8a8_sefp
@@ -175,7 +175,7 @@ internal:
         xh2modelzoo: a46c0c38d591c61571033405ca5c3a809cd60ad3
         xhquanttool: de51ff453de5ca8e3653ee1af100f608200fe012
     limitations:
-    - A20 导出口径的 FLOPs 需要补充；精度已在 LibriSpeech test-clean、AIShell-1 和 FLEURS 简体中文完整测试集上验证。
+    - 精度已在 LibriSpeech test-clean、AIShell-1 和 FLEURS 简体中文完整测试集上验证。
     evidence:
       examples:
       - examples_merak/asr/qwen3_asr
