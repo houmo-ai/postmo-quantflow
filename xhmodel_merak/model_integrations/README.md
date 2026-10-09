@@ -58,6 +58,12 @@ family 用 `DeploymentPrecisionBinding` 声明组件、实际 `export.model.*.qu
 不能传两个冲突的值。audio/video 的继承配置要在改父配置前固定下来，不能顺带改变未请求的组件。
 没有 binding 的组件不接受覆盖。新增选择须经过实际导出和数值验证，不能只改描述文字。
 
+固定尺寸且可选择图精度的 pipeline 可在 recipe 声明 `artifact_name_template`，
+用一个 `{deployment_precision}` 占位符生成产物名。规划和加载均使用已解析的图精度；
+相同精度去掉 `_sefp` 后缀，不同组件精度用 `wmix_amix`。不要把 checkpoint 的
+`precision` 用来给这种产物命名，也不要在公共规划器中增加模型名称分支。
+模板与 `fixed_artifact_name` 互斥，防止同一 recipe 出现两个命名契约。
+
 `quant_methods` 只列本模型能运行的量化流程；`quant_checkpoint_methods` 列导出器能读取的
 已有 checkpoint 来源。传 `quant_checkpoint` 时默认从元数据识别来源，不重跑量化。
 显式传了 `quant_method` 就检查是否匹配。来源识别不替代张量、位宽和模型身份校验。

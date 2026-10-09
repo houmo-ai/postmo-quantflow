@@ -14,6 +14,7 @@ from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_
 
 
 EXPECTED_VARIANTS = {
+    "qwen-image-2.1": ["full"],
     "macaron-v1-tall": ["full", "lora"],
     "minicpm5-2.6b": ["full"],
     "qwen3.5-0.8b": ["full"],
@@ -215,7 +216,9 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
                 "image_token_gears": [96, 196, 384, 704, 1536],
                 "static_profiles": [],
             }
-        elif not model.startswith(("macaron", "qwen", "ornith")) or model == "qwen3-next-80b-a3b":
+        elif not model.startswith(("macaron", "qwen", "ornith")) or model in {
+            "qwen3-next-80b-a3b", "qwen-image-2.1"
+        }:
             assert description["vision"] is None
         else:
             assert description["vision"] == {
@@ -330,6 +333,7 @@ def test_registry_covers_each_public_artifact_kind():
         "tts",
         "vla",
         "glm53",
+        "qwen_image21",
     }
     assert {recipe.task for recipe in recipes} >= {
         "text-generation",
@@ -338,6 +342,7 @@ def test_registry_covers_each_public_artifact_kind():
         "text-to-speech",
         "speech-transcription",
         "image-to-video",
+        "image-generation",
     }
     assert all(recipe.build_adapter and recipe.inference_adapter for recipe in recipes)
 

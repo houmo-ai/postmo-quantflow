@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 import yaml
@@ -10,6 +11,7 @@ from xhmodel_merak.errors import ErrorCode, ModelError
 from xhmodel_merak.model_build.resolver import resolve_build_plan
 from xhmodel_merak.model_build.workflow import _set_recipe_path, materialize_workflow_config
 from xhmodel_merak.model_catalog import get_recipe, list_recipes, resolve_workflow_config
+from xhmodel_merak.model_catalog.identity import build_artifact_name
 from xhmodel_merak.model_catalog.precision import (
     deployment_precision_from_workflow,
     deployment_precision_replacements,
@@ -30,6 +32,33 @@ def _get(data, path):
     for part in path.split("."):
         data = data[part]
     return data
+
+
+@pytest.mark.parametrize("deployment,token", [
+    ({"image": "w16a16_sefp"}, "w16a16"),
+    ({"image": "w8a8_sefp"}, "w8a8"),
+    ({"encode": "w8a8_sefp", "decode": "w8a8_sefp"}, "w8a8"),
+    ({"encode": "w8a8_sefp", "decode": "w16a16_sefp"}, "wmix_amix"),
+])
+def test_artifact_template_uses_graph_precision_without_changing_checkpoint(deployment, token):
+    original = get_recipe("qwen-image-2.1")
+    recipe = replace(original, artifact_name_template="hmquant_xh2_image_{deployment_precision}_fixed")
+    name = build_artifact_name(recipe, recipe.default_variant, recipe.export_name,
+                               recipe.default_precision, None, None, deployment_precision=deployment)
+    assert name == f"hmquant_xh2_image_{token}_fixed"
+    assert recipe.default_precision.weight == "w16"
+
+
+@pytest.mark.parametrize("template", ["hmquant_fixed", "../{deployment_precision}",
+                                     "hm_{deployment_precision}_{deployment_precision}", "hm_{unknown}"])
+def test_artifact_template_rejects_ambiguous_or_unsafe_names(template):
+    with pytest.raises(ValueError, match="artifact name template"):
+        replace(get_recipe("qwen-image-2.1"), artifact_name_template=template)
+
+
+def test_artifact_template_cannot_conflict_with_a_fixed_name():
+    with pytest.raises(ValueError, match="combined with a fixed artifact name"):
+        replace(get_recipe("qwen-image-2.1"), fixed_artifact_name="hmquant_xh2_fixed")
 
 
 @pytest.mark.parametrize("recipe,path", list(_workflows()))

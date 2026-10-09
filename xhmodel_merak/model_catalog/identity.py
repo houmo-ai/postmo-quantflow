@@ -45,7 +45,15 @@ def build_artifact_name(
     precision: ResolvedPrecision,
     prefill: int | None,
     context: int | None,
+    *,
+    deployment_precision: Mapping[str, str] | None = None,
 ) -> str:
+    if recipe.artifact_name_template is not None:
+        if not deployment_precision:
+            raise RuntimeError(f"Recipe {recipe.model_id!r} needs resolved deployment precision for naming")
+        values = set(deployment_precision.values())
+        token = next(iter(values)).removesuffix("_sefp") if len(values) == 1 else "wmix_amix"
+        return recipe.artifact_name_template.replace("{deployment_precision}", token)
     if recipe.fixed_artifact_name is not None:
         return recipe.fixed_artifact_name
     if prefill is None or context is None or recipe.max_pe_length is None:

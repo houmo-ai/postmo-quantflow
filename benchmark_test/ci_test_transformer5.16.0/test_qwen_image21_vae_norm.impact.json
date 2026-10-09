@@ -1,0 +1,1 @@
+{"version":1,"rules":[{"id":"qwen-image21-vae-norm","patterns":["xhmodel_merak/xh_other_model/models/qwen_image21/vae_graph.py","xhmodel_merak/xh_other_model/models/qwen_image21/canvas_vae.py","xhmodel_merak/xh_other_model/models/qwen_image21/export.py"]}]}

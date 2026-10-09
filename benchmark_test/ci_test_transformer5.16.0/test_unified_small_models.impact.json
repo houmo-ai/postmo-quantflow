@@ -2,6 +2,20 @@
   "version": 1,
   "rules": [
     {
+      "id": "unified-qwen-image21",
+      "patterns": [
+        "xhmodel_merak/model_integrations/qwen_image21/**",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/**",
+        "xhmodel_merak/xh_llm/models/qwen3_vl/**",
+        "xhmodel_merak/xh_llm/models/qwen3_vl_embedding/**",
+        "configs_merak/workflows/xh2a/other_models/qwen_image21/*.yaml",
+        "benchmark_test/ci_test_transformer5.16.0/_qwen_image21_small_fixture.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_qwen_image21_feature_encoder.py",
+        "examples_merak/aigc/qwen_image21/unified.py"
+      ],
+      "nodes": ["test_public_build_relocate_and_inference[qwen-image-2.1/full]"]
+    },
+    {
       "id": "unified-common",
       "patterns": [
         "xhmodel_merak/model_build/**",

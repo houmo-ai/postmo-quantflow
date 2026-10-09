@@ -65,7 +65,9 @@ def test_synthesize_forwards_public_inputs_and_writes_pcm_wav(monkeypatch, tmp_p
     assert summary["output_wav"] == str(path) and summary["sample_rate"] == 24000
 
 
-@pytest.mark.parametrize("name", ["catalog", "build", "generate", "synthesize", "transcribe"])
+@pytest.mark.parametrize(
+    "name", ["catalog", "build", "generate", "generate_image", "dependencies", "synthesize", "transcribe"]
+)
 def test_examples_help_runs_from_repo_root_without_worker_imports(name):
     code = (
         "import runpy, sys\n"

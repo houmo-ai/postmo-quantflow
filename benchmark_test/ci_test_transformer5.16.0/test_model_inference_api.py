@@ -1719,11 +1719,17 @@ def test_recipe_contract_accepts_registered_context_workflow(tmp_path):
 
 
 @pytest.mark.parametrize("tamper", [None, "manifest", "workflow", "unsupported"])
-def test_artifact_precision_is_bound_to_effective_workflow(artifact, tamper):
+@pytest.mark.parametrize("templated_name", [False, True])
+def test_artifact_precision_is_bound_to_effective_workflow(artifact, tamper, templated_name):
+    from dataclasses import replace
+
     from xhmodel_merak.model_artifact.validation import validate_recipe_contract
 
     manifest = _complete_manifest(artifact)
     recipe = get_recipe(manifest["model_id"])
+    if templated_name:
+        recipe = replace(recipe, artifact_name_template="hmquant_xh2_test_{deployment_precision}_fixed")
+        manifest["export"]["artifact_name"] = "hmquant_xh2_test_wmix_amix_fixed"
     workflow_path = artifact / manifest["recipe"]["effective_workflow"]
     workflow = yaml.safe_load(workflow_path.read_text())
     workflow["export"]["model"]["visual_config"]["quant_scheme"]["quant_type"] = "w8a16h1_sefp"

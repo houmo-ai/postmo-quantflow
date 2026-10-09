@@ -38,6 +38,28 @@ path lists fail with an error, rather than quietly running a different diff.
 Changed-file lists must include both old and new paths for renames. Local Git
 discovery disables rename collapsing to preserve both paths.
 
+## Qwen-Image-2.1 environment preparation
+
+Use the same configured CI Python environment as the other model cases. Before
+running tests, install the selected requirements directly from the model recipe:
+
+```bash
+python benchmark_test/ci_test_transformer5.16.0/prepare_dependencies.py \
+  --model-id qwen-image-2.1 --packages diffusers huggingface-hub --install
+./benchmark_test/ci_test_transformer5.16.0/run.sh
+```
+
+This installs the pinned Diffusers and compatible Hub releases using that
+interpreter; it does not require a developer's conda environment name or a
+`work_dirs` source checkout on `PYTHONPATH`. Without `--install`, the helper only
+prints the selected requirements and command. It supplements the configured CI
+environment and does not certify a complete clean installation of a blocked
+dependency profile. Tests never install packages themselves. The image CLI and
+dependency export checks have their own impact declaration; real three-precision
+six-graph tests also run the CLI after relocating the package and deleting source
+weights. Shared environment changes must be checked against the public variant
+matrix, not only Qwen-Image-2.1 imports.
+
 ## Initialization state isolation
 
 The common function-scoped fixture saves and restores the three Torch
@@ -46,7 +68,7 @@ Checkpoint loading retains its no-initialization optimization inside a test;
 restoration runs on both success and failure. This isolates tests, not production
 calls. A test that constructs a native model after loading a checkpoint must
 request the `restore_model_initialization_state` fixture and scope that load
-with `with restore_model_initialization_state():`, or use a separate worker. The 46 unified flows already use independent workers.
+with `with restore_model_initialization_state():`, or use a separate worker. The 47 unified flows already use independent workers.
 Module/session fixtures and collection must not load checkpoints in the shared
 pytest process: the function-scoped guard does not bracket those operations.
 
@@ -311,8 +333,8 @@ this is not a full MiniCPM vision/export/runtime correctness suite.
 
 ## Unified model and variant regressions
 
-`test_unified_small_models.py` explicitly enumerates all 27 registered models
-and 46 variants. `test_unified_small_model_coverage.py` fails if the catalog and
+`test_unified_small_models.py` explicitly enumerates all 28 registered models
+and 47 variants. `test_unified_small_model_coverage.py` fails if the catalog and
 this list diverge, or their dependency profiles cannot share Transformers
 5.16.1. Each selected case runs `build_model`, moves the artifact, removes its
 generated source/checkpoint directories, and runs `inference_model` in a fresh
@@ -400,7 +422,7 @@ its process group before the GPU is reused. Its `.impact.json` selects parameter
 nodes for model-private source/adapter changes, and all variants of the specific
 model for its workflow configurations. Shared Qwen source also selects its MoE,
 Qwen3-Next, Macaron and WeMM consumers. Public unified build/inference/catalog
-and shared fixture changes select the entire 46-case matrix. Multiple changes
+and shared fixture changes select the entire 47-case matrix. Multiple changes
 are combined; `--format report` shows the exact pytest nodes and reasons.
 `test_unified_small_model_coverage.py` checks registered workflow routing, shared
 consumers and the actual pytest collection of every declared node. Global policy

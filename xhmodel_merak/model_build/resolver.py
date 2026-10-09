@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from xhmodel_merak.errors import ErrorCode, ModelError, invalid_parameter, unsupported_combination
-from xhmodel_merak.model_catalog.dependencies import dependency_profile
 from xhmodel_merak.model_catalog.contracts import ModelRecipe, VariantRecipe
+from xhmodel_merak.model_catalog.dependencies import dependency_profile
 from xhmodel_merak.model_catalog.identity import (
     build_artifact_name as _build_artifact_name,
 )
@@ -131,6 +131,20 @@ def resolve_build_plan(
     if recipe.max_pe_length is not None:
         config_replacements["export.model.max_pe_length"] = recipe.max_pe_length
 
+    source_bindings = _capture_build_source_bindings(recipe.model_id, source_dir, source_refs)
+    _validate_source_constraints(recipe, source_dir)
+    workflow_config = _select_context_workflow(recipe, variant, context)
+    config_path = resolve_workflow_config(workflow_config)
+    recipe_config = resolve_recipe_config(
+        recipe,
+        variant,
+        config_path,
+        model_dir=source_dir,
+        sources=source_refs,
+        deployment_precision=deployment_precision,
+        quant_checkpoint=checkpoint_path,
+        precision=resolved_precision,
+    )
     expected_artifact_name = _build_artifact_name(
         recipe,
         variant,
@@ -138,6 +152,7 @@ def resolve_build_plan(
         resolved_precision,
         prefill,
         context,
+        deployment_precision=recipe_config.deployment_precision,
     )
     if output_dir is None:
         from datetime import datetime
@@ -168,20 +183,6 @@ def resolve_build_plan(
         resource_refs=resource_refs,
         quant_checkpoint=checkpoint_path,
         lora=lora_request,
-    )
-    source_bindings = _capture_build_source_bindings(recipe.model_id, source_dir, source_refs)
-    _validate_source_constraints(recipe, source_dir)
-    workflow_config = _select_context_workflow(recipe, variant, context)
-    config_path = resolve_workflow_config(workflow_config)
-    recipe_config = resolve_recipe_config(
-        recipe,
-        variant,
-        config_path,
-        model_dir=source_dir,
-        sources=source_refs,
-        deployment_precision=deployment_precision,
-        quant_checkpoint=checkpoint_path,
-        precision=resolved_precision,
     )
     config_replacements.update(recipe_config.replacements)
     # Whole quant sections returned by family policies precede resource bindings.

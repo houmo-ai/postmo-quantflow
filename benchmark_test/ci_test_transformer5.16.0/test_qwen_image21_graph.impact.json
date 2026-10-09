@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen-image21-dit-graph",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/qwen_image21/graph.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/runtime.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/layout.py"
+      ]
+    }
+  ]
+}

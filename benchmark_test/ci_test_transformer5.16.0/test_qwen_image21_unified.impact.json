@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen-image21-unified-cli-and-dependencies",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/prepare_dependencies.py",
+        "examples_merak/aigc/qwen_image21/unified.py",
+        "examples_merak/unified_api/generate_image.py",
+        "examples_merak/unified_api/dependencies.py",
+        "xhmodel_merak/model_integrations/qwen_image21/plugin.py",
+        "xhmodel_merak/model_build/dependencies.py",
+        "xhmodel_merak/model_catalog/dependencies.py",
+        "xhmodel_merak/_requirements.py",
+        "xhmodel_merak/model_inference/inputs.py"
+      ]
+    }
+  ]
+}

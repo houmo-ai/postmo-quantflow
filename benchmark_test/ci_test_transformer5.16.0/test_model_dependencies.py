@@ -27,7 +27,7 @@ def test_all_registered_variants_have_explicit_dependency_profiles():
             assert set(profile["quantization"]) == set(recipe.quant_methods)
             count += 1
         assert "dependencies" not in describe_model(recipe.model_id)
-    assert count == 46
+    assert count == 47
 
 
 def test_dependencies_are_the_only_recipe_version_declaration():
@@ -137,6 +137,11 @@ def test_registered_dependencies_pin_tested_versions():
                 assert "transformers==5.16.1" in phase["pip"]
                 for requirement in phase["pip"]:
                     parsed = Requirement(requirement)
+                    if parsed.url:
+                        assert parsed.url.startswith("git+https://")
+                        revision = parsed.url.rsplit("@", 1)[-1]
+                        assert len(revision) == 40 and all(char in "0123456789abcdef" for char in revision)
+                        continue
                     pins = list(parsed.specifier)
                     assert len(pins) == 1 and pins[0].operator == "==", requirement
                     assert "*" not in pins[0].version, requirement

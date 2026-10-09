@@ -65,7 +65,7 @@ def _recipe() -> ModelRecipe:
     deployment = {component: "w8a8_ssfp" for component in COMPONENTS}
     return ModelRecipe(
         dependencies=runtime_dependencies(
-            common=(*IMAGE, "diffusers==0.37.0"),
+            common=(*IMAGE, "diffusers==0.41.0"),
             unresolved=(
                 "MiniMax-H3 unified inference still requires the host modular pipeline from model_dir",
                 "Use examples_merak.aigc.minimaxh3.hmonnx_demo until a VideoInferenceResult contract exists",

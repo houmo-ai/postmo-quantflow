@@ -3,6 +3,8 @@ import shutil
 from pathlib import Path
 from typing import Any, cast
 
+from torch import nn
+
 from xhmodel_merak.utils import calculate_file_md5
 from xhmodel_merak.xh_llm.builder import register_llm_model
 from xhmodel_merak.xh_llm.models.qwen3_vl import (
@@ -32,9 +34,12 @@ class XHQwen3VLEmbeddingModelConfig(XHQwen3VLModelConfig):
         self,
         *,
         output_hidden_states_for_export: bool = True,
+        output_pre_norm_hidden_states: bool = False,
         num_logits_to_keep: int = 0,
         **kwargs: Any,
     ):
+        if output_pre_norm_hidden_states and not output_hidden_states_for_export:
+            raise ValueError("pre-norm features require hidden-state export")
         super().__init__(
             num_logits_to_keep=num_logits_to_keep,
             output_hidden_states_for_export=(
@@ -45,6 +50,7 @@ class XHQwen3VLEmbeddingModelConfig(XHQwen3VLModelConfig):
         self.output_hidden_states_for_export = (
             output_hidden_states_for_export
         )
+        self.output_pre_norm_hidden_states = output_pre_norm_hidden_states
 
 
 @register_llm_model("Qwen3VLForConditionalGeneration_embedding")
@@ -65,6 +71,9 @@ class XHQwen3VLEmbeddingModel(XHQwen3VLModel):
     def init_wrap_model(self, hf_model: Any) -> Any:
         from ._llm_model_impl import embedding_wrap_cls_scope
 
+        if self.config.output_pre_norm_hidden_states:
+            # Qwen-Image-2.1 consumes the final decoder residual before RMSNorm.
+            hf_model.model.language_model.norm = nn.Identity()
         with embedding_wrap_cls_scope():
             return super().init_wrap_model(hf_model)
 

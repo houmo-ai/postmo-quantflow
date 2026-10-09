@@ -32,6 +32,7 @@ MODELS = {
     "ornith-1.0-35b-a3b": ("qwen_moe", ("full",)),
     "paddleocr-vl-1.6": ("paddleocr", ("full",)),
     "pi0.5-libero": ("pi05", ("lerobot-h50",)),
+    "qwen-image-2.1": ("qwen_image21", ("full",)),
     "qwen3-next-80b-a3b": ("qwen_next", ("full", "mtp")),
     "qwen3.5-0.8b": ("qwen_dense", ("full",)),
     "qwen3.5-122b-a10b": ("qwen_moe", ("full", "mtp", "dflash")),

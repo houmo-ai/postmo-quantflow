@@ -1,0 +1,1 @@
+{"version":1,"rules":[{"id":"qwen-image21-flash-attention","patterns":["xhmodel_merak/xh_other_model/models/qwen_image21/canvas_vae.py","xhmodel_merak/xh_other_model/models/qwen_image21/graph.py"]}]}

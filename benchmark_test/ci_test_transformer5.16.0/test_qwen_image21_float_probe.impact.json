@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen-image21-float-diagnostic",
+      "patterns": ["examples_merak/aigc/qwen_image21/float_probe.py"]
+    }
+  ]
+}

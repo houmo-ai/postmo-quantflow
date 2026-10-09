@@ -5,6 +5,7 @@ import json
 import math
 import re
 from collections.abc import Mapping
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,12 @@ def _validate_value(recipe: ModelRecipe, name: str, value: Any, schema: Mapping[
                 value,
                 f"must be > {schema['exclusiveMinimum']}",
             )
+        if schema.get("multipleOf") is not None:
+            divisor = Fraction(str(schema["multipleOf"]))
+            if divisor <= 0 or (Fraction(str(value)) / divisor).denominator != 1:
+                raise invalid_parameter(
+                    recipe.model_id, f"inputs.{name}", value, f"must be a multiple of {schema['multipleOf']}"
+                )
     if "enum" in schema and value not in schema["enum"]:
         raise invalid_parameter(recipe.model_id, f"inputs.{name}", value, f"must be one of {schema['enum']}")
 

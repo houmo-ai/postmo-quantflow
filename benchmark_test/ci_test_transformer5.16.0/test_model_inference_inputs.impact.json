@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "inference-input-numeric-schema",
+    "patterns": ["xhmodel_merak/model_inference/inputs.py"]
+  }]
+}

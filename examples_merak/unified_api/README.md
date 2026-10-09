@@ -71,6 +71,34 @@ python -m examples_merak.unified_api.generate \
 不传 `--golden` 就只推理；重复运行会清理上次未纳入 manifest 的 golden 输出。
 动作等模型的输入格式看 `catalog --full` 返回的 `input_schema`。
 
+## Qwen-Image-2.1 图片生成与编辑
+
+在构建或推理所用的同一个 Python 环境准备固定依赖；命令从 recipe 读取版本，不要求本机指定名称的 conda 环境：
+
+```bash
+python benchmark_test/ci_test_transformer5.16.0/prepare_dependencies.py \
+  --model-id qwen-image-2.1 --packages diffusers huggingface-hub --install
+
+python -m examples_merak.unified_api.build \
+  --model-id qwen-image-2.1 --model-dir /path/to/Qwen-Image-2.1 \
+  --output-dir ./work_dirs/qwen_image21_api --device cuda:0 \
+  --deployment-precision '{"image":"w8a16_sefp"}'
+
+python -m examples_merak.unified_api.generate_image \
+  --artifact-dir ./work_dirs/qwen_image21_api --prompt 'A white teapot.' \
+  --steps 20 --seed 42 --output ./work_dirs/teapot.png --device cuda:0
+
+python -m examples_merak.unified_api.generate_image \
+  --artifact-dir ./work_dirs/qwen_image21_api --prompt 'Make the teapot blue.' \
+  --image ./work_dirs/teapot.png --height 768 --width 1376 \
+  --negative-prompt '' --guidance-scale 2 --output ./work_dirs/blue_teapot.png --device cuda:0
+```
+
+默认约 1MP、1024×1024；高宽按 32 对齐，在包内 token 容量和 VAE 画布范围内可变。
+三种组件精度为 W16A16/W8A16/W8A8，构建后精度固定，图共六张。
+图片生成、参考图编辑和 CFG 都通过 `inference_model`；包的容量、真实几何、mask 和 cache 由模型 runtime 管理。
+详细配置与真实模型验证范围见 [Qwen-Image-2.1 示例](../aigc/qwen_image21/README.md)。
+
 ## Kokoro 中文语音
 
 ```bash
@@ -274,6 +302,11 @@ Qwen3.5-122B-A10B 的 MTP workflow 默认沿用主模型 W5 head 权重，生成
 和 `low_memory=True`；单卡执行设置 `CUDA_VISIBLE_DEVICES=1`、`device="cuda:0"`。
 
 ### 查询与导出模型依赖
+
+```bash
+python -m examples_merak.unified_api.dependencies \
+  --model-id qwen-image-2.1 --variant full --output-dir ./work_dirs/qwen_image21_environment
+```
 
 ```python
 from xhmodel_merak.model_build import describe_model, export_model_dependencies

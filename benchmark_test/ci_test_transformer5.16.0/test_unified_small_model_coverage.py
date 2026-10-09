@@ -3,14 +3,15 @@
 """Fail closed when public variants outgrow the executable integration matrix."""
 
 import pytest
-
 from _unified_cases import CASES
+
 from xhmodel_merak.model_catalog import list_recipes
 
 
 @pytest.mark.parametrize("variant", ["full", "mtp"])
 def test_next_ci_gptq_plan_uses_local_data_and_short_validation(tmp_path, monkeypatch, variant):
     from _unified_e2e_worker import prepare
+
     import xhmodel_merak.model_build.api as api
 
     case = next(c for c in CASES if c.fixture == "qwen_next" and c.variant == variant)
@@ -48,7 +49,8 @@ def test_all_variants_share_the_ci_transformers_environment():
 
 def _selected_cases(paths):
     from pathlib import Path
-    from select_tests import select_for_changes, SUITE_RELATIVE
+
+    from select_tests import SUITE_RELATIVE, select_for_changes
 
     owner = f"{SUITE_RELATIVE}/test_unified_small_models.py"
     result = select_for_changes(paths, repo_root=Path(__file__).resolve().parents[2])
@@ -76,7 +78,7 @@ def test_private_model_and_adapter_changes_select_related_cases():
         c.id for c in CASES if c.fixture in {"qwen_moe", "macaron"}
     }
     assert _selected_cases(["xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py"]) == {
-        c.id for c in CASES if c.model_id.startswith(("qwen", "ornith", "macaron", "wemm"))
+        c.id for c in CASES if c.model_id.startswith(("qwen3", "ornith", "macaron", "wemm"))
     }
 
 

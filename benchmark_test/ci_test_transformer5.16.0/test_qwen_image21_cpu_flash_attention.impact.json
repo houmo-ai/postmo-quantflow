@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "qwen-image21-cpu-flash-calibration",
+    "patterns": [
+      "xhmodel_merak/xh_other_model/models/qwen_image21/build.py",
+      "xhmodel_merak/xh_other_model/models/qwen_image21/export.py"
+    ]
+  }]
+}

@@ -192,7 +192,8 @@ def validate_recipe_contract(
             }
         else:
             workflow_model_name = workflow_model.get("model_name")
-            if workflow_model_name is not None or recipe.fixed_artifact_name is None:
+            if (workflow_model_name is not None
+                    or (recipe.fixed_artifact_name is None and recipe.artifact_name_template is None)):
                 if workflow_model_name != manifest_model_name:
                     mismatches["effective_workflow.export.model.model_name"] = {
                         "expected": manifest_model_name,
@@ -344,7 +345,10 @@ def validate_recipe_contract(
             "actual": {"prefill_chunk_length": prefill, "context_length": context},
         }
 
-    if model_name_allowed and precision is not None and lengths_valid:
+    if (
+        model_name_allowed and precision is not None and lengths_valid
+        and (recipe.artifact_name_template is None or deployment_valid)
+    ):
         expected_artifact_name = _build_artifact_name(
             recipe,
             variant,
@@ -352,6 +356,7 @@ def validate_recipe_contract(
             precision,
             prefill,
             context,
+            deployment_precision=deployment_precision if deployment_valid else None,
         )
         if export_data.get("artifact_name") != expected_artifact_name:
             mismatches["export.artifact_name"] = {

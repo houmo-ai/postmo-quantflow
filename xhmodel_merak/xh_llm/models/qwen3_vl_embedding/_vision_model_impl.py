@@ -435,12 +435,12 @@ class _Qwen3VLEmbeddingVisionPatchMerger(DynamicModule):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch = hidden_states.shape[0]
         if self.use_postshuffle_norm:
-            hidden_states = hidden_states.view(
+            hidden_states = hidden_states.reshape(
                 batch,
                 -1,
                 self.hidden_size,
             )
-        hidden_states = self.norm(hidden_states).view(
+        hidden_states = self.norm(hidden_states).reshape(
             batch,
             -1,
             self.hidden_size,

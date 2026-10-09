@@ -38,8 +38,9 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig, Qwen3VLTextConfig, Qwen3VLVisionConfig
-
-# from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
+from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+    Qwen3VLForConditionalGeneration as NativeQwen3VLForConditionalGeneration,
+)
 from transformers.processing_utils import Unpack
 from transformers.utils import TransformersKwargs, auto_docstring, is_torchdynamo_compiling
 from transformers.utils.deprecation import deprecate_kwarg
@@ -83,6 +84,8 @@ class Qwen3VLVisionRotaryEmbedding(nn.Module):
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
+        self.dim = dim
+        self.theta = theta
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -280,6 +283,16 @@ class Qwen3VLVisionBlock(GradientCheckpointingLayer):
 class Qwen3VLTextRotaryEmbedding(nn.Module):
     inv_freq: torch.Tensor  # fix linting for `register_buffer`
 
+    @staticmethod
+    def compute_default_rope_parameters(config, device=None, seq_len=None):
+        if "default" in ROPE_INIT_FUNCTIONS:
+            return ROPE_INIT_FUNCTIONS["default"](config, device, seq_len=seq_len)
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+            Qwen3VLTextRotaryEmbedding as NativeRotaryEmbedding,
+        )
+
+        return NativeRotaryEmbedding.compute_default_rope_parameters(config, device, seq_len=seq_len)
+
     def __init__(self, config: Qwen3VLTextConfig, device=None):
         super().__init__()
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
@@ -290,7 +303,11 @@ class Qwen3VLTextRotaryEmbedding(nn.Module):
         self.original_max_seq_len = config.max_position_embeddings
 
         self.config = config
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        if self.rope_type == "default":
+            # Transformers 5 moved default RoPE initialization onto each model.
+            self.rope_init_fn = self.compute_default_rope_parameters
+        else:
+            self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
 
         inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -561,6 +578,15 @@ class Qwen3VLPreTrainedModel(PreTrainedModel):
         "hidden_states": Qwen3VLTextDecoderLayer,
         "attentions": Qwen3VLTextAttention,
     }
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if isinstance(module, Qwen3VLVisionRotaryEmbedding):
+            # This nonpersistent buffer is absent from checkpoints. Transformers
+            # 5 materializes it from meta storage during from_pretrained, so its
+            # constructor alone does not initialize the loaded model's table.
+            inv_freq = 1.0 / (module.theta ** (torch.arange(0, module.dim, 2, dtype=torch.float32) / module.dim))
+            module.inv_freq.copy_(inv_freq.to(device=module.inv_freq.device, dtype=module.inv_freq.dtype))
 
 
 class Qwen3VLVisionModel(Qwen3VLPreTrainedModel):
@@ -1344,7 +1370,7 @@ class Qwen3VLCausalLMOutputWithPast(ModelOutput):
 
 class Qwen3VLForConditionalGeneration(Qwen3VLPreTrainedModel, GenerationMixin):
     _checkpoint_conversion_mapping = {}
-    _tied_weights_keys = ["lm_head.weight"]
+    _tied_weights_keys = NativeQwen3VLForConditionalGeneration._tied_weights_keys.copy()
     # Reference: fix gemma3 grad acc #37208
     accepts_loss_kwargs = False
     config: Qwen3VLConfig

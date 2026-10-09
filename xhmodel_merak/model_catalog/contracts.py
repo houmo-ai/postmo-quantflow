@@ -115,6 +115,7 @@ class ModelRecipe:
     quant_capabilities: tuple[tuple[str, tuple[str, ...]], ...] = ()
     environment: dict[str, str] = field(default_factory=dict)
     fixed_artifact_name: str | None = None
+    artifact_name_template: str | None = None
     recipe_version: str = "2"
     required_runtime_files: tuple[str, ...] = ()
     config_resolver: str | None = None
@@ -128,6 +129,15 @@ class ModelRecipe:
     dependencies: DependencySpec = field(default_factory=DependencySpec)
 
     def __post_init__(self) -> None:
+        if self.artifact_name_template is not None:
+            if self.fixed_artifact_name is not None:
+                raise ValueError("artifact name template cannot be combined with a fixed artifact name")
+            remainder = self.artifact_name_template.replace("{deployment_precision}", "")
+            if (
+                self.artifact_name_template.count("{deployment_precision}") != 1
+                or re.fullmatch(r"[a-z0-9_-]+", remainder) is None
+            ):
+                raise ValueError("artifact name template must contain one {deployment_precision} token")
         alias_keys: set[tuple[str, str]] = set()
         for path, old, new in self.config_type_aliases:
             if (

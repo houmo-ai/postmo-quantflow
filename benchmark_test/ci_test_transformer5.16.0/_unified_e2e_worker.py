@@ -32,6 +32,12 @@ def prepare(case, root, monkeypatch):
     inputs = {"prompt": "hello world", "max_new_tokens": 2}
     replacements = dict(recipe.config_replacements)
     family = case.fixture
+    if family == "qwen_image21":
+        from _qwen_image21_small_fixture import prepare_qwen_image21
+
+        inputs = prepare_qwen_image21(source, root, catalog, recipe, monkeypatch)
+        kwargs["deployment_precision"] = {"image": "w8a8_sefp"}
+        return kwargs, inputs
     if family == "pi05":
         from _pi05_small_fixture import write_pi05
 
@@ -244,6 +250,7 @@ def configure_calibration(case, calibration, monkeypatch):
 def validate_expert_lora_artifacts(meta, adapters):
     """Check final SDK operands after publication, including streamed graphs."""
     import hashlib
+
     import onnx
     from onnx import numpy_helper
 
@@ -276,6 +283,7 @@ def validate_expert_lora_artifacts(meta, adapters):
 def run(case, root, *, low_memory=None):
     import pytest
     import torch
+
     from xhmodel_merak.model_build import build_model
     from xhmodel_merak.model_inference import inference_model
 
@@ -381,6 +389,25 @@ def run(case, root, *, low_memory=None):
                     assert all(len(c["buckets"]) == 1 for c in meta["components"].values())
                     assert output.segments[0]["route"] == "t0032_f0160"
                     record["tested_routes"] = ["t0032_f0160"]
+                if case.fixture == "qwen_image21":
+                    import numpy as np
+
+                    assert (output.height, output.width) == (64, 32)
+                    assert output.image.shape == (64, 32, 4) and output.image.dtype == np.uint8
+                    assert result.deployment_precision == {"image": "w8a8_sefp"}
+                    edited = inference_model(
+                        artifact_dir=str(moved),
+                        device="cuda:0",
+                        inputs={
+                            **inputs,
+                            "prompt": "Make it blue.",
+                            "images": [str(root / "reference.png")],
+                        },
+                    )
+                    assert edited.image.shape == output.image.shape and edited.stats["reference_count"] == 1
+                    repeated = inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
+                    assert np.array_equal(output.image, repeated.image)
+                    record["repeat_bit_exact"] = True
                 if case.variant in ("lora", "lora_mtp"):
                     # The public API runs the root model. Exercise the exported
                     # adapter too, through the same runtime used by that API.
@@ -420,4 +447,4 @@ def run(case, root, *, low_memory=None):
 
 if __name__ == "__main__":
     case = next(c for c in CASES if c.id == sys.argv[1])
-    run(case, Path(sys.argv[2]), low_memory=True if "--low-memory" in sys.argv[3:] else None)
+    run(case, Path(sys.argv[2]).resolve(), low_memory=True if "--low-memory" in sys.argv[3:] else None)

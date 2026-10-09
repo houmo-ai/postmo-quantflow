@@ -1,0 +1,1 @@
+{"version":1,"rules":[{"id":"qwen-image21-capacity","patterns":["xhmodel_merak/xh_other_model/models/qwen_image21/capacity.py","xhmodel_merak/xh_other_model/models/qwen_image21/processor.py"]}]}

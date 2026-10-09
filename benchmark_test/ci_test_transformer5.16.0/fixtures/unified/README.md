@@ -34,6 +34,13 @@ from a workstation at test time.
   expert norms, a 50-step action horizon and real normalization tensors. Only
   model width/depth and the denoising iteration budget are reduced. Its
   SentencePiece tokenizer is trained on a tiny local corpus during the test.
+- Qwen-Image-2.1 is constructed by `_qwen_image21_small_fixture.py` with seed 13.
+  It retains Qwen3-VL's three DeepStack branches, two complete DiT layers and
+  the five-level RGBA VAE. Its 64-entry tokenizer and native processor are
+  generated offline. The public build exports all six W8A8 graphs on CPU,
+  then the test relocates the package, removes the source checkpoint and runs
+  generation, reference editing and repeated generation. Reference dimensions
+  are 32x64 and output dimensions 64x32 (height x width).
 
 Norm vectors have small deterministic channel differences. This avoids
 constant folding an all-identical synthetic vector into a scalar and keeps

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen-image21-feature-encoder",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/ling_3_flash/_compat.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/build.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/feature_graph.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/processor.py",
+        "xhmodel_merak/xh_llm/models/qwen3_vl/data_preprocess.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/vision_graph.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/capacity.py"
+      ]
+    }
+  ]
+}
