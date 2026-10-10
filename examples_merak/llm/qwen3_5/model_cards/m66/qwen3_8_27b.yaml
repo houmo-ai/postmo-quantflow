@@ -1,0 +1,132 @@
+schema_version: 2
+external:
+  model:
+    id: qwen3_8_27b
+    family: qwen3_5
+    display_name: Qwen3.8 27B
+  parameters:
+    total: 27781427952
+    active: 27781427952
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2048]
+    prefill: 107.01
+    decode: 0.052251
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: 原生 vLLM
+    quantized_format: w8a8_mxint8
+    comparisons:
+    - name: bfcl_v4_without_memory_web_search_xh3_all
+      dataset: BFCL-V4 / 不含 memory、web_search
+      metric: Accuracy (%)，原生 vLLM vs XH3 All
+      float: 74.60
+      quant: 74.31
+      delta: -0.29
+      evidence: /data01/home/chuyuan.wei/evalscope_runs/multi_model_multi_task_evalscope_summary.md
+      status: verified
+    - name: livecodebench_release_v6_xh3_all
+      dataset: LiveCodeBench v6 / release_v6
+      metric: Score (%)，原生 vLLM vs XH3 All，超时/未完成计错
+      float: 90.05
+      quant: 78.86
+      delta: -11.19
+      evidence: /data01/home/chuyuan.wei/evalscope_runs/multi_model_multi_task_evalscope_summary.md
+      status: verified
+  owner: zukang.xu
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - xh3
+    - llm
+    - m66
+  source:
+    provider: 待补
+    name: Qwen3.8 27B
+    url: ''
+    license: ''
+    raw_model_path: <model_dir>
+  components:
+  - id: model
+    display_name: Qwen3.8 27B
+    type: llm_models
+    precision: w8a8_mxint8
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: null
+    model_dir: <model_dir>
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: XH3
+    precision:
+      overall: w8a8_mxint8
+      components:
+        model_quant_scheme: w8a8_mxint8
+        model_quant_scheme_nodes_lm_head: w8a8_mxint8
+        model_visual_config_quant_scheme: w8a8_mxint8
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/qwen3_8_27b
+  release:
+    version_id: qwen3_8_27b_w8a8_mxint8_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: Qwen3.8 27B
+      release_path: ''
+      release_url: ''
+      version: ''
+      date: ''
+      quant_type: w8a8_mxint8
+      artifact_type: hmonnx
+      status: missing
+  presentation:
+    summary: Qwen3.8 27B 的 M66/XH3 W8A8 MXINT8 模型卡及精度记录。
+    demo:
+      kind: metadata_only
+    limitations:
+    - 当前未提供对应的 Merak workflow 配置，config_path 留空。
+    - 精度来自原生 vLLM 与 XH3 All 的对比，尚无 M66 真机验证记录。
+    - 评测汇总未注明原生 vLLM 的浮点 dtype。
+    - LiveCodeBench v6 的超时/未完成按错计：原生 vLLM 8 题，XH3 All 156 题；回答错误分别为 97 题和 67 题。
+    - 原始权重路径、来源、发版链接和部分业务 IO 仍需人工确认。
+    evidence:
+      examples:
+      - examples_merak/llm/qwen3_5
+      readme:
+      - examples_merak/llm/qwen3_5/readme.md
