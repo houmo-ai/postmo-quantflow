@@ -15,11 +15,10 @@ from xhquant.api import get_xhquant_logger
 from xhquant.utils.registry import _DMRegistryCls
 
 from ...base_llm_model import BaseLLMModel
-from ...base_model import get_model_param_buffer_size_gb
 from ...builder import register_llm_model
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...types import ExportData, LLMModelState, VLLMModelMeta
-from ...utils import get_cpu_memory_mb, is_huge_model_export_enabled
+from ...utils import get_cpu_memory_mb, get_model_param_buffer_size_gb, is_huge_model_export_enabled
 from ..qwen3_5.qwen3_5_llm_model import (
     Qwen3_5_ModelMeta,
     XHQwen3_5Model,
@@ -105,9 +104,7 @@ class _Qwen3NextHFCompatible(TextLLMHFCompatible):  # noqa: N801
                     "past_seq_length": self._past_seq_length + start,
                 }
             )
-            prepare_page_attention = getattr(
-                self._llm_model, "prepare_page_attention_context", None
-            )
+            prepare_page_attention = getattr(self._llm_model, "prepare_page_attention_context", None)
             if callable(prepare_page_attention):
                 prepare_page_attention(self._past_seq_length + start, end - start)
             result = self._llm_model.forward(*data_input)
@@ -127,9 +124,7 @@ def build_qwen3_next_hf_compatible_model(
     compatible_modules = _DMRegistryCls("XHCompatible")
     hf_model_cls = type(hf_model)
     if hf_model_cls not in compatible_modules:
-        compatible_modules.register_module(
-            {hf_model_cls: hf_model_cls.__name__}, _Qwen3NextHFCompatible
-        )
+        compatible_modules.register_module({hf_model_cls: hf_model_cls.__name__}, _Qwen3NextHFCompatible)
     return compatible_modules.convert(hf_model, text_llm_model=xh_model)
 
 
@@ -167,9 +162,7 @@ class XHQwen3NextModel(XHQwen3_5Model):
                     self.full_attention_layer_indices.append(idx)
                     break
                 self.linear_attention_layer_indices.append(idx)
-            self.config.max_layers = len(self.full_attention_layer_indices) + len(
-                self.linear_attention_layer_indices
-            )
+            self.config.max_layers = len(self.full_attention_layer_indices) + len(self.linear_attention_layer_indices)
             self.config.only_first_block = False
         else:
             max_layers = self.config.get_max_decode_layers()
@@ -257,12 +250,8 @@ class XHQwen3NextModel(XHQwen3_5Model):
         ]
         outputs = ["logits"]
         if not self._kvcache_mixin.enable_page_attention:
-            inputs.extend(
-                f"past_key_cache_{idx}" for idx in range(self.kvcache_config.num_layers)
-            )
-            inputs.extend(
-                f"past_value_cache_{idx}" for idx in range(self.kvcache_config.num_layers)
-            )
+            inputs.extend(f"past_key_cache_{idx}" for idx in range(self.kvcache_config.num_layers))
+            inputs.extend(f"past_value_cache_{idx}" for idx in range(self.kvcache_config.num_layers))
 
         linear_layers = self.kvcache_config.linear_kv_cache_config.num_layers
         suppress_recurrent_state_outputs = self._set_recurrent_state_output_contract()
@@ -284,20 +273,13 @@ class XHQwen3NextModel(XHQwen3_5Model):
             if self._kvcache_mixin.split_conv_cache:
                 for idx in range(linear_layers):
                     for branch in ("q", "k", "v"):
-                        outputs.extend(
-                            f"conv_cache_out_{branch}_{idx}_{step}"
-                            for step in range(verify_steps)
-                        )
+                        outputs.extend(f"conv_cache_out_{branch}_{idx}_{step}" for step in range(verify_steps))
             else:
                 for idx in range(linear_layers):
-                    outputs.extend(
-                        f"conv_cache_out_{idx}_{step}" for step in range(verify_steps)
-                    )
+                    outputs.extend(f"conv_cache_out_{idx}_{step}" for step in range(verify_steps))
             if not suppress_recurrent_state_outputs:
                 for idx in range(linear_layers):
-                    outputs.extend(
-                        f"recurrent_state_out_{idx}_{step}" for step in range(verify_steps)
-                    )
+                    outputs.extend(f"recurrent_state_out_{idx}_{step}" for step in range(verify_steps))
         else:
             if self._kvcache_mixin.split_conv_cache:
                 for idx in range(linear_layers):
@@ -327,15 +309,11 @@ class XHQwen3NextModel(XHQwen3_5Model):
     def _check_big_language_placeholder_export_supported(self, empty_hf_model: Any) -> None:
         hf_model_type = str(getattr(empty_hf_model.config, "model_type", "")).lower()
         if hf_model_type != "qwen3_next":
-            raise NotImplementedError(
-                "Qwen3-Next big-model placeholder export requires a qwen3_next model."
-            )
+            raise NotImplementedError("Qwen3-Next big-model placeholder export requires a qwen3_next model.")
 
         language_model = self._get_language_model(empty_hf_model)
         if not hasattr(language_model, "modules"):
-            raise NotImplementedError(
-                "Qwen3-Next big-model placeholder export requires an nn.Module language model."
-            )
+            raise NotImplementedError("Qwen3-Next big-model placeholder export requires an nn.Module language model.")
 
         found_types = {type(module).__name__ for module in language_model.modules()}
         required_hf_types = {
@@ -346,8 +324,7 @@ class XHQwen3NextModel(XHQwen3_5Model):
         missing_types = sorted(required_hf_types - found_types)
         if missing_types:
             raise NotImplementedError(
-                "Qwen3-Next big-model placeholder export is missing required modules "
-                f"{missing_types}."
+                f"Qwen3-Next big-model placeholder export is missing required modules {missing_types}."
             )
 
     def export_hmonnx(self, output_dir: str) -> VLLMModelMeta:
@@ -380,6 +357,7 @@ class XHQwen3NextModel(XHQwen3_5Model):
         self._configure_spec_decode_target_export()
 
         from ...shared_head import quantized_head
+
         shared_head = quantized_head(self._quanted_model.decode) if self.config.spec_decode_mode else None
 
         self._export_hmonnx(exported_info)
@@ -403,9 +381,7 @@ class XHQwen3NextModel(XHQwen3_5Model):
                 draft_model.bind_target_head(shared_head)
                 draft_model.to_quanted_aligned()
                 draft_meta = draft_model.export_hmonnx(draft_cfg.work_dir)
-                draft_meta.hmonnx = str(
-                    Path(draft_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix()
-                )
+                draft_meta.hmonnx = str(Path(draft_meta.hmonnx).relative_to(exported_info.exported_dir).as_posix())
                 setattr(meta_info, f"{stage.removeprefix('mtp_draft_')}_mtp_config", draft_meta)
                 if stage.endswith("prefill"):
                     meta_info.mtp_prefill_config = draft_meta
@@ -420,9 +396,7 @@ class XHQwen3NextModel(XHQwen3_5Model):
                 self.config,
                 meta_info,
             )
-            meta_info.spec_decode_draft_head_weight_bits = (
-                spec_decode_section["draft_head_weight_bits"]
-            )
+            meta_info.spec_decode_draft_head_weight_bits = spec_decode_section["draft_head_weight_bits"]
             meta_info.spec_decode = spec_decode_section
 
         meta_info.prefill_onnx = meta_info.prefill_hmonnx

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "hf-remote-code-contract",
+      "patterns": [
+        "xhmodel_merak/xh_llm/base_model.py"
+      ]
+    }
+  ]
+}

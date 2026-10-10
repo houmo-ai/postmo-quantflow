@@ -4,6 +4,7 @@
     {
       "id": "model-dependencies",
       "patterns": [
+        "pyproject.toml",
         "xhmodel_merak/model_catalog/**",
         "xhmodel_merak/model_build/dependencies.py",
         "xhmodel_merak/model_build/__init__.py",

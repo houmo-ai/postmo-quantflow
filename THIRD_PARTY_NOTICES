@@ -1377,3 +1377,22 @@ CPU FP32 multi-view matching grid construction from original camera parameters.
 Portable two/six-view export, camera input preparation and external Gaussian
 adapter/render orchestration. Upstream model weights, datasets and CUDA renderer
 implementation are not bundled with this source change.
+
+----------------------------------------------------------------------
+Spark-X2.5
+----------------------------------------------------------------------
+Component Name: XHToken Spark-X2.5 model implementation
+Version: revision 0bcb35678590218655dff3765b9e61c83b35e9c4
+Source:
+https://huggingface.co/XHToken/Spark-X2.5-4B/tree/0bcb35678590218655dff3765b9e61c83b35e9c4
+Copyright Statement:
+Copyright 2026 The XHToken team and the HuggingFace Inc. team. All rights reserved.
+Copyright 2026 HOUMO AI (modifications)
+License: Apache License, Version 2.0
+License Text: licenses/Spark-X2.5/LICENSE
+Imported and modified files:
+    xhmodel_merak/xh_llm/models/xh_token_spark_2_5/spark_2_5/configuration_spark.py
+    xhmodel_merak/xh_llm/models/xh_token_spark_2_5/spark_2_5/modeling_spark.py
+Modifications cover configuration validation, Transformers cache/mask and
+typing compatibility, and packed Linear dtype handling. Model weights are not
+redistributed by this repository.

@@ -60,8 +60,13 @@ def write_native_checkpoint(source: Path, family: str):
     config_cls = transformers.AutoConfig.for_model
     raw = dict(config)
     model_type = raw.pop("model_type")
+    if family == "spark":
+        from xhmodel_merak.xh_llm.models.xh_token_spark_2_5.spark_2_5 import Spark2_5ForCausalLM
+
+        model_cls = Spark2_5ForCausalLM
     config = config_cls(model_type, **raw)
-    model_cls = getattr(transformers, spec["config"]["architectures"][0])
+    if family != "spark":
+        model_cls = getattr(transformers, spec["config"]["architectures"][0])
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(4891)
         model = model_cls(config).eval()

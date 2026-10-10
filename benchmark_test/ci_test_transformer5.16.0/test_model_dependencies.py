@@ -2,7 +2,9 @@ import hashlib
 import json
 import subprocess
 import sys
+import tomllib
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
@@ -10,6 +12,26 @@ from packaging.requirements import Requirement
 from xhmodel_merak.model_build import describe_model, export_model_dependencies
 from xhmodel_merak.model_catalog import get_recipe, list_recipes
 from xhmodel_merak.model_catalog.dependencies import DependencySpec, dependency_profile, merge_requirements
+from xhmodel_merak.model_integrations._dependencies import GPTQ_REQUIREMENTS, runtime_dependencies
+
+
+@pytest.mark.parametrize("package", ["numpy", "datasets"])
+def test_export_package_requirements_match_tested_quantization_versions(package):
+    project = tomllib.loads((Path(__file__).resolve().parents[2] / "pyproject.toml").read_text())
+    export = {
+        requirement.name: requirement
+        for value in project["project"]["optional-dependencies"]["export"]
+        for requirement in [Requirement(value)]
+    }
+    tested = {
+        requirement.name: requirement
+        for value in (*runtime_dependencies().common, *GPTQ_REQUIREMENTS)
+        for requirement in [Requirement(value)]
+    }
+    version = next(iter(tested[package].specifier)).version
+    assert version in export[package].specifier, (
+        f"export extra rejects tested {package}=={version}: {export[package]}"
+    )
 
 
 def test_all_registered_variants_have_explicit_dependency_profiles():

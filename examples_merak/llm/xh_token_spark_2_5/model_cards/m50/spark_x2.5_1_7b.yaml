@@ -1,0 +1,135 @@
+schema_version: 2
+external:
+  model:
+    id: spark_x2.5_1.7b
+    family: spark_x2.5
+    display_name: Spark-X2.5-1.7B
+  parameters:
+    total: 1707657216
+    active: 1707657216
+    unit: parameters
+    # 本地 checkpoint safetensors 张量计数；tied embedding / lm_head 仅计一次。
+    status: verified
+  compute:
+    # prefill 按 2048 tokens（8 次 256-token 导出图调用）；decode 按单次 1 token。
+    # MAC=2；仅计 Linear、MatMul、GroupMatMul 和 FlashAttention 的 QKᵀ/AV。
+    # 按静态形状：全注意力 KV=2048，滑窗 KV=prefill 768 / decode 512；不扣除 mask。
+    # 不计归一化、RoPE、激活、逐元素、量化及访存开销；这是主要算术量估计。
+    # 2048-token prefill 按 8 次调用的同口径上界估计为 6.409970253824 TFLOPs。
+    # 图路径、SHA256、公式及分项：spark_x2.5_1_7b.compute.json。
+    input_shape: [1, 2048]
+    prefill: 6.409970253824
+    decode: 0.003620601856
+    unit: TFLOPs
+    status: inferred
+  precision:
+    float_format: FP
+    quantized_format: w8a8h1_sefp
+    comparisons:
+      - name: IFEval_hmonnx
+        dataset: IFEval / 541 questions
+        metric: Accuracy, FP vs HMONNX
+        float: 0.895
+        quant: 0.891
+        delta: -0.004
+        evidence: http://jira.houmo.ai/browse/QTL-537
+        status: verified
+      - name: aime_2026_hmonnx
+        dataset: IFEval / 541 questions
+        metric: Accuracy, FP vs HMONNX
+        float: 0.694
+        quant: 0.667
+        delta: -0.027
+        evidence: http://jira.houmo.ai/browse/QTL-537
+        status: verified
+  owner: hui.li
+internal:
+  model:
+    type: llm_models
+    modality:
+      - text
+    task:
+      - inference
+    tags:
+      - merak
+      - xh2a
+      - llm
+  source:
+    provider: XHToken
+    name: Spark-X2.5-1.7B
+    url: https://modelscope.cn/models/XHToken/Spark-X2.5-1.7B
+    license: Apache-2.0
+    raw_model_path: <model_dir>
+  components:
+    - id: model
+      display_name: Spark-X2.5-1.7B
+      type: llm_models
+      precision: w8a8h1_sefp
+      inputs:
+        - name: input
+          type: tensor
+          required: true
+          description: 模型输入张量或预处理后的输入参数。
+      outputs:
+        - name: output
+          type: tensor
+          required: false
+          description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+      - name: input
+        type: tensor
+        required: true
+        description: 模型输入张量或预处理后的输入参数。
+    outputs:
+      - name: output
+        type: tensor
+        required: false
+        description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/xh_token_spark/1_7b/xh_token_spark_1_7b_xh2a_w8a8.yaml
+    model_dir: <model_dir>
+    class: auto
+    actions:
+      # quant: null；RTN W8A8 在 export 阶段执行。
+      - export
+      - dump_golden
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_quant_scheme_nodes_lm_head: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/spark_x2_5_1_7b
+  release:
+    version_id: spark_x2_5_1_7b_w8a8h1_sefp_draft
+    target_status: draft
+    url: ""
+    reviewer: ""
+    quant_models:
+      - name: Spark-X2.5-1.7B
+        release_path: ""
+        release_url: ""
+        version: ""
+        date: ""
+        quant_type: w8a8h1_sefp
+        artifact_type: hmonnx
+        status: missing
+  presentation:
+    summary: Spark-X2.5-1.7B 稠密文本生成模型，使用混合滑窗/全注意力；当前 XH2a workflow 为 RTN W8A8，部署上下文 2048，prefill chunk 256。
+    demo:
+      kind: metadata_only
+    limitations:
+      - 发版产物、链接、版本、日期和审核人尚未填写。
+      - 原生配置支持 1048576 位置长度；当前 workflow 的 context_max_length 为 2048，不能据此声明已验证 1M 上下文部署。
+      - 计算量按导出 HMONNX 的静态形状估算主要矩阵算术量；未计全部算子，也不代表内核实测或有效 token 的精确计算量。
+    evidence:
+      examples:
+        - examples_merak/llm/xh_token_spark_2_5/xh_token_spark_2_5_workflow.py
+        - examples_merak/llm/xh_token_spark_2_5/xh_token_spark_2_5_hmonnx_generate.py
+      readme:
+        - examples_merak/llm/xh_token_spark_2_5/README.md

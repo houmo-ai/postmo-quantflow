@@ -44,6 +44,10 @@ def configure_calibration(case, calibration, monkeypatch):
 
     def resolve(**kwargs):
         plan = original(**kwargs)
+        if case.fixture == "spark" and plan.quant_method is None:
+            # Spark 1.7B uses SDK RTN during export, without a quant stage.
+            # Do not create quant.calibration overrides for this workflow.
+            return plan
         replacements = copy.deepcopy(plan.config_replacements)
         quant = replacements.get("quant")
         fields = {
@@ -52,8 +56,13 @@ def configure_calibration(case, calibration, monkeypatch):
             "calibration.seqlen": 64,
             "runtime.batch_size": 1,
         }
-        if case.fixture in ("qwen_next", "glm", "ling"):
+        if case.fixture in ("qwen_next", "glm", "ling", "spark"):
             fields["calibration.jsonl"] = fields.pop("calibration.dataset")
+        if case.fixture == "spark":
+            fields["layer_config"] = {
+                "model.layers.[0-9]+.self_attn.(q_k_v_proj|out_proj)": {"bits": 8, "data_type": "int"},
+                "model.layers.(0|1|4|5).mlp.(gate_proj|up_proj|down_proj)": {"bits": 8, "data_type": "int"},
+            }
         if case.fixture == "qwen_next" and plan.quant_method == "gptq":
             # A random tiny checkpoint is not a WikiText benchmark. Keep real
             # quantization/reload and public inference, without hub downloads

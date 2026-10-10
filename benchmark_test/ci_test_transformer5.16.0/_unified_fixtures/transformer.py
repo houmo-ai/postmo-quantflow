@@ -15,6 +15,8 @@ def prepare(case, root, monkeypatch):
         config = module.prepare_source(source, root, calibration, inputs, kwargs, replacements)
     else:
         config = write_native_checkpoint(source, "qwen_moe" if family == "macaron" else family)
+    if family == "spark" and case.model_id == "spark-x2.5-4b":
+        kwargs["quant_output_dir"] = str(root / "quant")
     gemma = family.startswith("gemma")
     context = 320 if gemma else 256 if family == "paddleocr" else 64
     prefill = 320 if gemma else 64 if family in ("paddleocr", "ling") else 8

@@ -1,0 +1,76 @@
+# Spark AutoRound W4 checkpoint，gate 和 lm_head 保持浮点。
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  artifact_format: gptqmodel_hf
+  output_format: gptqmodel_hf
+  bits: 4
+  group_size: 64
+  sym: true
+  data_type: int_sym_gptq
+  # 对齐 spark_tokens_autoround.py 的 build_mixed_layer_config_arg。
+  # 所有量化 Linear 使用 W4；MLP/Attention gate 和 lm_head 跳过量化。
+  layer_config:
+    'model.layers.[0-9]+.self_attn.(q_k_v_proj|out_proj)':
+      bits: 4
+      data_type: int
+    'model.layers.[0-9]+.mlp.(up_proj|down_proj)':
+      bits: 4
+      data_type: int
+    'model.layers.[0-9]+.mlp.gate_proj':
+      bits: 16
+    'model.layers.[0-9]+.self_attn.g_proj':
+      bits: 16
+    lm_head:
+      bits: 16
+  # AutoRound 阶段 embedding 和 RMSNorm 也保持浮点。
+  iters: 200
+  seed: 42
+  format: auto_gptq
+  calibration:
+    jsonl: xh2modelzoo://examples_merak/llm/xh_token_spark_2_5/calib_data/spark_tokens_4b_generated.jsonl
+    text_key: text
+    nsamples: 128
+    seqlen: 2048
+    concat: true
+  runtime:
+    batch_size: 8
+    trust_remote_code: true
+    low_gpu_mem_usage: true
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Spark2_5ForCausalLM
+    # 该字段仅用作占位，实际会在导出前实时覆盖
+    hf_model: null
+    # 按照 HuggingFace 上的模型名称填写，全部小写，'.' 和 '-' 改成 '_'
+    model_name: xh_token_spark_4b
+    context_max_length: 131072
+    prefill_chunk_length: 256
+    max_pe_length: 1048576
+    use_cache: true
+    # SlidingWindowLLMInputProcessor 尚不支持 PageAttention ABI。
+    enable_page_attention: false
+    num_logits_to_keep: 1
+    flash_attention:
+      enable: true
+      q_bits: 8
+      k_bits: 8
+      v_bits: 8
+      p_bits: 8
+    quant_scheme:
+      # Packed W4/W8 Linear 保留 checkpoint 位宽；未量化模块采用 RTN W8。
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops:
+        MatMul:
+          act_scheme:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
+    only_first_block: false

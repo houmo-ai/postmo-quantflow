@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "spark25-vllm-eval",
+      "patterns": [
+        "examples_merak/llm/xh_token_spark_2_5/eval/**"
+      ]
+    }
+  ]
+}

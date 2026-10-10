@@ -1,0 +1,184 @@
+suite:
+  name: Spark-X2.5-Quant-Min-7
+
+models:
+  - XHToken/Spark-X2.5-4B
+  - XHToken/Spark-X2.5-1.7B 
+
+global_inference:
+  mode: thinking
+  temperature: 1.0
+  top_p: 0.95
+  top_k: -1
+
+common_rules:
+  same_prompt: true
+  same_tokenizer: true
+  same_chat_template: true
+  same_dataset_version: true
+  same_max_tokens: true
+
+benchmarks:
+
+  - name: IFEval
+    priority: P0
+    task_type: instruction_following
+    dataset:
+      split: full
+    generation:
+      max_new_tokens: 131072
+    metrics:
+      - prompt_strict_accuracy
+      - prompt_loose_accuracy
+      - instruction_strict_accuracy
+      - instruction_loose_accuracy
+    quantization_focus:
+      - output_stability
+      - format_stability
+      - eos_divergence
+      - token_divergence
+
+  - name: GPQA-Diamond
+    priority: P0
+    task_type: knowledge_reasoning
+    dataset:
+      subset: diamond
+      num_samples: 198
+    generation:
+      max_new_tokens: 131072
+    metrics:
+      - accuracy
+    quantization_focus:
+      - weight_quantization_error
+      - multi_step_reasoning
+      - answer_flip
+
+  - name: AIME-2026
+    priority: P0
+    task_type: math_reasoning
+    dataset:
+      split: full
+      num_samples: 30
+    generation:
+      max_new_tokens: 131072
+    metrics:
+      - accuracy
+      - pass_at_1
+    quantization_focus:
+      - reasoning_trajectory
+      - first_token_divergence
+      - long_chain_error_accumulation
+
+  - name: Gaokao-2026
+    priority: P0
+    task_type: math_reasoning
+    dataset:
+      repo_id: XHToken/gaokao_math_2026
+      revision: cbeac76940ceb263b700be2a650e8d92b4d158a3
+      split: test
+      num_samples: 100
+    generation:
+      max_new_tokens: 131072
+    metrics:
+      - average_paper_score
+    quantization_focus:
+      - reasoning_trajectory
+      - long_chain_error_accumulation
+
+  - name: AA-LCR
+    priority: P0
+    task_type: long_context_reasoning
+    dataset:
+      split: full
+    context:
+      preserve_original_length: true
+      max_context_tokens: 100000
+      report_length_buckets: true
+    generation:
+      max_new_tokens: 131072
+    metrics:
+      - accuracy
+    quantization_focus:
+      - activation_quantization
+      - attention_error_accumulation
+      - long_context_degradation
+      - SEFP8_sensitivity
+
+  - name: BFCL-V4
+    priority: P0
+    task_type: function_calling
+    dataset:
+      version: V4
+    generation:
+      max_new_tokens: 131072
+      preserve_tool_schema: true
+    metrics:
+      - overall_accuracy
+      - category_accuracy
+    quantization_focus:
+      - critical_token_stability
+      - function_selection
+      - argument_generation
+      - structured_output
+
+  - name: SciCode
+    priority: P1
+    task_type: scientific_code_generation
+    dataset:
+      version: pin_to_baseline_version
+    generation:
+      max_new_tokens: 131072
+    execution:
+      run_generated_code: true
+      fixed_environment: true
+    metrics:
+      - main_problem_resolve_rate
+      - subproblem_resolve_rate
+    quantization_focus:
+      - reasoning_error
+      - executable_correctness
+      - code_generation_stability
+
+result_schema:
+  required:
+    - model
+    - precision
+    - benchmark
+    - score
+    - status
+
+  recommended:
+    - num_samples
+    - correct
+    - failed
+    - token_alignment
+    - first_divergence_position
+    - output_length_delta
+    - logit_divergence
+    - raw_output_path
+
+comparison:
+  reference_precision: FP16
+
+  metrics:
+    absolute_delta: "score_quant - score_FP16"
+    relative_drop: "(score_FP16 - score_quant) / score_FP16"
+
+  comparisons:
+    - SSFP5_vs_FP16
+    - SEFP8_vs_FP16
+    - SEFP8_vs_SSFP5
+
+official_compatible_run:
+  enabled: false
+  purpose: reproduce_Spark_official_sampling_configuration
+
+  decode:
+    thinking: true
+    do_sample: true
+    temperature: 1.0
+    top_p: 0.95
+    top_k: -1
+
+  repeats:
+    seeds: 5

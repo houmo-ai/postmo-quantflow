@@ -1,0 +1,4 @@
+# The HTTP evaluation client only requires PyYAML.
+PyYAML>=6.0
+# Used by download_mini_eval_datasets.py for Hugging Face datasets.
+huggingface-hub>=0.20

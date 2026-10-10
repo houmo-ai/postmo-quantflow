@@ -15,6 +15,12 @@ from a workstation at test time.
   Their sliding/full attention KV head counts remain different. Serialized
   Transformers `per_layer_config` must survive MTP contract validation and
   determine the draft graph's shared-cache inputs.
+- Spark uses the locally registered Spark2_5 classes with six decoder layers,
+  fused grouped QKV, headwise output gates, sliding/full attention, and distinct
+  partial-RoPE settings. The 1.7B case executes SDK RTN W8; the 4B case executes
+  four AutoRound iterations on two local samples with W8 attention and edge
+  MLPs plus W4 middle MLPs. Both export, relocate, remove generated sources,
+  and generate through the public inference API.
 - PaddleOCR retains the 4304-wide visual MLP that exposed the packing bug.
 - Auxiliary JSON stores unquantized tensor **shapes**, not old quantized data.
   Draft/LoRA tensors are generated deterministically and loaded by production

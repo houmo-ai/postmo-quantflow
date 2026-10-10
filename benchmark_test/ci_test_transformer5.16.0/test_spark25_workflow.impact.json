@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "spark25-workflow",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/xh_token_spark_2_5/**",
+        "xhmodel_merak/model_integrations/spark2_5/**",
+        "configs_merak/workflows/xh2a/llm_models/xh_token_spark/**",
+        "xhmodel_merak/xh_llm/workflows/auto.py",
+        "xhmodel_merak/xh_llm/workflows/base.py",
+        "xhmodel_merak/xh_llm/workflows/config.py",
+        "xhmodel_merak/xh_llm/workflows/runtime_config.py",
+        "xhmodel_merak/xh_llm/base_model.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_small_model.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/unified/spark.json"
+      ]
+    }
+  ]
+}

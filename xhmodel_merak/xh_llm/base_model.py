@@ -534,6 +534,7 @@ class XHBaseModel(DeviceMixin):
             # support older Transformers releases. Instance-driven export
             # paths pass the resolved xh dtype explicitly via ``dtype``.
             kwargs["torch_dtype"] = model_dtype
+        kwargs.setdefault("trust_remote_code", True)
         native_model = auto_model_cls.from_pretrained(hf_model_dir, **kwargs)
         native_model = cls.untied_weights(native_model)
         native_model.config.tie_word_embeddings = False
@@ -1236,9 +1237,13 @@ class XHBaseModel(DeviceMixin):
         return hf_model
 
     @classmethod
+    def _load_hf_config(cls, hf_model_dir: str, **kwargs):
+        return AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=kwargs.get("trust_remote_code", True))
+
+    @classmethod
     def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs) -> Any:
         gptq_weight_mode = kwargs.pop("gptq_weight_mode", "dequantize")
-        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=True)
+        config = cls._load_hf_config(hf_model_dir, **kwargs)
         quantization_config = (
             config.get("quantization_config", None)
             if isinstance(config, dict)
@@ -1322,7 +1327,8 @@ class XHBaseModel(DeviceMixin):
             # Fallback for older transformers versions
             no_init_weights = init_empty_weights
 
-        config = AutoConfig.from_pretrained(hf_model_dir)
+        kwargs.setdefault("trust_remote_code", True)
+        config = AutoConfig.from_pretrained(hf_model_dir, trust_remote_code=kwargs["trust_remote_code"])
         with no_init_weights(), init_empty_weights():
             auto_model_cls = cls.HF_AUTO_MODEL_CLS
             model_dtype = cls.HF_MODEL_DTYPE

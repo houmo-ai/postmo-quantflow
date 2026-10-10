@@ -42,8 +42,6 @@ CI 入口：`./benchmark_test/ci_test_transformer5.16.0/run.sh`。
 
 存在 `.codegraph/` 时，先用可用的 CodeGraph 工具定位代码及影响范围；
 未覆盖的源码、配置和文档再用 `rg` / 直接读取。MCP 安装和本机配置由使用者管理。
-代码 review 使用 `ocr`，带 `--audience agent` 和实际需求背景；
-范围不明确先 `--preview`。审查提交可用 `ocr review --repo . --commit HEAD --audience agent`。
 复核工具结论，报告实际验证范围、失败原因和未执行项。
 
 提交遵守 [飞书提交规范](https://houmo.feishu.cn/wiki/B7Yeww5MKixxaSkqaJ7cOlF5n2c)。

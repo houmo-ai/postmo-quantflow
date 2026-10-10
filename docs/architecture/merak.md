@@ -62,6 +62,10 @@ frontend 的选择见 [图表达边界](../modeling/operators/graph-expression.m
 `QuantResult` 记录来源与量化产物，`ExportResult` 记录 `work_dir`、`config_file`、`meta`。
 `meta` 仍由具体实现解释，不存在覆盖所有模型的统一、强类型 metadata schema。
 
+LLM 的共享 checkpoint 加载器默认使用 `trust_remote_code=True`，允许执行 checkpoint
+提供的 Python 配置与模型实现。配置读取、HF 模型加载、GPTQModel 加载及空模型构造
+遵循同一默认值；调用者显式传入 `trust_remote_code=False` 时，将该设置传给加载后端。
+
 ModelZoo 的 `quant()` 是用户工作流入口，不表示本仓库拥有 GPTQ/AutoRound 算法。
 配置映射、量化模型注册、checkpoint 格式和部署图改写的具体归属，以及已有兼容遗留，
 见 [ModelZoo / GPTQModel 开发边界](quantization-boundary.md)。

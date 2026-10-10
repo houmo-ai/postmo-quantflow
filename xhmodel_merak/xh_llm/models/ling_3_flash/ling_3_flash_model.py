@@ -12,10 +12,9 @@ from transformers import AutoModelForCausalLM, GenerationConfig, PreTrainedModel
 
 from xhquant.api import get_xhquant_logger
 
-from ...base_model import get_model_param_buffer_size_gb
 from ...builder import register_llm_model
 from ...types import VLLMModelMeta
-from ...utils import get_cpu_memory_mb
+from ...utils import get_cpu_memory_mb, get_model_param_buffer_size_gb
 from ..qwen3_5.qwen3_5_llm_model import XHQwen3_5Model
 from ..qwen3_next.qwen3_next_model import (
     Qwen3NextModelMeta,

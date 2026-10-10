@@ -35,7 +35,6 @@ from transformers import AutoModelForImageTextToText
 from transformers.cache_utils import Cache
 
 from xhmodel_merak.utils import calculate_file_md5
-from xhmodel_merak.xh_llm.base_model import get_model_param_buffer_size_gb
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_processor import XHQwen3_5Processor
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_vision_model import XHQwen3_5VisionModel
@@ -44,9 +43,9 @@ from xhquant.api import CacheTensor, get_xhquant_logger
 from xhquant.utils import ConfigDict, log_function_call
 from xhquant.utils.registry import _DMRegistryCls
 
-from ...shared_head import SharedHeadMixin, quantized_head, resolve_shared_head_bits
 from ...builder import register_llm_model
 from ...kv_cache_mixin import KVCacheWithLinearMixin
+from ...shared_head import SharedHeadMixin, quantized_head, resolve_shared_head_bits
 from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...types import (
     CacheList,
@@ -56,7 +55,7 @@ from ...types import (
     ModelSwitcher,
     VLLMModelMeta,
 )
-from ...utils import get_cpu_memory_mb, is_huge_model_export_enabled
+from ...utils import get_cpu_memory_mb, get_model_param_buffer_size_gb, is_huge_model_export_enabled
 from ...vision_llm_model import VisionLLMModel
 from ._gdr_ops import GDRChunkScan
 from .data_preprocess import Qwen3_5_DataPreprocess
@@ -1548,7 +1547,9 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         big_hf_model.register_layer_as_place_holder(self._frontend_model.decode)
         return prefill_wrap_cfg, decode_wrap_cfg
 
-    def _export_big_language_hmonnx(self, exported_info: ExportData, adapter: LoRAAdapterSpec | None = None) -> VLLMModelMeta:
+    def _export_big_language_hmonnx(
+        self, exported_info: ExportData, adapter: LoRAAdapterSpec | None = None
+    ) -> VLLMModelMeta:
         """使用 placeholder 分层导出 Qwen3.5 文本模型，降低峰值内存占用。
 
         主图仅保留 attention、GatedDeltaNet、MLP/MoE 等大模块的输入输出契约；
@@ -1620,6 +1621,7 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         main_adapter = None
         if adapter is not None:
             from .lora_moe import select_adapter
+
             main_adapter = select_adapter(adapter, exclude=main_placeholder_prefixes)
             if main_adapter is not None:
                 attach_lora_buffers(self._wrap_model, main_adapter)
@@ -1627,8 +1629,9 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         big_hf_model.register_layer_as_placeholder(empty_hf_model)
         self.to_fronted()
         if main_adapter is not None:
-            apply_lora_to_frontend(self._frontend_model, main_adapter,
-                                   self.config.lora.w_schema, self.config.lora.a_schema)
+            apply_lora_to_frontend(
+                self._frontend_model, main_adapter, self.config.lora.w_schema, self.config.lora.a_schema
+            )
 
         # 先创建统一导出目录和元数据；placeholder 子图分别存放在 prefill/decode
         # 主图目录下，文件名由完整 module target 唯一确定。
@@ -1721,7 +1724,6 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
             meta_info = self._export_language_hmonnx_impl(exported_info, lora_adapters=lora_adapters)
         return meta_info
 
-
     def _export_language_hmonnx_impl(
         self,
         exported_info: ExportData,
@@ -1755,7 +1757,9 @@ class XHQwen3_5Model(SharedHeadMixin, VisionLLMModel):  # noqa: N801
         spec_decode_mode = self.config.spec_decode_mode
         self._configure_spec_decode_target_export()
 
-        shared_head = quantized_head(self._quanted_model.decode) if spec_decode_mode in {"mtp", "dflash", "dflash2"} else None
+        shared_head = (
+            quantized_head(self._quanted_model.decode) if spec_decode_mode in {"mtp", "dflash", "dflash2"} else None
+        )
         self._export_hmonnx(exported_info)
 
         exported_lora_adapters: list[tuple[LoRAAdapterSpec, ExportData]] = []
