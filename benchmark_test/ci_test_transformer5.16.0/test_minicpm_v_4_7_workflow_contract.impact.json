@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-v47-workflow-contract",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/__init__.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/model.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/processor_compat.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/quant_llm.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/vision.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/vision_export.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/workflow.py",
+        "xhmodel_merak/model_integrations/minicpm_v_4_7/**",
+        "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/**",
+        "examples_merak/llm/minicpm_v_4_7/**"
+      ]
+    }
+  ]
+}

@@ -153,6 +153,23 @@
       ]
     },
     {
+      "id": "unified-minicpm-v-4-7",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/__init__.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/model.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/processor_compat.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/quant_llm.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/vision.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/vision_export.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/workflow.py",
+        "xhmodel_merak/model_integrations/minicpm_v_4_7/**"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[minicpm-v-4.7-1b/full]",
+        "test_public_build_relocate_and_inference[minicpm-v-4.7-35b-a3b/full]"
+      ]
+    },
+    {
       "id": "unified-minimax",
       "patterns": [
         "xhmodel_merak/xh_other_model/models/minimax_h3/**",
@@ -320,6 +337,24 @@
       ],
       "nodes": [
         "test_public_build_relocate_and_inference[minicpm5-2.6b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-minicpm-v-4-7-1b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/1b/minicpm_v_4_7*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[minicpm-v-4.7-1b/full]"
+      ]
+    },
+    {
+      "id": "unified-config-minicpm-v-4-7-35b-a3b",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7*.yaml"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[minicpm-v-4.7-35b-a3b/full]"
       ]
     },
     {

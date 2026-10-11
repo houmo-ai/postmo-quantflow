@@ -27,7 +27,7 @@ def test_all_registered_variants_have_explicit_dependency_profiles():
             assert set(profile["quantization"]) == set(recipe.quant_methods)
             count += 1
         assert "dependencies" not in describe_model(recipe.model_id)
-    assert count == 47
+    assert count == 49
 
 
 def test_dependencies_are_the_only_recipe_version_declaration():

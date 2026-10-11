@@ -40,12 +40,45 @@ def test_minicpm46_preprocess_callers_select_focused_cpu_contract(filename):
 
 
 @pytest.mark.ci_policy
+@pytest.mark.parametrize("filename", ("inference.py", "text_model.py"))
+def test_minicpm47_preprocess_callers_select_focused_cpu_contract(filename):
+    changed_path = f"xhmodel_merak/xh_llm/models/minicpm_v_4_7/{filename}"
+    selection = select_for_changes([changed_path], repo_root=REPO_ROOT)
+    contract = f"{SUITE_RELATIVE}/test_minicpm_v_4_7_preprocess_contract.py"
+    assert set(selection.tests) == POLICY_GATES | {contract}
+    assert selection.uncovered_files == ()
+    assert selection.full_suite is False
+    assert f"rule:minicpm-v47-text-preprocess-contract:{changed_path}" in selection.reasons[contract]
+
+
+@pytest.mark.ci_policy
+@pytest.mark.parametrize(
+    "filename",
+    (
+        "__init__.py",
+        "text_export.py",
+        "token_capacity_vision.py",
+        "token_capacity_vision_export.py",
+    ),
+)
+def test_minicpm_v_series_helpers_select_focused_cpu_contract(filename):
+    changed_path = f"xhmodel_merak/xh_llm/minicpm_v_series/{filename}"
+    selection = select_for_changes([changed_path], repo_root=REPO_ROOT)
+    contract = f"{SUITE_RELATIVE}/test_minicpm_v_series_contract.py"
+    assert set(selection.tests) == POLICY_GATES | {contract}
+    assert selection.uncovered_files == ()
+    assert selection.full_suite is False
+    assert f"rule:minicpm-v-series-shared-helpers:{changed_path}" in selection.reasons[contract]
+
+
+@pytest.mark.ci_policy
 @pytest.mark.parametrize("filename", ("data_preprocess.py", "split_conv_cache_utils.py"))
 def test_shared_qwen35_preprocess_also_selects_minicpm46_contract(filename):
     selection = select_for_changes(
         [f"xhmodel_merak/xh_llm/models/qwen3_5/{filename}"], repo_root=REPO_ROOT,
     )
     assert f"{SUITE_RELATIVE}/test_minicpm_v_4_6_preprocess_contract.py" in selection.tests
+    assert f"{SUITE_RELATIVE}/test_minicpm_v_4_7_preprocess_contract.py" in selection.tests
     assert f"{SUITE_RELATIVE}/test_qwen35_9b_block_export.py" in selection.tests
     assert f"{SUITE_RELATIVE}/test_qwen35_35b_a3b_block_export.py" in selection.tests
     assert selection.uncovered_files == ()
@@ -497,13 +530,32 @@ def test_minicpm_declaration_change_does_not_select_gemma_or_bge():
 
 
 @pytest.mark.ci_policy
+def test_minicpm47_declaration_change_does_not_select_gemma_or_bge():
+    manifest = f"{SUITE_RELATIVE}/test_minicpm_v_4_7_preprocess_contract.impact.json"
+    selection = select_for_changes([
+        manifest,
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/inference.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/text_model.py",
+    ], repo_root=REPO_ROOT)
+    assert set(selection.tests) == POLICY_GATES | {
+        f"{SUITE_RELATIVE}/test_minicpm_v_4_7_preprocess_contract.py",
+    }
+    assert selection.full_suite is False
+
+
+@pytest.mark.ci_policy
 def test_shared_preprocess_and_minicpm_declaration_keep_both_qwen_exports():
     selection = select_for_changes([
         f"{SUITE_RELATIVE}/test_minicpm_v_4_6_preprocess_contract.impact.json",
         "xhmodel_merak/xh_llm/models/qwen3_5/data_preprocess.py",
     ], repo_root=REPO_ROOT)
     assert selection.full_suite is False
-    for stem in ("qwen35_9b_block_export", "qwen35_35b_a3b_block_export", "minicpm_v_4_6_preprocess_contract"):
+    for stem in (
+        "qwen35_9b_block_export",
+        "qwen35_35b_a3b_block_export",
+        "minicpm_v_4_6_preprocess_contract",
+        "minicpm_v_4_7_preprocess_contract",
+    ):
         assert f"{SUITE_RELATIVE}/test_{stem}.py" in selection.tests
     assert not any("gemma" in test or "bge" in test for test in selection.tests)
 

@@ -18,6 +18,8 @@ KOKORO_INFERENCE = "kokoro.inference"
 MINIMAX_H3_INFERENCE = "minimax_h3.inference"
 MOSS_TRANSCRIBE_DIARIZE_BUILD = "moss_transcribe_diarize.build"
 MOSS_TRANSCRIBE_DIARIZE_INFERENCE = "moss_transcribe_diarize.inference"
+MINICPM_V_4_7_BUILD = "minicpm_v_4_7.build"
+MINICPM_V_4_7_INFERENCE = "minicpm_v_4_7.inference"
 
 PILE10K_RESOURCE = ("calibration", "data/calib_data/NeelNanda-pile-10k.jsonl")
 
@@ -117,6 +119,8 @@ __all__ = [
     "LING_INFERENCE",
     "MINIMAX_H3_BUILD",
     "MINIMAX_H3_INFERENCE",
+    "MINICPM_V_4_7_BUILD",
+    "MINICPM_V_4_7_INFERENCE",
     "MOSS_TRANSCRIBE_DIARIZE_BUILD",
     "MOSS_TRANSCRIBE_DIARIZE_INFERENCE",
     "PI05_BUILD",

@@ -16,6 +16,8 @@ from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_
 EXPECTED_VARIANTS = {
     "qwen-image-2.1": ["full"],
     "macaron-v1-tall": ["full", "lora"],
+    "minicpm-v-4.7-1b": ["full"],
+    "minicpm-v-4.7-35b-a3b": ["full"],
     "minicpm5-2.6b": ["full"],
     "qwen3.5-0.8b": ["full"],
     "qwen3.5-2b": ["full"],
@@ -334,6 +336,7 @@ def test_registry_covers_each_public_artifact_kind():
         "vla",
         "glm53",
         "qwen_image21",
+        "minicpm_v_4_7",
     }
     assert {recipe.task for recipe in recipes} >= {
         "text-generation",

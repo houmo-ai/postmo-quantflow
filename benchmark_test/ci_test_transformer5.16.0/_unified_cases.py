@@ -26,6 +26,8 @@ MODELS = {
     "kokoro-82m-v1.1-zh": ("kokoro", ("full",)),
     "ling-3.0-flash": ("ling", ("full",)),
     "macaron-v1-tall": ("macaron", ("full", "lora")),
+    "minicpm-v-4.7-1b": ("minicpm_v47", ("full",)),
+    "minicpm-v-4.7-35b-a3b": ("minicpm_v47", ("full",)),
     "minicpm5-2.6b": ("minicpm", ("full",)),
     "minimax-h3-fl2va": ("minimax", ("full",)),
     "moss-transcribe-diarize-0.9b": ("moss", ("full",)),

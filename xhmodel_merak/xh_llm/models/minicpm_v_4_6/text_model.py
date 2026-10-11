@@ -1,13 +1,13 @@
 """MiniCPM-V-4.6 text-only adapter for the Merak Qwen3.5 stack."""
 
-import json
-from pathlib import Path
-
 import torch.nn as nn
 from accelerate import init_empty_weights
 
 from xhmodel_merak.xh_llm.base_llm_model import BaseLLMModel
 from xhmodel_merak.xh_llm.llm_data_processor import BaseLLMInputProcessor
+from xhmodel_merak.xh_llm.minicpm_v_series.text_export import (
+    export_minicpm_qwen35_text_hmonnx,
+)
 from xhmodel_merak.xh_llm.models.qwen3_5.configuration_qwen3_5 import (
     Qwen3_5Config,
 )
@@ -20,8 +20,6 @@ from xhmodel_merak.xh_llm.models.qwen3_5.modeling_qwen3_5 import (
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_llm_model import (
     XHQwen3_5Model,
 )
-from xhmodel_merak.xh_llm.types import LLMModelState
-from xhquant.api import get_xhquant_logger
 from xhquant.utils import log_function_call
 
 
@@ -117,26 +115,7 @@ class MiniCPMV46TextModel(XHQwen3_5Model):
     def export_hmonnx(self, output_dir: str):
         """Export Qwen3.5 Prefill/Decode without its unrelated Vision graph."""
 
-        logger = get_xhquant_logger()
-        self.work_dir = str(output_dir)
-        self.to_wrap()
-
-        exported_info = self.get_export_info(output_dir)
-        if self._state != LLMModelState.QUANTED_ALIGNED:
-            self.to_quanted_aligned()
-
-        # Qwen3.5 builds distinct Prefill and Decode graphs.  BaseLLMModel's
-        # single-graph ``fixed`` call is therefore not valid for this model.
-        self._quanted_model.prefill.fixed()
-        self._quanted_model.decode.fixed()
-        self.config.model_name = exported_info.model_name
-        self._export_hmonnx(exported_info)
-
-        meta_info = exported_info.meta
-        with open(Path(exported_info.exported_dir) / "golden_meta_info.json", "w", encoding="utf-8") as file:
-            json.dump(meta_info.to_dict(), file, indent=4)
-        logger.info("Exporting completed! Exported model is saved at: %s", exported_info.exported_dir)
-        return meta_info
+        return export_minicpm_qwen35_text_hmonnx(self, output_dir)
 
 
 __all__ = ["MiniCPMV46TextModel"]

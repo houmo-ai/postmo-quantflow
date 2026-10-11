@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-v-series-shared-helpers",
+      "patterns": [
+        "xhmodel_merak/xh_llm/minicpm_v_series/__init__.py",
+        "xhmodel_merak/xh_llm/minicpm_v_series/text_export.py",
+        "xhmodel_merak/xh_llm/minicpm_v_series/token_capacity_vision.py",
+        "xhmodel_merak/xh_llm/minicpm_v_series/token_capacity_vision_export.py"
+      ]
+    }
+  ]
+}

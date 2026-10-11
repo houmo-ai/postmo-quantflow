@@ -69,6 +69,19 @@ def prepare(case, root, monkeypatch):
         configure_minimax_packaging_stub(source, monkeypatch)
         inputs = {"prompt": "a clay fox walks across wet sand", "image": str(image), "workflow": "fl2va"}
         return kwargs, inputs
+    if family == "minicpm_v47":
+        # Packaging-only unified case: stub the heavy vision+LLM converter,
+        # keep public build/relocate/validation, and assert unsupported inference.
+        from _unified_special_fixtures import configure_minicpm_v47_packaging_stub
+
+        configure_minicpm_v47_packaging_stub(source, monkeypatch, recipe=recipe)
+        inputs = {
+            "prompt": "describe the image briefly",
+            "image": str(image),
+            "max_new_tokens": 2,
+            "downsample_mode": "4x",
+        }
+        return kwargs, inputs
     if family in ("kokoro", "moss"):
         # Release assets remain explicit and pinned; no model-hub downloads.
         if family == "kokoro":
@@ -362,6 +375,27 @@ def run(case, root, *, low_memory=None):
                         "workflow": values.get("workflow"),
                         "prompt": values.get("prompt"),
                         "image": values.get("image"),
+                    },
+                )
+            elif case.fixture == "minicpm_v47":
+                from xhmodel_merak.errors import ErrorCode, ModelError
+
+                with pytest.raises(ModelError) as exc_info:
+                    inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
+                error = exc_info.value
+                values = error.details.get("values", {})
+                assert error.code == ErrorCode.UNSUPPORTED_COMBINATION
+                assert values.get("image") == inputs["image"]
+                assert values.get("downsample_mode") == inputs["downsample_mode"]
+                record.update(
+                    passed=True,
+                    stage="complete",
+                    inference={
+                        "status": "unsupported_combination",
+                        "code": error.code.value,
+                        "prompt": values.get("prompt"),
+                        "image": values.get("image"),
+                        "downsample_mode": values.get("downsample_mode"),
                     },
                 )
             else:
