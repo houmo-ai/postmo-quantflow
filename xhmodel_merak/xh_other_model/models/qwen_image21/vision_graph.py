@@ -1,11 +1,13 @@
 # Copyright 2026 HOUMO AI
 # SPDX-License-Identifier: Apache-2.0
-"""Packed Qwen3-VL patches with actual geometry and fixed FlashAttention capacity."""
+"""Packed Qwen3-VL patches with actual geometry and fixed attention capacity."""
 
 from copy import deepcopy
 
 import torch
 from torch import nn
+
+from .length_attention import LengthMaskedAttention
 
 
 VISION_INPUT_NAMES = ["patches", "position_indices", "position_weights", "cos", "sin", "patch_mask", "input_length"]
@@ -56,9 +58,9 @@ def geometry_inputs(grid_hw, capacity, grid_side, head_dim, *, device, dtype):
 
 
 class PackedVisionBlock(nn.Module):
-    def __init__(self, source):
+    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False):
         super().__init__()
-        from xhquant.nn import FlashAttention, Rope
+        from xhquant.nn import Rope
 
         self.heads, self.head_dim = source.attn.num_heads, source.attn.head_dim
         self.physical_dim = next((dim for dim in (64, 128, 256, 512) if dim >= self.head_dim), None)
@@ -68,7 +70,10 @@ class PackedVisionBlock(nn.Module):
         self.qkv, self.proj = deepcopy(source.attn.qkv), deepcopy(source.attn.proj)
         self.mlp = deepcopy(source.mlp)
         self.rotary = Rope()
-        self.attention = FlashAttention(num_heads=self.heads, is_causal=False, scale=self.head_dim**-0.5)
+        self.attention = LengthMaskedAttention(
+            capacity, capacity, scale=self.head_dim**-0.5,
+            use_flash_attention=use_noncausal_flash_attention, num_heads=self.heads,
+        )
 
     def forward(self, hidden, cos, sin, mask, length):
         batch, capacity, _ = hidden.shape
@@ -81,14 +86,14 @@ class PackedVisionBlock(nn.Module):
         if self.physical_dim > self.head_dim:
             pad = (0, self.physical_dim - self.head_dim)
             q, k, v = (torch.nn.functional.pad(x, pad) for x in (q, k, v))
-        out = self.attention(q, k, v, current_input_length=length)[..., : self.head_dim]
+        out = self.attention(q, k, v, length, length)[..., : self.head_dim]
         out = out.transpose(1, 2).reshape(batch, capacity, self.heads * self.head_dim)
         hidden = (hidden + self.proj(out)) * mask
         return (hidden + self.mlp(self.norm2(hidden))) * mask
 
 
 class PackedVision(nn.Module):
-    def __init__(self, source):
+    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False):
         super().__init__()
         config = source.config
         if (config.patch_size, config.temporal_patch_size, config.spatial_merge_size, config.in_channels) != (
@@ -108,7 +113,10 @@ class PackedVision(nn.Module):
         if projection.bias is not None:
             self.patch_projection.bias = nn.Parameter(projection.bias.detach().clone())
         self.position_embedding = deepcopy(source.pos_embed)
-        self.blocks = nn.ModuleList(PackedVisionBlock(block) for block in source.blocks)
+        self.blocks = nn.ModuleList(
+            PackedVisionBlock(block, capacity, use_noncausal_flash_attention=use_noncausal_flash_attention)
+            for block in source.blocks
+        )
         self.merger = deepcopy(source.merger)
         self.deep_mergers = deepcopy(source.deepstack_merger_list)
         self.deep_indexes = tuple(source.deepstack_visual_indexes)

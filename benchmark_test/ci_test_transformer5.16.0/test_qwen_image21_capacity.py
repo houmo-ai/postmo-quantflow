@@ -7,7 +7,19 @@ from xhmodel_merak.xh_other_model.models.qwen_image21.capacity import (
     fit_reference_size,
     validate_capacity_config,
     validate_size,
+    vae_token_capacity,
 )
+
+
+@pytest.mark.parametrize("size,expected", [((32, 64), 8), ((96, 96), 36), ((96, 256), 96), ((1536, 1536), 9216)])
+def test_vae_capacity_counts_the_complete_spatial_canvas(size, expected):
+    assert vae_token_capacity(size) == expected
+
+
+@pytest.mark.parametrize("size", [(32, 33), (33, 32), (16, 16), (0, 32), (-32, 32), (32,), (True, 32), None])
+def test_vae_capacity_rejects_invalid_geometry_instead_of_rounding_down(size):
+    with pytest.raises(ValueError, match="positive multiples of 32"):
+        vae_token_capacity(size)
 
 
 @pytest.mark.parametrize("size", [(1024, 1024), (1024, 1088), (768, 1376), (1376, 768), (672, 1536), (1536, 672)])
@@ -48,7 +60,18 @@ def test_text_capacity_uses_real_tokenizer_template_and_visual_slots():
     capacities = derive_text_capacities(processor, config)
     assert capacities["feature_capacity"] >= 1088 + 512 + capacities["template_tokens"]
     assert capacities["prefix_capacity"] >= 4352 + 512 + capacities["template_tokens"]
+    text_budget = 512 + capacities["template_tokens"]
+    assert text_budget <= capacities["dit_text_capacity"] < text_budget + 256
+    assert capacities["feature_capacity"] < 1088 + text_budget + 256
+    assert capacities["feature_capacity"] % 256 == capacities["dit_text_capacity"] % 256 == 0
+    assert capacities["prefix_capacity"] == ((4352 + text_budget + 63) // 64) * 64
+    assert config["prompt_budget"] == 512
     config["max_references"] = 2
     larger = derive_text_capacities(processor, config)
     assert larger["feature_capacity"] >= 2176 + 512 + larger["template_tokens"]
     assert larger["prefix_capacity"] >= 8704 + 512 + larger["template_tokens"]
+    text_budget = 512 + larger["template_tokens"]
+    assert text_budget <= larger["dit_text_capacity"] < text_budget + 256
+    assert larger["feature_capacity"] < 2176 + text_budget + 256
+    assert larger["feature_capacity"] % 256 == larger["dit_text_capacity"] % 256 == 0
+    assert larger["prefix_capacity"] == ((8704 + 512 + larger["template_tokens"] + 63) // 64) * 64

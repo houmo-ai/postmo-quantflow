@@ -8,14 +8,17 @@ from xhmodel_merak.xh_other_model.models.qwen_image21.vision_graph import Packed
 
 
 @pytest.mark.parametrize("grid", [(2, 2), (2, 4), (4, 2), (4, 6)])
-def test_packed_capacity_matches_native_position_and_vision_features(grid):
+@pytest.mark.parametrize("head_dim", [16, 72])
+@pytest.mark.parametrize("native_attention", [False, True])
+def test_packed_capacity_matches_native_position_and_vision_features(grid, head_dim, native_attention):
     from xhmodel_merak.xh_llm.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
     torch.manual_seed(5)
     cfg = tiny_config().vision_config
+    cfg.hidden_size = cfg.num_heads * head_dim
     cfg._attn_implementation = "sdpa"
     source = Qwen3VLVisionModel(cfg).eval()
-    graph = PackedVision(source).eval()
+    graph = PackedVision(source, 36, use_noncausal_flash_attention=native_attention).eval()
     count = grid[0] * grid[1]
     patches = torch.randn(count, 1536) * 0.2
     thw = torch.tensor([[1, *grid]])

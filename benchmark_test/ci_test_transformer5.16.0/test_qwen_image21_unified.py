@@ -97,11 +97,13 @@ def test_model_cli_builds_requested_precision_then_uses_returned_path(model_id, 
     assert [phase for phase, _ in calls] == ["build", "inference"]
     assert calls[0][1]["model_id"] == model_id
     assert calls[0][1]["deployment_precision"] == {"image": precision or "w16a16_sefp"}
+    assert "attention" not in calls[0][1]
     assert calls[1][1]["artifact_dir"] == str(published)
 
 
 @pytest.mark.parametrize("module,extra", [
     (unified, ["--quant-type", "w8a8_sefp"]),
+    (unified, ["--model-dir", "source", "--attention", "masked"]),
     (unified, ["--guidance-scale", "2"]),
     (generate_image, ["--guidance-scale", "2"]),
     (generate_image, ["--golden"]),

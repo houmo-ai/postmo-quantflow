@@ -19,7 +19,11 @@ from xhmodel_merak.xh_other_model.models.qwen_image21.segment_runtime import Seg
         ([False, True, True, False], [(1, 2, 2), (1, 2, 2)], ["text", "image", "image", "text"]),
     ],
 )
-def test_ordered_segments_match_native_and_overwrite_only_target(slots, reference_shapes, roles):
+@pytest.mark.parametrize("text_capacity", [32, 576, 768])
+@pytest.mark.parametrize("native_attention", [False, True])
+def test_ordered_segments_match_native_and_overwrite_only_target(
+    slots, reference_shapes, roles, text_capacity, native_attention
+):
     from diffusers.models.transformers.transformer_qwenimage21 import QwenImage21Transformer2DModel
 
     torch.manual_seed(17)
@@ -34,10 +38,11 @@ def test_ordered_segments_match_native_and_overwrite_only_target(slots, referenc
         axes_dims_rope=(16, 24, 24),
         causal_condition=True,
     ).eval()
-    gear = DenoiseGear(32, 16, 64, 16, text_tokens=32)
+    gear = DenoiseGear(32, 16, 64, 16, text_tokens=text_capacity)
     graphs = {
         "text": SegmentDenoiser(source, gear.text_tokens, text_projection=make_text_projection(source)),
-        "image": SegmentDenoiser(source, gear.image_tokens),
+        "image": SegmentDenoiser(source, gear.image_tokens, cache_capacity=gear.cache_tokens,
+                                 use_noncausal_flash_attention=native_attention),
     }
     image_slots = torch.tensor([slots])
     features = torch.randn(1, len(slots), 96)
@@ -86,6 +91,11 @@ def test_ordered_segments_match_native_and_overwrite_only_target(slots, referenc
                 assert torch.count_nonzero(cache[:, :, p + 4 :]) == 0
             if first_target is None:
                 first_target, first_output = target.clone(), actual.clone()
+                for cache in current.caches:
+                    cache[:, :, p + 4 :] = 1000
+                torch.testing.assert_close(current(target, time), actual, atol=0, rtol=0)
+                for cache in current.caches:
+                    cache[:, :, p + 4 :] = 0
         other = request()
         torch.testing.assert_close(other(first_target, 1.0), first_output, atol=0, rtol=0)
         assert all(a.data_ptr() != b.data_ptr() for a, b in zip(current.caches, other.caches, strict=True))

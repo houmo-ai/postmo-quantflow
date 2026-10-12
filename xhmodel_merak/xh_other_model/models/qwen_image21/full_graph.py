@@ -6,12 +6,14 @@ import torch
 from torch import nn
 
 from .graph import BlockCore, ImageProjection, OutputHead, TimeConditioning
+from .length_attention import LengthMaskedAttention
 
 
 class SegmentDenoiser(nn.Module):
     """One complete causal text or bidirectional image stack with mutable KVCache."""
 
-    def __init__(self, source, capacity, *, text_projection=None):
+    def __init__(self, source, capacity, *, text_projection=None, cache_capacity=None,
+                 use_noncausal_flash_attention=False):
         super().__init__()
         from xhquant.nn import FlashAttention, Greater, LLMCacheV2
 
@@ -23,13 +25,22 @@ class SegmentDenoiser(nn.Module):
         self.k_cache = nn.ModuleList([LLMCacheV2(axis=2) for _ in self.blocks])
         self.v_cache = nn.ModuleList([LLMCacheV2(axis=2) for _ in self.blocks])
         for core in self.blocks:
-            core.attention = FlashAttention(num_heads=core.heads, is_causal=self.causal, scale=core.head_dim**-0.5)
+            if self.causal:
+                core.attention = FlashAttention(num_heads=core.heads, is_causal=True, scale=core.head_dim**-0.5)
+            else:
+                core.attention = LengthMaskedAttention(
+                    capacity, cache_capacity, scale=core.head_dim**-0.5,
+                    use_flash_attention=use_noncausal_flash_attention, num_heads=core.heads,
+                )
         self.visible = Greater()
         self.register_buffer("positions", torch.arange(capacity, dtype=torch.int32)[None])
 
     def forward(self, tokens, time_features, cos, sin, past_seq_length, current_input_length, caches):
         raw, output = self.time(time_features)
-        scale1, gate1, scale2, gate2 = raw.chunk(4, -1)
+        # Explicit sections avoid TCIM 1.5 treating num_outputs as a chunk size.
+        scale1, gate1, scale2, gate2 = torch.split(
+            raw, [self.time.block_projection.out_features // 4] * 4, dim=-1
+        )
         scale1, gate1, scale2, gate2 = (
             1 + scale1[:, None],
             2 * torch.sigmoid(2 * gate1[:, None]) - 1,
@@ -49,11 +60,7 @@ class SegmentDenoiser(nn.Module):
                 )
             else:
                 attended = core.attention(
-                    q,
-                    k,
-                    v,
-                    current_input_length=current_input_length,
-                    kv_valid_length=past_seq_length + current_input_length,
+                    q, k, v, current_input_length, past_seq_length + current_input_length
                 )
             attention = attended.transpose(1, 2).reshape(1, -1, core.dim)
             hidden = hidden + gate1 * core.out(attention)

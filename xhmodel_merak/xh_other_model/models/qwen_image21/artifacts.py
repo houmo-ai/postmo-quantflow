@@ -79,7 +79,7 @@ def read_dit_metadata(root, metadata="runtime_meta_info.json"):
         expected = {"text", "image"}
         if (
             meta.get("cache_policy") != "inplace_replace_target"
-            or meta.get("attention") != "flash_attention"
+            or meta.get("attention") not in ("flash_attention", "causal_flash_noncausal_masked")
             or meta.get("attention_metadata") != "lengths"
             or meta.get("sequence_layout") != "compact_prefix_target"
             or meta.get("cache_tokens") != gear.cache_tokens

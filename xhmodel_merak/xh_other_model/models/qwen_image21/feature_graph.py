@@ -72,6 +72,7 @@ class CapacityTextBlock(nn.Module):
         self.attention = FlashAttention(
             num_heads=self.heads, num_kv_heads=self.kv_heads, is_causal=True, scale=self.head_dim**-0.5
         )
+        self.register_buffer("past_seq_length", torch.zeros(1, dtype=torch.int32))
         self.mlp = deepcopy(source.mlp)
 
     def forward(self, hidden, cos, sin, visible, length):
@@ -82,7 +83,9 @@ class CapacityTextBlock(nn.Module):
         v = self.v(x).reshape(batch, capacity, self.kv_heads, self.head_dim).transpose(1, 2)
         q, k = self.rotary(q, cos, sin), self.rotary(k, cos, sin)
         mask = visible.transpose(1, 2).unsqueeze(-1)
-        out = self.attention(q * mask, k * mask, v * mask, current_input_length=length)
+        out = self.attention(
+            q * mask, k * mask, v * mask, past_seq_length=self.past_seq_length, current_input_length=length
+        )
         out = out.transpose(1, 2).reshape(batch, capacity, self.heads * self.head_dim)
         hidden = (hidden + self.out(out)) * visible
         return (hidden + self.mlp(self.post_norm(hidden))) * visible

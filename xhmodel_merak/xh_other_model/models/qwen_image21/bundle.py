@@ -15,12 +15,22 @@ def read_bundle_metadata(root):
     if meta.get("target_device") != "XH2a" or meta.get("quant_type") not in ("w16a16_sefp", "w8a16_sefp", "w8a8_sefp"):
         raise ValueError("this deployment contract requires XH2a W16A16, W8A16 or W8A8 SEFP")
     dit, gear = read_dit_metadata(root, meta["dit_metadata"])
-    if dit["schema_version"] != 4 or meta.get("attention") != "flash_attention" or meta.get("alignment") != 32:
-        raise ValueError("capacity bundles require FlashAttention and 32-pixel alignment")
+    if (
+        dit["schema_version"] != 4
+        or meta.get("attention") not in ("flash_attention", "causal_flash_noncausal_masked")
+        or meta.get("attention") != dit.get("attention")
+        or meta.get("alignment") != 32
+    ):
+        raise ValueError("capacity bundles require matching attention implementations and 32-pixel alignment")
     from .build import validate_build_config
     from .capacity import round_capacity
 
-    config = validate_build_config(meta["deployment_config"])
+    # Older native-FA bundles predate the explicit export switch.
+    config = dict(meta["deployment_config"])
+    config.setdefault("use_noncausal_flash_attention", meta["attention"] == "flash_attention")
+    config = validate_build_config(config)
+    if config["use_noncausal_flash_attention"] != (meta["attention"] == "flash_attention"):
+        raise ValueError("attention implementation disagrees with deployment_config")
     feature = meta["feature"]
     for key in ("capacity", "max_position", "hidden_size"):
         if type(feature.get(key)) is not int or feature[key] <= 0:
@@ -34,16 +44,22 @@ def read_bundle_metadata(root):
     ):
         raise ValueError("invalid tokenizer-derived text budget")
     text = budget["template_tokens"] + config["prompt_budget"]
-    expected_feature = round_capacity(text + config["max_references"] * config["visual_patch_capacity"] // 4)
+    # Accept coherent legacy (64) and TCIM-aligned (256) physical Q capacities.
+    query_capacities = {
+        (
+            round_capacity(text + config["max_references"] * config["visual_patch_capacity"] // 4, block),
+            round_capacity(text, block),
+        )
+        for block in (64, 256)
+    }
     expected_prefix = round_capacity(text + config["max_references"] * config["reference_capacity"])
     if (
-        feature["capacity"] != expected_feature
-        or gear.encoder_tokens != expected_feature
-        or budget["feature_capacity"] != expected_feature
+        (feature["capacity"], gear.text_tokens) not in query_capacities
+        or gear.encoder_tokens != feature["capacity"]
+        or budget["feature_capacity"] != feature["capacity"]
         or gear.prefix_tokens != expected_prefix
         or budget["prefix_capacity"] != expected_prefix
-        or gear.text_tokens != round_capacity(text)
-        or budget["dit_text_capacity"] != round_capacity(text)
+        or budget["dit_text_capacity"] != gear.text_tokens
         or gear.target_tokens != config["target_capacity"]
         or gear.image_tokens != max(config["target_capacity"], config["reference_capacity"])
         or feature["max_position"] != config["max_position"]

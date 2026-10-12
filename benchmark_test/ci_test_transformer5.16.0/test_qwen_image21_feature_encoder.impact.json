@@ -10,7 +10,8 @@
         "xhmodel_merak/xh_other_model/models/qwen_image21/processor.py",
         "xhmodel_merak/xh_llm/models/qwen3_vl/data_preprocess.py",
         "xhmodel_merak/xh_other_model/models/qwen_image21/vision_graph.py",
-        "xhmodel_merak/xh_other_model/models/qwen_image21/capacity.py"
+        "xhmodel_merak/xh_other_model/models/qwen_image21/capacity.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/length_attention.py"
       ]
     }
   ]

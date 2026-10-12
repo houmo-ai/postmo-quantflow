@@ -1,6 +1,7 @@
 """Public planning and publication contracts; learned graphs have separate SDK tests."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,89 @@ def test_public_plan_defaults_to_w16(source, tmp_path):
     )
     assert plan.deployment_precision == {"image": "w16a16_sefp"}
     assert plan.artifact_name == "hmquant_xh2_qwen_image21_w16a16_1mp_c4352"
+
+
+@pytest.mark.parametrize("quant_type,yaml_suffix", [
+    ("w16a16_sefp", "w16"), ("w8a16_sefp", "w8a16"), ("w8a8_sefp", "w8"),
+])
+@pytest.mark.parametrize("model_id", ["qwen-image-2.1", "qwen-image-2.1-turbo"])
+def test_recipe_defaults_keep_attention_internal(source, tmp_path, monkeypatch, model_id, quant_type, yaml_suffix):
+    import yaml
+    from xhmodel_merak.model_build.manifest import build_manifest
+    from xhmodel_merak.model_build.workflow import create_workflow, materialize_workflow_config
+    from xhmodel_merak.model_catalog.resources import resolve_workflow_config
+    from xhmodel_merak.xh_other_model.models.qwen_image21 import workflow as image_workflow
+    from xhmodel_merak.xh_other_model.models.qwen_image21.build import validate_build_config
+
+    if model_id.endswith("turbo"):
+        (source / "model_index.json").write_text(json.dumps({
+            "_class_name": "QwenImage21Pipeline", "sample_sigmas": [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3],
+        }))
+        (source / "scheduler/scheduler_config.json").write_text(json.dumps({
+            "_class_name": "FlowMatchEulerDiscreteScheduler", "shift": 1.0,
+            "use_dynamic_shifting": False, "shift_terminal": None,
+        }))
+    recipe = get_recipe(model_id)
+    default_yaml = resolve_workflow_config(recipe.default_variant.workflow_config)
+    profile_yaml = default_yaml.with_name(default_yaml.name.replace("_w16.yaml", f"_{yaml_suffix}.yaml"))
+    config = yaml.safe_load(profile_yaml.read_text())
+    assert "use_noncausal_flash_attention" not in config["export"]
+    assert validate_build_config(config["export"])["use_noncausal_flash_attention"] is False
+    plan = resolve_build_plan(model_id=model_id, model_dir=str(source), output_dir=str(tmp_path / "release"),
+                              deployment_precision={"image": quant_type})
+    assert plan.config_overrides == {"quant": None}
+    assert "attention" not in plan.to_dict()
+    assert "attention" not in plan.field_sources
+    assert "attention" not in describe_model(model_id)
+    assert "attention" not in recipe.to_description()
+    assert Path(plan.config_path) == default_yaml
+    effective = tmp_path / "effective.yaml"
+    materialize_workflow_config(plan, effective)
+    actual_workflow = create_workflow(str(source), str(effective))
+    calls = []
+
+    def build(model_dir, root, config, *, device):
+        calls.append(validate_build_config(config)["use_noncausal_flash_attention"])
+        return {}
+
+    # Replace weight loading/export only; use the real recipe, Workflow and model config validation.
+    monkeypatch.setattr(image_workflow, "build_bundle", build)
+    quant = actual_workflow.quant(str(tmp_path / "quant"), "cpu", plan.config_overrides)
+    exported = actual_workflow.export(quant, str(tmp_path / "export"), "cpu", plan.config_overrides)
+    assert calls == [False]
+    effective = exported.config_file
+    assert "use_noncausal_flash_attention" not in yaml.safe_load(Path(effective).read_text())["export"]
+    manifest = build_manifest(tmp_path, plan, Path(effective), None, None, [], {}, {"model": "source-hash"})
+    assert "attention" not in manifest["parameters"]
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_model_attention_config_preserves_family_replacements(source, tmp_path, monkeypatch, native):
+    import yaml
+    from xhmodel_merak.model_build.workflow import materialize_workflow_config
+    from xhmodel_merak.model_integrations.qwen_image21 import source as source_policy
+
+    original = source_policy.resolve_config
+
+    def resolve_config(**kwargs):
+        return {**original(**kwargs), "export.use_noncausal_flash_attention": native}
+
+    monkeypatch.setattr(source_policy, "resolve_config", resolve_config)
+    plan = resolve_build_plan(model_id="qwen-image-2.1", model_dir=str(source),
+                              output_dir=str(tmp_path / "release"))
+    effective = tmp_path / "effective.yaml"
+    materialize_workflow_config(plan, effective)
+    assert yaml.safe_load(effective.read_text())["export"]["use_noncausal_flash_attention"] is native
+    assert "export.use_noncausal_flash_attention" not in plan.config_overrides
+
+
+@pytest.mark.parametrize("value", [None, "false", 0, 1, []])
+def test_export_attention_requires_boolean(value):
+    from xhmodel_merak.xh_other_model.models.qwen_image21.build import validate_build_config
+    config = {"target_device": "XH2a", "quant_type": "w16a16_sefp"}
+    assert validate_build_config(config)["use_noncausal_flash_attention"] is False
+    with pytest.raises(ValueError, match="must be a bool"):
+        validate_build_config({**config, "use_noncausal_flash_attention": value})
 
 
 @pytest.mark.parametrize(
@@ -167,7 +251,8 @@ def test_publication_handoff_relocation_and_manifest_inventory(bundle):
 
     stage = bundle.parent
     quant_type = json.loads((bundle / "runtime_meta_info.json").read_text())["quant_type"]
-    plan = SimpleNamespace(model_id="qwen-image-2.1", components=("image",), deployment_precision={"image": quant_type})
+    plan = SimpleNamespace(model_id="qwen-image-2.1", components=("image",),
+                           deployment_precision={"image": quant_type})
     assert normalize_export(stage, SimpleNamespace(work_dir=str(bundle)), plan) is None
     metadata = validate_artifact(stage, plan)
     assert not (stage / "export_meta_info.json").exists()
@@ -231,6 +316,61 @@ def test_publication_accepts_a_different_self_consistent_profile(bundle):
     path.write_text(json.dumps(meta))
     validated, _ = validate_runtime(bundle, ("image",))
     assert validated["deployment_config"]["output_size"] == [768, 1376]
+
+
+def test_mixed_attention_metadata_requires_matching_components(bundle):
+    from xhmodel_merak.xh_other_model.models.qwen_image21.bundle import read_bundle_metadata
+
+    root_path, dit_path = bundle / "runtime_meta_info.json", bundle / "dit_meta_info.json"
+    root, dit = json.loads(root_path.read_text()), json.loads(dit_path.read_text())
+    read_bundle_metadata(bundle)  # Existing all-FA packages remain readable.
+    root["attention"] = "causal_flash_noncausal_masked"
+    root_path.write_text(json.dumps(root))
+    with pytest.raises(ValueError, match="matching attention"):
+        read_bundle_metadata(bundle)
+    dit["attention"] = root["attention"]
+    dit_path.write_text(json.dumps(dit))
+    read_bundle_metadata(bundle)
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_attention_metadata_accepts_legacy_and_rejects_explicit_conflicts(bundle, native, legacy):
+    from xhmodel_merak.xh_other_model.models.qwen_image21.bundle import read_bundle_metadata
+    root_path, dit_path = bundle / "runtime_meta_info.json", bundle / "dit_meta_info.json"
+    root, dit = json.loads(root_path.read_text()), json.loads(dit_path.read_text())
+    root["attention"] = dit["attention"] = "flash_attention" if native else "causal_flash_noncausal_masked"
+    if not legacy:
+        root["deployment_config"]["use_noncausal_flash_attention"] = native
+    dit_path.write_text(json.dumps(dit))
+    root_path.write_text(json.dumps(root))
+    read_bundle_metadata(bundle)
+    root["deployment_config"]["use_noncausal_flash_attention"] = not native
+    root_path.write_text(json.dumps(root))
+    with pytest.raises(ValueError, match="attention implementation disagrees"):
+        read_bundle_metadata(bundle)
+
+
+@pytest.mark.parametrize("feature_capacity,text_capacity,valid", [
+    (1664, 576, True), (1792, 768, True),
+    (1792, 576, False), (1664, 768, False), (2048, 768, False),
+])
+def test_query_capacity_alignment_accepts_only_coherent_profiles(bundle, feature_capacity, text_capacity, valid):
+    from xhmodel_merak.xh_other_model.models.qwen_image21.bundle import read_bundle_metadata
+
+    root_path, dit_path = bundle / "runtime_meta_info.json", bundle / "dit_meta_info.json"
+    root, dit = json.loads(root_path.read_text()), json.loads(dit_path.read_text())
+    root["feature"]["capacity"] = root["text_budget"]["feature_capacity"] = feature_capacity
+    root["text_budget"]["dit_text_capacity"] = text_capacity
+    dit["gear"].update(encoder_tokens=feature_capacity, text_tokens=text_capacity)
+    root_path.write_text(json.dumps(root))
+    dit_path.write_text(json.dumps(dit))
+    if valid:
+        assert read_bundle_metadata(bundle) == root
+        assert dit["cache_tokens"] == 9280
+    else:
+        with pytest.raises(ValueError, match="component capacities"):
+            read_bundle_metadata(bundle)
 
 
 def test_configured_build_example_exposes_workflow_path():

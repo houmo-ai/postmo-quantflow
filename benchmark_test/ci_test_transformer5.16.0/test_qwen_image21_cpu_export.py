@@ -112,13 +112,22 @@ def test_two_cpu_exported_graphs_preserve_cache_abi_and_request_isolation(
     )
     assert meta["cache_policy"] == "inplace_replace_target"
     for role, input_count in (("text", 10), ("image", 10)):
-        graph = onnx.load(root / meta["graphs"][role]).graph
+        from _qwen_image21_split_probe import assert_split_probe
+
+        exported = onnx.load(root / meta["graphs"][role])
+        graph = exported.graph
         assert len(graph.input) == input_count and len(graph.output) == 1
         assert_graph_precision(graph, weight_bits, activation_bits)
+        assert_split_probe(exported, [128] * 4, [1, 512], tmp_path / f"{role}_split.onnx", split_output="split")
         assert sum(node.op_type == "RMSNorm" for node in graph.node) == (5 if role == "text" else 4)
         assert sum(node.op_type == "Rope" for node in graph.node) == 4
-        assert sum(node.op_type == "FlashAttention" for node in graph.node) == 2
-        assert not any(node.op_type in {"Softmax", "MaskedSoftmax", "MatMul"} for node in graph.node)
+        if role == "text":
+            assert sum(node.op_type == "FlashAttention" for node in graph.node) == 2
+            assert not any(node.op_type in {"Softmax", "MaskedSoftmax", "MatMul"} for node in graph.node)
+        else:
+            assert not any(node.op_type == "FlashAttention" for node in graph.node)
+            assert sum(node.op_type == "MatMul" for node in graph.node) == 4
+            assert sum(node.op_type == "Softmax" for node in graph.node) == 2
         assert sum(node.op_type == "KVcache" for node in graph.node) == 4
         assert not any(value.name == "query_kv_range_abs" for value in graph.input)
         lengths = [value for value in graph.input if value.name in {"past_seq_length", "current_input_length"}]
@@ -167,6 +176,7 @@ def test_two_cpu_exported_graphs_preserve_cache_abi_and_request_isolation(
     ],
 )
 @pytest.mark.parametrize("model_id", ["qwen-image-2.1", "qwen-image-2.1-turbo"])
+@pytest.mark.parametrize("native_attention", [False, True])
 def test_public_six_graph_build_relocate_generate_edit_and_repeat(
     tmp_path,
     monkeypatch,
@@ -175,6 +185,7 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
     weight_bits,
     activation_bits,
     model_id,
+    native_attention,
 ):
     import numpy as np
     from _qwen_image21_small_fixture import prepare_qwen_image21
@@ -187,6 +198,13 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
     source_dir = tmp_path / "source"
     with restore_model_initialization_state():
         inputs = prepare_qwen_image21(source_dir, tmp_path, catalog, catalog._recipes[model_id], monkeypatch)
+        if native_attention:
+            from dataclasses import replace
+
+            recipe = catalog._recipes[model_id]
+            monkeypatch.setitem(catalog._recipes, model_id, replace(
+                recipe, config_replacements=(*recipe.config_replacements, ("export.use_noncausal_flash_attention", True)),
+            ))
         result = build_model(
             model_id=model_id,
             model_dir=str(source_dir),
@@ -203,8 +221,19 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
     for path in graphs:
         graph = onnx.load(path).graph
         assert_graph_precision(graph, weight_bits, activation_bits)
-        assert any(node.op_type == "FlashAttention" for node in graph.node)
-        assert not any(node.op_type in {"Softmax", "MaskedSoftmax", "BfpFlashAttention"} for node in graph.node)
+        causal = path.parent.name.startswith(("text_encode_", "denoise_text_"))
+        if causal:
+            nodes = [node for node in graph.node if node.op_type == "FlashAttention"]
+            assert nodes and all(len(node.input) >= 6 and node.input[4] and node.input[5] for node in nodes)
+            assert not any(node.op_type in {"Softmax", "MaskedSoftmax", "BfpFlashAttention"} for node in graph.node)
+        elif native_attention:
+            nodes = [node for node in graph.node if node.op_type == "FlashAttention"]
+            assert nodes and all(len(node.input) >= 10 and node.input[5] and node.input[9] for node in nodes)
+            assert not any(node.op_type in {"Softmax", "MatMul"} for node in graph.node)
+        else:
+            assert not any(node.op_type == "FlashAttention" for node in graph.node)
+            assert any(node.op_type == "Softmax" for node in graph.node)
+            assert any(node.op_type == "MatMul" for node in graph.node)
         if path.parent.name.startswith("vae_"):
             assert all(len(value.type.tensor_type.shape.dim) == 4 for value in graph.input[:6])
             assert len(graph.output[0].type.tensor_type.shape.dim) == 4

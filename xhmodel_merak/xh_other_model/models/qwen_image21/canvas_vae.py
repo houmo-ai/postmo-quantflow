@@ -8,6 +8,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from .capacity import VAE_SPATIAL_SCALE, vae_token_capacity
+from .length_attention import LengthMaskedAttention
 from .vae_graph import SpatialChannelNormalize, SpatialConv2d, SpatialZeroPad
 
 
@@ -26,8 +28,8 @@ VAE_INPUT_NAMES = [
 
 def spatial_inputs(actual_hw, canvas_hw, *, device="cpu", dtype=torch.float16):
     """Host-only geometry preparation; every returned tensor has a fixed shape."""
-    if any(type(n) is not int or n <= 0 or n % 32 for n in (*actual_hw, *canvas_hw)):
-        raise ValueError("actual and canvas dimensions must be positive multiples of 32")
+    actual_capacity = vae_token_capacity(actual_hw)
+    canvas_capacity = vae_token_capacity(canvas_hw)
     height, width = actual_hw
     cap_h, cap_w = canvas_hw
     if height > cap_h or width > cap_w:
@@ -37,12 +39,12 @@ def spatial_inputs(actual_hw, canvas_hw, *, device="cpu", dtype=torch.float16):
         rows = torch.arange(cap_h // factor, device=device)[:, None] < height // factor
         cols = torch.arange(cap_w // factor, device=device)[None, :] < width // factor
         masks.append((rows & cols).to(dtype)[None, None])
-    slots = torch.arange(cap_h * cap_w // 256, device=device).reshape(cap_h // 16, cap_w // 16)
+    slots = torch.arange(canvas_capacity, device=device).reshape(cap_h // 16, cap_w // 16)
     valid = slots[: height // 16, : width // 16].flatten()
     visible = masks[-1].flatten().bool()
     order = torch.cat((valid, slots.flatten()[~visible])).to(torch.int32)
     restore = torch.argsort(order).to(torch.int32)
-    length = torch.tensor([height * width // 256], dtype=torch.int32, device=device)
+    length = torch.tensor([actual_capacity], dtype=torch.int32, device=device)
     return (*masks, order, restore, length)
 
 
@@ -162,10 +164,13 @@ class CanvasUpBlock(nn.Module):
 
 
 class CanvasAttention(nn.Module):
-    def __init__(self, source):
+    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False):
         super().__init__()
-        from xhquant.nn import FlashAttention, Gather
+        from xhquant.nn import Gather
 
+        if type(capacity) is not int or capacity <= 0:
+            raise ValueError("VAE attention capacity must be a positive integer derived from the canvas")
+        self.capacity = capacity
         self.channels = source.dim
         self.physical_channels = max(64, self.channels)
         if self.physical_channels not in (64, 128, 256, 512, 768, 1152):
@@ -173,17 +178,27 @@ class CanvasAttention(nn.Module):
         self.norm = SpatialChannelNormalize(source.norm)
         self.qkv = deepcopy(source.to_qkv)
         self.projection = deepcopy(source.proj)
-        self.attention = FlashAttention(num_heads=1, is_causal=False, scale=self.channels**-0.5)
+        self.attention = LengthMaskedAttention(
+            capacity, capacity, scale=self.channels**-0.5,
+            use_flash_attention=use_noncausal_flash_attention,
+        )
         self.gather = Gather(axis=2)
 
     def forward(self, value, mask, order, restore, length):
         batch, channels, height, width = value.shape
+        if height * width != self.capacity:
+            raise ValueError(
+                f"VAE canvas {height * VAE_SPATIAL_SCALE}x{width * VAE_SPATIAL_SCALE} "
+                f"requires physical capacity {height * width}, got {self.capacity}"
+            )
         image = value * mask
         qkv = self.qkv(self.norm(image)) * mask
-        q, k, v = qkv.reshape(batch, 1, 3 * channels, height * width).transpose(-1, -2).chunk(3, -1)
+        qkv = qkv.reshape(batch, 1, 3 * channels, height * width).transpose(-1, -2)
+        # Explicit sections avoid TCIM 1.5 treating num_outputs as a chunk size.
+        q, k, v = torch.split(qkv, [self.channels] * 3, dim=-1)
         q, k, v = (self.gather(part, order) for part in (q, k, v))
         q, k, v = (F.pad(part, (0, self.physical_channels - self.channels)) for part in (q, k, v))
-        attended = self.attention(q, k, v, current_input_length=length)[..., : self.channels]
+        attended = self.attention(q, k, v, length, length)[..., : self.channels]
         attended = self.gather(attended, restore).squeeze(1).transpose(1, 2).reshape(batch, channels, height, width)
         attended = attended * mask
         output = self.projection(attended) * mask
@@ -191,10 +206,13 @@ class CanvasAttention(nn.Module):
 
 
 class CanvasMid(nn.Module):
-    def __init__(self, source):
+    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False):
         super().__init__()
         self.blocks = nn.ModuleList([CanvasResidual(block) for block in source.resnets])
-        self.attentions = nn.ModuleList([CanvasAttention(attention) for attention in source.attentions])
+        self.attentions = nn.ModuleList([
+            CanvasAttention(attention, capacity, use_noncausal_flash_attention=use_noncausal_flash_attention)
+            for attention in source.attentions
+        ])
 
     def forward(self, value, mask, order, restore, length):
         value = self.blocks[0](value, mask)
@@ -210,13 +228,13 @@ def _validate_source(source):
 
 
 class CanvasVaeEncode(nn.Module):
-    def __init__(self, source):
+    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False):
         super().__init__()
         _validate_source(source)
         encoder = source.encoder
         self.conv_in = CanvasConv(encoder.conv_in)
         self.down = nn.ModuleList([CanvasDownBlock(block) for block in encoder.down_blocks])
-        self.mid = CanvasMid(encoder.mid_block)
+        self.mid = CanvasMid(encoder.mid_block, capacity, use_noncausal_flash_attention=use_noncausal_flash_attention)
         self.norm = SpatialChannelNormalize(encoder.norm_out)
         self.activation = deepcopy(encoder.nonlinearity)
         self.conv_out = CanvasConv(encoder.conv_out)
@@ -236,13 +254,13 @@ class CanvasVaeEncode(nn.Module):
 
 
 class CanvasVaeDecode(nn.Module):
-    def __init__(self, source):
+    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False):
         super().__init__()
         _validate_source(source)
         decoder = source.decoder
         self.projection = CanvasConv(source.post_quant_conv)
         self.conv_in = CanvasConv(decoder.conv_in)
-        self.mid = CanvasMid(decoder.mid_block)
+        self.mid = CanvasMid(decoder.mid_block, capacity, use_noncausal_flash_attention=use_noncausal_flash_attention)
         self.up = nn.ModuleList([CanvasUpBlock(block) for block in decoder.up_blocks])
         self.norm = SpatialChannelNormalize(decoder.norm_out)
         self.activation = deepcopy(decoder.nonlinearity)
@@ -263,6 +281,9 @@ class CanvasVaeSession:
     """Host padding, per-request masks and cropping for one published canvas graph."""
 
     def __init__(self, session, canvas_hw, *, encode, token_capacity):
+        vae_token_capacity(canvas_hw)
+        if type(token_capacity) is not int or token_capacity <= 0:
+            raise ValueError("VAE token capacity must be a positive integer")
         self.session, self.canvas_hw, self.encode, self.token_capacity = (
             session,
             tuple(canvas_hw),
@@ -275,7 +296,7 @@ class CanvasVaeSession:
             raise ValueError("image VAE requires a batch-one four-dimensional tensor")
         height, width = value.shape[-2:]
         actual = (height, width) if self.encode else (height * 16, width * 16)
-        if actual[0] * actual[1] // 256 > self.token_capacity:
+        if vae_token_capacity(actual) > self.token_capacity:
             raise ValueError("VAE input exceeds the published token capacity")
         inputs = spatial_inputs(actual, self.canvas_hw, device=value.device, dtype=value.dtype)
         factor = 1 if self.encode else 16

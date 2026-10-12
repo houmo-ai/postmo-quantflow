@@ -40,7 +40,10 @@ def validate_build_config(config):
         raise ValueError("text capacities are derived from the tokenizer; configure prompt_budget/max_references")
     if config.get("model_id", BASE_MODEL_ID) not in MODEL_IDS:
         raise ValueError("unsupported Qwen-Image model_id")
-    return validate_capacity_config(config)
+    result = validate_capacity_config(config)
+    if type(result.setdefault("use_noncausal_flash_attention", False)) is not bool:
+        raise ValueError("use_noncausal_flash_attention must be a bool")
+    return result
 
 
 def export_entries(root, meta):
@@ -101,7 +104,7 @@ def _build_bundle(model_dir, output_dir, config, *, device):
     from .artifacts import DenoiseGear
     from .bundle import read_bundle_metadata
     from .canvas_vae import VAE_INPUT_NAMES, CanvasVaeDecode, CanvasVaeEncode, spatial_inputs
-    from .capacity import DEFAULT_CAPACITY, derive_text_capacities
+    from .capacity import DEFAULT_CAPACITY, derive_text_capacities, vae_token_capacity
     from .export import export_cpu_graph, export_full_dit_bundle
     from .feature_graph import (
         CAPACITY_FEATURE_INPUT_NAMES,
@@ -128,6 +131,7 @@ def _build_bundle(model_dir, output_dir, config, *, device):
     ref_height, ref_width = config["reference_size"]
     max_position = config["max_position"]
     quant_type = deployment_quant_type(config)
+    native_attention = config["use_noncausal_flash_attention"]
     quant = ConfigDict(create_quant_config(QuantScheme(target_device=DeviceType.XH2a, quant_type=quant_type)))
     quant.auto_release_unused_parameters = True
     meta = dict(
@@ -136,7 +140,7 @@ def _build_bundle(model_dir, output_dir, config, *, device):
         model_id=model_id,
         target_device="XH2a",
         quant_type=quant_type,
-        attention="flash_attention",
+        attention="flash_attention" if native_attention else "causal_flash_noncausal_masked",
         alignment=32,
         dit_metadata="dit_meta_info.json",
         resources={},
@@ -144,6 +148,7 @@ def _build_bundle(model_dir, output_dir, config, *, device):
     )
     meta["deployment_config"] = {key: config[key] for key in DEFAULT_CAPACITY}
     meta["deployment_config"].update(target_device="XH2a", quant_type=quant_type)
+    meta["deployment_config"]["use_noncausal_flash_attention"] = native_attention
 
     def resource(name, relative):
         destination = root / "hf_config" / relative
@@ -204,8 +209,10 @@ def _build_bundle(model_dir, output_dir, config, *, device):
         if capacity > max_position:
             raise ValueError("max_position must cover the automatically derived text capacity")
         meta["text_budget"] = text_capacities
-        visual = PackedVision(source.model.visual).eval()
         patch_capacity = config["visual_patch_capacity"]
+        visual = PackedVision(
+            source.model.visual, patch_capacity, use_noncausal_flash_attention=native_attention
+        ).eval()
         grid_side = source.model.visual.num_grid_per_side
         head_dim = source.config.vision_config.hidden_size // source.config.vision_config.num_heads
         geometry = geometry_inputs(
@@ -266,8 +273,24 @@ def _build_bundle(model_dir, output_dir, config, *, device):
         )
         canvas_h, canvas_w = config["canvas_size"]
         for role, module, value, size, token_capacity in (
-            ("vae_encode", CanvasVaeEncode(vae), rgba, (ref_height, ref_width), config["reference_capacity"]),
-            ("vae_decode", CanvasVaeDecode(vae), target * std + mean, (height, width), config["target_capacity"]),
+            (
+                "vae_encode",
+                CanvasVaeEncode(
+                    vae, vae_token_capacity((canvas_h, canvas_w)), use_noncausal_flash_attention=native_attention
+                ),
+                rgba,
+                (ref_height, ref_width),
+                config["reference_capacity"],
+            ),
+            (
+                "vae_decode",
+                CanvasVaeDecode(
+                    vae, vae_token_capacity((canvas_h, canvas_w)), use_noncausal_flash_attention=native_attention
+                ),
+                target * std + mean,
+                (height, width),
+                config["target_capacity"],
+            ),
         ):
             factor = 1 if role == "vae_encode" else 16
             padded = torch.nn.functional.pad(
@@ -316,6 +339,7 @@ def _build_bundle(model_dir, output_dir, config, *, device):
             timestep=1.0,
             target_device=DeviceType.XH2a,
             quant_config=quant,
+            use_noncausal_flash_attention=native_attention,
         )
         for entry in dit_root.iterdir():
             if entry.is_dir():

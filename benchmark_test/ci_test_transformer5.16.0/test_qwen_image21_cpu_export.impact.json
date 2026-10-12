@@ -4,6 +4,7 @@
     {
       "id": "qwen-image21-cpu-export",
       "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_qwen_image21_split_probe.py",
         "xhmodel_merak/xh_other_model/models/qwen_image21/build.py",
         "xhmodel_merak/xh_other_model/models/qwen_image21/export.py",
         "xhmodel_merak/xh_other_model/models/qwen_image21/full_graph.py",
@@ -30,7 +31,8 @@
         "xhmodel_merak/xh_other_model/models/qwen_image21/canvas_vae.py",
         "xhmodel_merak/xh_other_model/models/qwen_image21/vision_graph.py",
         "xhmodel_merak/xh_other_model/models/qwen_image21/segment_runtime.py",
-        "xhmodel_merak/xh_other_model/models/qwen_image21/sampling.py"
+        "xhmodel_merak/xh_other_model/models/qwen_image21/sampling.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/length_attention.py"
       ]
     }
   ]

@@ -40,7 +40,8 @@ def test_vae_large_head_hmonnx_export_load_and_execute(tmp_path, head_dim, quant
     assert [node.op_type for node in graph.node] == ["FlashAttention"]
     attributes = {attribute.name: onnx.helper.get_attribute_value(attribute) for attribute in graph.node[0].attribute}
     assert attributes["num_heads"] == attributes["num_kv_heads"] == 1
-    assert all(attributes[name + "_bits"] == bits for name in ("q", "k", "v", "s", "p"))
+    assert "s_bits" not in attributes
+    assert all(attributes[name + "_bits"] == bits for name in ("q", "k", "v", "p"))
     runtime = HMONNXInferenceV2(str(path), session_config=HMONNXInferenceConfig(exec_devices=["cuda:0"]))
     q, k, v = [value.cuda().half() for value in values]
     length = length.cuda()
@@ -54,13 +55,13 @@ def test_vae_large_head_hmonnx_export_load_and_execute(tmp_path, head_dim, quant
         num_heads=1,
         num_kv_heads=1,
         head_size=head_dim,
-        **{name + "_manbit": bits - 1 for name in ("q", "k", "v", "s", "p")},
+        **{name + "_manbit": bits - 1 for name in ("q", "k", "v", "p")},
     )
     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("head_dim", [768, 1152])
-@pytest.mark.parametrize("mantissas", [(7, 7, 7, 7, 7), (15, 15, 15, 15, 15), (15, 7, 15, 7, 15)])
+@pytest.mark.parametrize("mantissas", [(7, 7, 7, 7), (15, 15, 15, 15), (15, 7, 15, 15)])
 def test_vae_flash_large_single_head_matches_hmfp_reference(head_dim, mantissas):
     from xhquant.backend.hmops.fused_ops.flash_attention.xh2._flash_attention_xh2_torch import (
         flash_attention_xh2_torch_flash,
@@ -71,7 +72,7 @@ def test_vae_flash_large_single_head_matches_hmfp_reference(head_dim, mantissas)
     torch.manual_seed(7)
     q, k, v = [torch.randn(1, 1, 72, head_dim, device="cuda", dtype=torch.float16) for _ in range(3)]
     length = torch.tensor([69], dtype=torch.int32, device="cuda")
-    bits = dict(zip(("q_manbit", "k_manbit", "v_manbit", "s_manbit", "p_manbit"), mantissas, strict=True))
+    bits = dict(zip(("q_manbit", "k_manbit", "v_manbit", "p_manbit"), mantissas, strict=True))
     actual = flash_attention_xh2(
         q, k, v, is_causal=False, current_input_length=length, num_heads=1, num_kv_heads=1, head_size=head_dim, **bits
     )

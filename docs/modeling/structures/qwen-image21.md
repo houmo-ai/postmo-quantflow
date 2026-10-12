@@ -11,12 +11,121 @@ W16A16/W8A16/W8A8 已有包直接修改 VAE ONNX，三精度真实 VAE 复测及
 下文保留历史诊断与数值结果；旧 HMONNX 及其外部权重文件已删除，原始 checkpoint、
 图片和报告保留。当前容量包的记录在下面 1MP 小节。
 
-## 当前契约：分段 DiT、原地 cache 与四维 VAE（2026-10-09）
+## TCIM 1.5.0 长度接口适配（2026-10-10）
+
+适用目标为 XH2a，核对工具链镜像为 `Dadao-xh2-v1.5.0-ubuntu24.04-x86.64`。
+该版本因果 FlashAttention 要求显式 `past_seq_length` 和 `current_input_length`；
+文本编码无历史 cache，现显式传入 `int32([0])`，DiT 文本段继续传真实历史长度。
+该版本 `xh2_op_converter` 的非因果分支拒绝或未向后端传递本模型所需的有效长度输入；
+这确认了当前转换接口的限制，尚不足以判定底层后端不具备相应实现能力。
+视觉、VAE 编码/解码和 DiT 图像段默认使用 `Q × scale → MatMul → MaskedAdd → Softmax → MatMul`，保留有效 Q/KV
+长度和无效 Q 清零，并在量化前清零无效 K/V，避免 cache 尾部污染 SEFP 计算。
+视觉 scale 按原始 head_dim=72，而非补齐后的 128；VAE 保留位置收集/恢复，
+DiT 保留先更新 cache、Q=current、KV=past+current 的原语义。
+
+新包 attention 标识为 `causal_flash_noncausal_masked`，原有 schema、端口和布局不变；
+加载端同时接受旧 `flash_attention` 包，并检查根 metadata 与 DiT 标识一致。
+统一构建入口直接使用 recipe 指向的默认 YAML，由模型构建代码默认选择展开实现。
+默认 YAML 不暴露 attention 实现开关，公共 BuildPlan、Manifest 和 CLI 也不增加该选项。
+模型内部保留原生非因果 FA 实现及两条路径的回归，metadata 继续记录实际导出实现并校验一致性。
+两条路径共用量化前 Q/K/V 清零，DiT 在 cache 更新后按 `KV=past+current` 清理尾部。
+attention 实现固定于导出图，与 TCIM `flash_attention=0/1/2` 编译优化模式不同。
+原生模式不自动回退；本次核对 TCIM 1.5.0 与 xhquanttool `66482666`（2026-10-18），
+非因果长度接口及 CUDA 的 VAE 768/1152 大头宽
+仍须分别适配和验证，不能由原生 CPU HMONNX 运行成功类推到 CUDA 或 HM。
+需要使用原始 checkpoint 重新导出，不能只修改旧 HMONNX 包的 JSON。
+
+### 展开路径 QK 缩放（2026-10-18）
+
+展开实现改为与 SDK 原生 FA 一致的 Q 预缩放。原来的 QK 后缩放会在未缩放点积写回
+FP16 时饱和，使本应不同的 attention 分数变成相同值。单头 D=128、Q 各通道 24、
+三个有效 K 分别为 24/27/30、V 分别为 0/1/2 时，三种 SEFP 配置的旧 HMONNX 输出约为 1，
+独立 FP64 参考、原生 FA 和 Q 预缩放小图输出均为 2。此证据来自 CPU HMONNX，
+不代表整模型质量或新原生分支 TCIM/HM 验证。量化 golden 与 runtime 一致仍需保留，
+同时增加独立参考，避免双方共享同一饱和错误。
+
+验证复用当前 CI 的视觉、VAE、文本特征和分段 DiT 原生对照；新增小注意力用例覆盖
+短/满/非对齐长度、独立 Q/KV 长度、原始 scale、大单头和真实 W8A8 导出/golden 对照。
+本阶段验证模型改写及导出正确性，实际六图 TCIM 编译由使用者运行；
+既有最小图编译证据不替代实际六图编译或板端数值对照。
+
+本次真实 W8A8 六图已重新导出到
+`work_dirs/qwen_image21/tcim15_fix_20261010/w8a8_build/qwen_image21_export`。
+`bundle_audit.json` 校验全部六图的实际量化属性、外部权重、长度参数和原有端口 ABI；
+文本编码/DiT 文本保留 36/32 个因果 FA，视觉/DiT 图像改为 54/64 个 MatMul
+及 27/32 个 Softmax，VAE 编码与解码各为 2 个 MatMul、1 个 Softmax。
+注意力小图的三种头宽 W8A8 导出与 GPU HMONNX golden 逐元素一致。
+编译命令见同目录 `compile_commands.sh`，本次未执行实际六图 TCIM 编译或 HMM 推理。
+选中 CI 为 267 passed、31 failed；本次浮点改写、W8A8 golden、三精度六图导出/搬移/运行
+及统一接口回归通过。31 项失败分别为 SDK 缺少既有 `_conv_bounded_unfold`（9 项）、
+`_flash_attention_fp_torch_opt`（12 项），以及原生 FA kernel 不支持 768/1152 单头（10 项）；
+后者是保留的 SDK 原生 FA 回归，本次展开实现的同宽度 golden 已通过。
+完整日志与范围见 `validation_summary.json`、`ci.log`。未修改 SDK 或豁免失败用例；
+本机无 ocr，采用人工审查。
+
+## TCIM 1.5.0 因果 Q 容量对齐（2026-10-11）
+
+适用配置为 XH2a、TCIM 1.5.0、W8A8、batch=1、head_dim=128。
+真实文本编码图 Q/KV 容量 1664、32/8 头在单核和双核均报
+`failed to find single-layer solution`；同属性的单算子图也复现失败。
+保持单核、头数、位宽、scale、LUT 和长度接口，只将 Q/KV 容量改为 1792 后
+生成 340448 字节 HMM；只改 Q=256、保持 KV=1664 也通过。
+保持容量 1664、减少头数或改为 16 位仍失败。转换器固定查询 tile=256，
+因此长 Q 容量的尾块处理是当前推断，尚未确认后端具体限制；小容量 Q=64 也通过，
+不能归纳为所有 Q 容量都必须是 256 的倍数。
+原始实测见 `work_dirs/qwen_image21/tcim15_fix_20261010/text_attention_repro_20261011/`。
+
+本次只将 `derive_text_capacities()` 的 `feature_capacity` 与 `dit_text_capacity`
+向上按 256 对齐；默认真实 tokenizer 推导为 1792、768。
+`prefix_capacity` 仍按 64 对齐，保持 4928，cache 仍为 9280。
+提示预算、真实 token 长度、RoPE 位置、有效长度掩码、图片容量和原始权重不变。
+运行时按包内 metadata 分配补零位置并裁回有效输出，受影响图须重新导出；
+不能只改旧包 JSON，也不修改 TCIM 安装代码或新增 build 参数。
+数值与导出验证记录在 `work_dirs/qwen_image21/tcim15_capacity_20261011/`；
+单算子编译证据不替代完整六图编译或 HMM 板端数值验证。
+
+真实 W8A8 六图包位于该目录的 `w8a8_build/qwen_image21_export`。
+整包核查确认只有两张文本图的容量端口变化，2356 份量化权重、scale、norm 和 LUT
+载荷与修改前逐字节一致；examples 编译器的独立加载端也已同步容量校验。
+最小真实模型的旧/新容量浮点原生对照、W8A8 导出/golden、有效输出与缓存一致性、
+无效 padding 干扰检查通过。真实权重 HMONNX 另以一个纯文本提示比较文本编码的
+32 个有效 token，以及 DiT 文本的 past=37/current=18 合成非零历史状态；两图有效输出
+和全部层 KV 更新逐元素一致，最大绝对差为 0。此抽样不代表完整图片或 HMM 数值验证。
+最终选中 CI 为 263 passed、9 failed；三精度整包构建/搬移/生成/编辑及统一接口通过。
+9 项失败仍为既有 SDK 卷积回归缺少 `_conv_bounded_unfold`，未修改 SDK 或豁免用例。
+六图 SDK 导出完成后，原进程持有旧容量校验而在收尾失败；新进程按更新后的生产加载端
+重新校验并通过既有 `export_entries()` 和 config dump 补齐发布清单及 workflow 配置，
+未修改已导出图或权重。完整证据与编译命令见 `validation_summary.json`、`compile_commands.sh`。
+
+
+
+## TCIM 1.5.0 Split 表达适配（2026-10-12）
+
+文本、图像 DiT 的四份调制参数，以及 VAE 编码、解码的三份 QKV，原由 `chunk` 导出为
+带 `num_outputs` 的标准 Split。当前 TCIM 的 `SplitAttr.from_node()` 将输出份数误作每份长度，
+在 `hmir_op_converter.py` 查询输出 shape 时越界。此问题独立于 attention 长度适配。
+
+参考 [PI0.5 的显式分段实现](../../../xhmodel_merak/xh_other_model/models/pi05/_llm_model_impl_cond.py)，
+当前 `SegmentDenoiser` 和 `CanvasAttention` 改用长度从模型通道数推导的 `torch.split`。
+SDK 导出为带 `indices_or_sections` 的 Split 与 TupleGetItem，保留分段顺序、算术、权重和端口。
+未修改 TCIM 安装代码；原有六图包中的两张 DiT、两张 VAE 需要重新导出后才能使用新表达。
+
+三精度 DiT 导出及缓存回归、VAE 原生对照和 W8A8 attention 导出/golden 均通过。
+从新导出图提取的四个 Split 片段保留真实通道宽度 4096/768/1152，VAE 空间缩至 36 个位置，
+在未修改的 TCIM 1.5.0、XH2、单核、cpp-v2 下生成 HMM；片段 HMONNX 与切片参考逐元素一致。
+该验证不替代完整四图编译或板端 HMM 数值验证，记录位于
+`work_dirs/qwen_image21/tcim15_capacity_20261011/split_pi05_20261012/`。
+CI 按每项用例最后执行结果汇总为 211 passed、23 failed；失败分别为既有 SDK 缺少
+`_conv_bounded_unfold`（9 项）、原生 FA kernel 不支持 768/1152 单头（10 项），以及
+当前环境不满足 recipe 的 Diffusers、Hub、NumPy 版本要求（4 项）。未豁免失败用例。
+
+## 当前契约：分段 DiT、原地 cache 与四维 VAE（更新至 2026-10-12）
 
 整包 metadata schema=3，DiT schema=4。仍然只有六张学习组件图：
 text_encode、visual、vae_encode、vae_decode、denoise_text、denoise_image。
 文本 DiT 与图像 DiT 均包含完整 32 层栈和各自输入投影，共享静态权重资源；
-文本图使用 causal FlashAttention，图像图使用 non-causal FlashAttention。
+文本图使用 causal FlashAttention；图像图保留非因果语义，按上述 TCIM 1.5.0 适配
+展开为带有效 Q/KV 长度掩码的 MatMul/Softmax attention。
 没有 query_kv_range_abs 或图像块范围输入。
 
 首次请求按官方原始顺序初始化条件，而不是把所有文本合并到参考图之前。
@@ -27,14 +136,27 @@ text_encode、visual、vae_encode、vae_decode、denoise_text、denoise_image。
 每层通过 SDK LLMCacheV2 写入调用方提供的 CacheTensor；加载端启用原地更新。
 图输出分别只有 hidden 或 noise，没有普通 cache tensor 输出或 Host 整份回拷。
 条件段起点和实际段长度分别传入 past_seq_length、current_input_length；
-图像 FlashAttention 的 kv_valid_length 为两者之和。整份 cache 的容量是条件最大容量加目标最大容量，
+图像 attention 的有效 KV 长度为两者之和。整份 cache 的容量是条件最大容量加目标最大容量，
 默认 4928+4352=9280，实际序列紧凑排列为 [条件 P][目标 N][无效尾部]。
 后续每步固定 past_seq_length=P、current_input_length=N，覆盖 [P,P+N)，不追加旧目标。
 条件前缀不变；请求、正负 CFG 分支各自拥有缓存。RoPE 按完整原始序列和真实网格生成，再逐段切片。
 
-VLM 语言图容量 1664、DiT 文本段容量 576 由 tokenizer、模板、512 token 提示预算和视觉预算推导。
+VLM 语言图容量 1792、DiT 文本段容量 768 由 tokenizer、模板、512 token 提示预算和视觉预算推导，
+并按上节的 TCIM 1.5.0 适配向上按 256 对齐；旧包对应容量为 1664、576。
 视觉、目标和参考 token 容量仍为 4352，VAE 画布仍为 1536×1536，实际输出默认 1024×1024。
 新路径保留 padding 行在 attention 量化前清零、实际长度时间调度和二维 latent 恢复。
+
+`CanvasVaeEncode(source, capacity)`、`CanvasVaeDecode(source, capacity)` 和
+`CanvasAttention(source, capacity)` 显式接收
+画布的物理 attention 容量 `canvas_h * canvas_w // 256`，默认画布对应 9216，用于构造长度掩码。
+这些内部构造类要求调用方显式传入容量，权重配置本身不能确定导出的画布尺寸。
+调用方使用 `capacity.vae_token_capacity(canvas_hw)` 统一校验尺寸并计算物理容量；
+尺寸须为正的 32 倍数，不允许通过整除截断不合法画布。
+VAE 每个 token 的像素面积为 `VAE_SPATIAL_SCALE**2 = 16**2`，
+它与因果 query 容量按 256 对齐是两个不同约束。不设置固定容量默认值，避免小画布或自定义画布误用掩码。
+输入画布与构造时物理容量不一致时，在 attention 运算前抛出带画布尺寸的 `ValueError`。
+`CanvasVaeSession.token_capacity` 来自包内 metadata，限制实际请求的有效 token 数，默认配置为 4352。
+有效 token 上限可以小于物理画布容量；每次请求的 mask 排除画布中的无效位置。
 
 VAE 导出接口和 mask 均为四维 NCHW。Encoder 输入 [1,4,H,W]、输出 [1,64,H/16,W/16]，
 decoder 反向。去掉原生单帧时间轴，保留 shortcut 的空间重排、零填充和归约语义。

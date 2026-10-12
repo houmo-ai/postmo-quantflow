@@ -132,12 +132,27 @@ VAE encoder 输入 [B,4,H,W]、输出 [B,64,H/16,W/16]，decoder 反向；
 分母为 sqrt(mean(x²)+1e-8)，权重直接使用 gamma；接受与原生 L2 分母截断的微小公式差异。
 epsilon=1e-8 保证现有 FP16 倒数在全零 padding 处有限。SDK RMSNorm 接口、导出和加载无需扩展。
 二维 padding 展平有行间空洞；图先 Gather 有效位置到连续前缀，按实际长度执行
-FlashAttention，再恢复二维位置。Encoder/decoder 共用这套规则，最终裁出实际区域。
+非因果注意力，再恢复二维位置。Encoder/decoder 共用这套规则，最终裁出实际区域。
 
-所有部署 attention 统一使用 SDK FlashAttention，不提供非 FlashAttention 分支。
+非因果注意力由模型内部默认使用显式 Q/KV 长度的
+`MatMul → MaskedAdd → Softmax → MatMul`。
+Q 在第一份 MatMul 前乘 scale，避免未缩放 QK 写回 FP16 时先饱和、丢失分数差异。
+保留 SDK 原生 FlashAttention 实现用于内部验证，两条路径共用长度、padding 清零及 VAE 位置恢复语义。
+默认实现适用于 visual、DiT image、VAE encode/decode；文本编码和 DiT text 始终使用因果 FA。
+
+统一接口 `build_model` 使用 recipe 指向的默认 YAML，普通版与 Turbo 均由模型构建代码选择展开路径。
+默认 YAML 不暴露 attention 实现开关，用户无需配置相关参数或 CLI 选项。
+已有包的注意力实现由导出图及模型内部 metadata 固定，切换须重新导出和编译。
+这与编译器 `flash_attention=0/1/2` 优化模式不同。
+
+当前核对的 TCIM 1.5.0 非因果转换接口仍不支持本模型所需的有效长度，默认使用展开路径。
+原生分支不自动回退，也不代表 TCIM/HM 验证通过；还需单独核对 SDK 对 VAE 大头宽的支持。
+按 xhquanttool `66482666`（2026-10-18）核对，CUDA FA 的 Q/K 头宽范围为 64/128/256/512/576，V 为 64/128/256/512，
+真实 VAE 的 768/1152 超出此范围。CPU HMONNX、CUDA HMONNX 与 TCIM/HM 的支持须分别验证。
+
 视觉原生 head_dim=72 在 RoPE 后补零到物理 128 维，保持原始缩放并裁回 72。
-真实 VAE attention 保持单头 D=768/1152，SDK 大头实现保留完整 QK 点积，不拆分 attention head。
-完整 DiT 每图有 64 个 Q/K RMSNorm、64 个 Rope、32 个 FlashAttention；文本图另有文本投影 RMSNorm。
+真实 VAE attention 保持单头 D=768/1152，不拆分 attention head。
+完整 DiT 每图有 64 个 Q/K RMSNorm、64 个 Rope、32 个注意力核心；文本图另有文本投影 RMSNorm。
 原相邻通道 RoPE 与 SDK 前后半通道布局在图中显式转换并恢复。
 
 SDK 卷积运行时分段展开输出行，每段带完整输入邻域，再写回完整画布张量，

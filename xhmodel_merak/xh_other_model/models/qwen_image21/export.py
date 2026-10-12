@@ -71,6 +71,7 @@ def export_full_dit_bundle(
     timestep,
     target_device,
     quant_config,
+    use_noncausal_flash_attention=False,
 ):
     """Export complete text/image DiT stacks with caller-owned in-place KVCache."""
     from .full_graph import SegmentDenoiser
@@ -96,7 +97,10 @@ def export_full_dit_bundle(
     layers = len(source.transformer_blocks)
     models = {
         "text": SegmentDenoiser(source, gear.text_tokens, text_projection=make_text_projection(source)),
-        "image": SegmentDenoiser(source, gear.image_tokens),
+        "image": SegmentDenoiser(
+            source, gear.image_tokens, cache_capacity=gear.cache_tokens,
+            use_noncausal_flash_attention=use_noncausal_flash_attention,
+        ),
     }
     request = SegmentDenoiseRequest(
         layout,
@@ -152,7 +156,7 @@ def export_full_dit_bundle(
         latent_channels=image_latents.shape[-1],
         cache_tokens=gear.cache_tokens,
         cache_policy="inplace_replace_target",
-        attention="flash_attention",
+        attention="flash_attention" if use_noncausal_flash_attention else "causal_flash_noncausal_masked",
         attention_metadata="lengths",
         sequence_layout="compact_prefix_target",
         graphs=graphs,

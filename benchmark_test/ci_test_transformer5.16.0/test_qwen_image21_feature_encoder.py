@@ -49,7 +49,8 @@ def tiny_config():
     )
 
 
-def test_capacity_flash_features_preserve_native_mrope_deepstack_and_hide_padding():
+@pytest.mark.parametrize("capacity,length", [(12, 8), (1664, 8), (1792, 8), (256, 256), (512, 257), (512, 512)])
+def test_capacity_flash_features_preserve_native_mrope_deepstack_and_hide_padding(capacity, length):
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLForConditionalGeneration
 
     from xhmodel_merak.xh_other_model.models.qwen_image21.feature_graph import CapacityTextFeatures
@@ -57,11 +58,12 @@ def test_capacity_flash_features_preserve_native_mrope_deepstack_and_hide_paddin
     torch.manual_seed(19)
     source = Qwen3VLForConditionalGeneration(tiny_config()).eval().model.language_model
     source.config._attn_implementation = "sdpa"
-    graph = CapacityTextFeatures(source, 12, 256)
-    embeddings = torch.randn(1, 8, 256) * 0.2
-    positions = torch.stack(
-        (torch.arange(8), torch.tensor([0, 1, 1, 2, 2, 3, 3, 4]), torch.tensor([0, 1, 2, 1, 2, 1, 2, 3]))
-    ).int()
+    graph = CapacityTextFeatures(source, capacity, max(256, capacity))
+    embeddings = torch.randn(1, length, 256) * 0.2
+    positions = torch.arange(length, dtype=torch.int32).expand(3, -1).clone()
+    if length == 8:
+        positions[1] = torch.tensor([0, 1, 1, 2, 2, 3, 3, 4])
+        positions[2] = torch.tensor([0, 1, 2, 1, 2, 1, 2, 3])
     deep = [torch.randn_like(embeddings) * 0.03 for _ in range(3)]
     captured = []
     hook = source.norm.register_forward_pre_hook(lambda module, args: captured.append(args[0].clone()))
@@ -70,21 +72,37 @@ def test_capacity_flash_features_preserve_native_mrope_deepstack_and_hide_paddin
             inputs_embeds=embeddings,
             position_ids=positions[:, None].long(),
             use_cache=False,
-            visual_pos_masks=torch.ones(1, 8, dtype=torch.bool),
+            visual_pos_masks=torch.ones(1, length, dtype=torch.bool),
             deepstack_visual_embeds=[x[0] for x in deep],
         )
         hook.remove()
-        padded = torch.nn.functional.pad(embeddings, (0, 0, 0, 4))
-        p = torch.nn.functional.pad(positions, (0, 4))
-        d = [torch.nn.functional.pad(x, (0, 0, 0, 4)) for x in deep]
-        length = torch.tensor([8], dtype=torch.int32)
-        actual = graph(padded, *p.unbind(0), length, *d)
-        torch.testing.assert_close(actual[:, :8], captured[0], atol=2e-5, rtol=3e-5)
-        assert torch.count_nonzero(actual[:, 8:]) == 0
-        padded[:, 8:] = 1000
+        padding = capacity - embeddings.shape[1]
+        padded = torch.nn.functional.pad(embeddings, (0, 0, 0, padding))
+        p = torch.nn.functional.pad(positions, (0, padding))
+        d = [torch.nn.functional.pad(x, (0, 0, 0, padding)) for x in deep]
+        current_length = torch.tensor([length], dtype=torch.int32)
+        actual = graph(padded, *p.unbind(0), current_length, *d)
+        assert actual.shape == (1, capacity, 256)
+        torch.testing.assert_close(actual[:, :length], captured[0], atol=2e-5, rtol=3e-5)
+        assert torch.count_nonzero(actual[:, length:]) == 0
+        padded[:, length:] = 1000
         for x in d:
-            x[:, 8:] = -1000
-        torch.testing.assert_close(graph(padded, *p.unbind(0), length, *d), actual, atol=0, rtol=0)
+            x[:, length:] = -1000
+        torch.testing.assert_close(graph(padded, *p.unbind(0), current_length, *d), actual, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("length", [0, 255, 256, 257])
+def test_capacity_feature_session_length_boundaries(length):
+    session = CapacityFeatureSession(None, 256, 256, 512, device="cpu")
+    embeddings = torch.zeros(1, length, 256)
+    positions = torch.arange(length, dtype=torch.int32).expand(3, -1)
+    if length == 0 or length > session.capacity:
+        with pytest.raises(ValueError, match="sequence length"):
+            session.prepare_inputs(embeddings, positions)
+    else:
+        inputs = session.prepare_inputs(embeddings, positions)
+        assert inputs[0].shape == (1, session.capacity, 256)
+        assert inputs[4].dtype == torch.int32 and inputs[4].tolist() == [length]
 
 
 @pytest.mark.parametrize("ling_compat", [False, True])
@@ -228,7 +246,7 @@ def test_prompt_encoder_matches_native_multimodal_features(tmp_path, image_count
     native.save_pretrained(tmp_path)
     loaded = load_feature_encoder(tmp_path)
     embedding = copy.deepcopy(loaded.model.language_model.embed_tokens)
-    visual = PackedVision(loaded.model.visual).eval().half()
+    visual = PackedVision(loaded.model.visual, 8).eval().half()
     graph = CapacityTextFeatures(loaded.model.language_model, 128, 256).eval().half()
     vision_session = PackedVisionSession(visual, 8, loaded.model.visual.num_grid_per_side, 16, device="cpu")
     encoder = PromptEncoder(
