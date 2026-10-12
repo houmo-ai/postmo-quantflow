@@ -79,3 +79,44 @@ def test_family_returns_sdk_files_unchanged(tmp_path, monkeypatch, sdk_export, f
     for source in sdk_export.iterdir():
         for role in ("prefill", "decode"):
             assert (output / role / source.name).read_bytes() == source.read_bytes()
+
+
+def test_deepseek_metadata_hashes_final_streamed_graphs(tmp_path, monkeypatch, sdk_export):
+    import json
+    import onnx
+
+    from xhmodel_merak.xh_llm.models.deepseek_v4.deepseek_v4_model import XHDeepSeekV4Model
+    from xhmodel_merak.xh_llm.types import ExportData, LLMModelMeta
+
+    monkeypatch.setenv("HUGE_MODEL_EXPORT_ENABLED", "1")
+
+    class ExportHarness(XHDeepSeekV4Model):
+        def __init__(self):
+            self.config = SimpleNamespace(context_max_length=64)
+
+        def get_export_info(self, output_dir):
+            info = ExportData()
+            info.exported_dir = output_dir
+            info.meta = LLMModelMeta(prefill_hmonnx="prefill/head.onnx", decode_hmonnx="decode/head.onnx")
+            return info
+
+        def _export_big_language_hmonnx(self, info):
+            # Supply the expensive streamed stage with real SDK files. Its
+            # graph bytes change after the initial checksum, as during MoE
+            # inlining; the final metadata publisher runs unchanged.
+            for role in ("prefill", "decode"):
+                folder = Path(info.exported_dir) / role
+                shutil.copytree(sdk_export, folder)
+                path = folder / "head.onnx"
+                setattr(info.meta, role + "_hmonnx_md5", hashlib.md5(path.read_bytes()).hexdigest())
+                graph = onnx.load(path, load_external_data=False)
+                graph.graph.name = f"final_streamed_{role}"
+                onnx.save(graph, path)
+
+    output = tmp_path / "export"
+    meta = ExportHarness().export_hmonnx(str(output))
+    saved = json.loads((output / "golden_meta_info.json").read_text())
+    for role in ("prefill", "decode"):
+        checksum = hashlib.md5((output / saved[role + "_hmonnx"]).read_bytes()).hexdigest()
+        assert getattr(meta, role + "_hmonnx_md5") == checksum
+        assert saved[role + "_hmonnx_md5"] == checksum

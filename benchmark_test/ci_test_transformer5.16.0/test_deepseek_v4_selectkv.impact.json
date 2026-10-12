@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "deepseek-v4-fused-csa-export",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/deepseek_v4/indexer.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/static_attention.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/host_masks.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/cache_abi.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/decoder.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/full_model.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/runtime.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/deepseek_v4_model.py",
+        "xhmodel_merak/xh_llm/models/deepseek_v4/deepseek_v4_hmonnx_inference.py",
+        "configs_merak/workflows/xh2a/llm_models/deepseek_v4/flash_0731/*",
+        "examples_merak/llm/deepseekv4/deepseek_v4_workflow.py"
+      ]
+    }
+  ]
+}

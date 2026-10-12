@@ -493,7 +493,7 @@ class XHDeepSeekV4Model(TextLLMModel):
             "csa_write_start",
             "hca_write_start",
             "swa_attention_mask",
-            "csa_index_validity",
+            "csa_candidate_lengths",
             "csa_attention_mask",
             "hca_attention_mask",
             "csa_compressor_validity",
@@ -690,6 +690,11 @@ class XHDeepSeekV4Model(TextLLMModel):
             self._quanted_model.decode.fixed()
             self._export_hmonnx(exported_info)
         meta_info = exported_info.meta
+        # Streamed export replaces placeholders after the base exporter hashes
+        # the main graphs. Publish checksums of the final executable files.
+        exported_dir = Path(exported_info.exported_dir)
+        meta_info.prefill_hmonnx_md5 = calculate_file_md5(exported_dir / meta_info.prefill_hmonnx)
+        meta_info.decode_hmonnx_md5 = calculate_file_md5(exported_dir / meta_info.decode_hmonnx)
         meta_info.prefill_onnx = meta_info.prefill_hmonnx
         meta_info.decode_onnx = meta_info.decode_hmonnx
         meta_info.token_embedding_file = meta_info.quant_embedding
@@ -732,6 +737,7 @@ class XHDeepSeekV4Model(TextLLMModel):
         self.pad_token_id = resolve_deepseek_v4_pad_token_id(hf_config)
         meta_info.pad_token_id = self.pad_token_id
         meta_info.layer_types = list(self.layer_types)
+        meta_info.deepseek_v4_state_abi_version = 2
         return meta_info
 
 

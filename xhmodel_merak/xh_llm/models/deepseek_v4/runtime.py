@@ -384,7 +384,7 @@ class DeepSeekV4DataPreprocess(BaseLLMInputProcessor):
             torch.tensor([past_length // spec.csa_ratio], device=self._device, dtype=torch.int32),
             torch.tensor([past_length // spec.hca_ratio], device=self._device, dtype=torch.int32),
             masks.swa_attention_mask,
-            masks.csa_index_validity,
+            masks.csa_candidate_lengths,
             masks.csa_attention_mask,
             masks.hca_attention_mask,
             masks.csa_compressor_validity,

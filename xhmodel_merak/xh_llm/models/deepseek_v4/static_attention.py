@@ -19,7 +19,7 @@ from .compressor import (
 )
 from .indexer import StaticCSAIndexer
 from .projection import BoundGroupedOutputProjection, DeepSeekV4QKVProjection
-from .static_cache import FixedCapacityCacheWriter, LatentCacheGather
+from .static_cache import FixedCapacityCacheWriter
 from .swa import StaticSWAOutput, StaticSWAUpdate
 
 
@@ -37,7 +37,6 @@ class StaticCSAAttentionOutput(NamedTuple):
     main_next_score_state: Tensor
     index_next_kv_state: Tensor
     index_next_score_state: Tensor
-    topk_indices: Tensor
 
 
 class StaticHCAAttentionOutput(NamedTuple):
@@ -223,7 +222,6 @@ class StaticCSAAttention(_StaticAttentionBase):
             rope_dim=self.rope_dim,
         )
         self.main_writer = FixedCapacityCacheWriter()
-        self.latent_gather = LatentCacheGather(feature_dim=self.head_dim)
         self.attention = CSALatentAttention(
             head_dim=self.head_dim,
             num_heads=self.num_heads,
@@ -294,7 +292,7 @@ class StaticCSAAttention(_StaticAttentionBase):
         hidden_states: Tensor,
         past_length: Tensor,
         current_length: Tensor,
-        csa_index_validity: Tensor,
+        csa_candidate_lengths: Tensor,
         csa_attention_mask: Tensor,
         past_swa_kv_cache: Tensor,
         past_main_cache: Tensor,
@@ -343,13 +341,14 @@ class StaticCSAAttention(_StaticAttentionBase):
             hidden_states,
             q_residual,
             past_index_k_cache,
+            main_cache,
             compressed_write_start,
             current_length,
             compressor_validity,
             compressor_new_count,
             compressor_offset,
             compressor_phase_indices,
-            csa_index_validity,
+            csa_candidate_lengths,
             index_kv_state,
             index_score_state,
             query_cos,
@@ -357,13 +356,9 @@ class StaticCSAAttention(_StaticAttentionBase):
             compressed_cos,
             compressed_sin,
         )
-        selected_kv = self.latent_gather(
-            main_cache,
-            index.topk_indices,
-        )
         latent_output = self.attention(
             query,
-            selected_kv,
+            index.selected_kv,
             swa.physical_kv,
             swa.physical_kv,
             csa_attention_mask,
@@ -379,7 +374,6 @@ class StaticCSAAttention(_StaticAttentionBase):
             compressed.next_score_state,
             index.next_kv_state,
             index.next_score_state,
-            index.topk_indices,
         )
 
 

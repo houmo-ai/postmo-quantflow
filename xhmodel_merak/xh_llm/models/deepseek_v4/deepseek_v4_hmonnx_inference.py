@@ -56,6 +56,8 @@ class XHDeepSeekV4HMONNXModel(TextLLMHMONNXModel):
         enable_auto_offload: bool = False,
         **kwargs,
     ) -> None:
+        if getattr(meta_info, "deepseek_v4_state_abi_version", None) != 2:
+            raise ValueError("DeepSeek-V4 state ABI expected 2; re-export with fused SparseAttentionSelectKV")
         if kwargs.get("enable_page_attention", False):
             raise ValueError("DeepSeek-V4 uses its dedicated SWA/CSA/HCA cache ABI, not PageAttention")
         super().__init__(

@@ -6,12 +6,13 @@ from typing import NamedTuple
 
 import torch
 from torch import Tensor, nn
+from xhquant import nn as xhnn
 
 from ._trace import is_fx_proxy
 from .attention import InterleavedPartialRope
 from .compressor import LearnedOverlappingCompressor
 from .norm import rms_norm_from_hf
-from .static_cache import CSAIndexerTopK, FixedCapacityCacheWriter
+from .static_cache import FixedCapacityCacheWriter
 
 
 def _normalized_hadamard_matrix(width: int) -> Tensor:
@@ -79,8 +80,7 @@ class NormalizedHadamard(nn.Module):
 
 
 class StaticCSAIndexerOutput(NamedTuple):
-    topk_values: Tensor
-    topk_indices: Tensor
+    selected_kv: Tensor
     updated_key_cache: Tensor
     next_kv_state: Tensor
     next_score_state: Tensor
@@ -88,7 +88,7 @@ class StaticCSAIndexerOutput(NamedTuple):
 
 
 class StaticCSAIndexer(nn.Module):
-    """Compress Indexer keys, update its fixed cache, and select global TopK."""
+    """Compress Indexer keys and select compressed latents with one VP op."""
 
     def __init__(
         self,
@@ -135,10 +135,10 @@ class StaticCSAIndexer(nn.Module):
             dtype=torch.float16,
         )
         self.weights_proj = nn.Linear(self.hidden_size, self.num_heads, bias=False, dtype=torch.float16)
-        self.topk = CSAIndexerTopK(
-            topk=topk,
-            cache_capacity=self.cache_capacity,
+        self.select_kv = xhnn.SparseAttentionSelectKV(
+            candidate_topk=topk,
             score_scale=(self.num_heads * self.head_dim) ** -0.5,
+            pool_size=1,
         )
         self.key_cache_writer = FixedCapacityCacheWriter()
 
@@ -191,13 +191,14 @@ class StaticCSAIndexer(nn.Module):
         hidden_states: Tensor,
         q_residual: Tensor,
         key_cache: Tensor,
+        payload_cache: Tensor,
         write_start: Tensor,
         current_length: Tensor,
         compressor_validity: Tensor,
         compressor_new_count: Tensor,
         compressor_offset: Tensor,
         compressor_phase_indices: Tensor,
-        index_validity: Tensor,
+        candidate_lengths: Tensor,
         kv_state: Tensor,
         score_state: Tensor,
         query_cos: Tensor,
@@ -228,13 +229,12 @@ class StaticCSAIndexer(nn.Module):
                 raise ValueError(f"q_residual must have shape {expected_q}")
             if tuple(key_cache.shape) != expected_cache:
                 raise ValueError(f"key_cache must have shape {expected_cache}")
-            expected_validity = (
+            expected_lengths = (
                 hidden_states.shape[0],
                 self.input_sequence_length,
-                self.cache_capacity,
             )
-            if tuple(index_validity.shape) != expected_validity:
-                raise ValueError(f"index_validity must have shape {expected_validity}")
+            if tuple(candidate_lengths.shape) != expected_lengths:
+                raise ValueError(f"candidate_lengths must have shape {expected_lengths}")
 
         compressed = self.compressor(
             hidden_states,
@@ -273,15 +273,18 @@ class StaticCSAIndexer(nn.Module):
             query = self.hadamard(query)
         index_weights = self.weights_proj(hidden_states)
 
-        topk_values, topk_indices = self.topk(
-            query,
-            index_weights,
-            updated_key_cache,
-            index_validity,
+        # The cache writer returns [B,N,D]; SelectKV consumes shared 4D caches.
+        # DeepSeek selects compressed rows directly, so pool_size stays 1.
+        selected_kv = self.select_kv(
+            query.transpose(1, 2),
+            updated_key_cache.unsqueeze(1),
+            payload_cache.unsqueeze(1),
+            write_start + compressed.new_count,
+            index_weights.transpose(1, 2).unsqueeze(-1),
+            candidate_lengths,
         )
         return StaticCSAIndexerOutput(
-            topk_values,
-            topk_indices,
+            selected_kv,
             updated_key_cache,
             compressed.next_kv_state,
             compressed.next_score_state,
