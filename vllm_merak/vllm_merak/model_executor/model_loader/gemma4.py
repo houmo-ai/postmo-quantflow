@@ -573,7 +573,7 @@ class MerakGemma4UnifiedMultiModalProcessor(Gemma4MultiModalProcessor):
     info=MerakGemma4ProcessingInfo,
     dummy_inputs=Gemma4DummyInputsBuilder,
 )
-@MERAK_MODEL_REGISTRY.register_module(list(_GEMMA4_TOWER_SOURCE_ARCHITECTURES))
+@MERAK_MODEL_REGISTRY.register_module(["Gemma4ForConditionalGeneration", "Gemma4ForCausalLM"])
 class Gemma4MerakForCausalLM(MerakForCausalLM):
     supports_multimodal = True
     supports_multimodal_raw_input_only = True
@@ -842,7 +842,7 @@ class Gemma4MerakForCausalLM(MerakForCausalLM):
     info=MerakGemma4UnifiedProcessingInfo,
     dummy_inputs=Gemma4DummyInputsBuilder,
 )
-@MERAK_MODEL_REGISTRY.register_module(list(_GEMMA4_UNIFIED_SOURCE_ARCHITECTURES))
+@MERAK_MODEL_REGISTRY.register_module("Gemma4UnifiedForConditionalGeneration")
 class Gemma4UnifiedMerakForCausalLM(Gemma4MerakForCausalLM):
     """Gemma4 12B encoder-free image/video/audio HMONNX deployment adapter."""
 

@@ -37,7 +37,6 @@ from vllm.transformers_utils.config_parser_base import ConfigParserBase
 
 from .constants import SUPPORTED_HYBRID_CACHE_POLICIES
 from .model_executor.register import (
-    get_registered_custom_architectures,
     get_registered_model_cls,
 )
 
@@ -748,7 +747,7 @@ def _merge_merak_config(
     )
     merged_config["architectures"] = [loader_architecture]
     merged_config["merak_loader_architecture"] = loader_architecture
-    loader_cls = get_registered_custom_architectures().get(loader_architecture)
+    loader_cls = get_registered_model_cls(loader_architecture)
     hybrid_cache_policy = getattr(loader_cls, "hybrid_cache_policy", None)
     if hybrid_cache_policy is not None:
         if hybrid_cache_policy not in SUPPORTED_HYBRID_CACHE_POLICIES:

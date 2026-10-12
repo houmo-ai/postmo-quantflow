@@ -17,6 +17,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def vllm_runtime_config_context():
+    from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
+
+    # Direct loader construction needs the context supplied by get_model in
+    # production. Keep the real LogitsProcessor instead of mocking it.
+    with set_current_vllm_config(VllmConfig(device_config=DeviceConfig(device="cpu"))):
+        yield
+
+
 @pytest.fixture
 def glm53():
     from vllm_merak.model_executor.model_loader import glm53 as module

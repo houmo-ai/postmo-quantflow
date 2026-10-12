@@ -53,7 +53,7 @@ def get_model(
 ):
     from vllm.config import set_current_vllm_config
 
-    from .register import get_registered_custom_architectures, get_registered_model_cls
+    from .register import get_registered_model_cls
 
     model_config = vllm_config.model_config
     hf_config = model_config.hf_config
@@ -69,15 +69,12 @@ def get_model(
             "and <model>/hf_config/config.json."
         )
 
-    merak_model_classes = get_registered_custom_architectures()
     architecture = architecture_candidates[0]
     model_cls = None
     for candidate in architecture_candidates:
         if candidate == _MERAK_BASE_ARCHITECTURE:
             continue
-        model_cls = get_registered_model_cls(candidate) or merak_model_classes.get(
-            candidate
-        )
+        model_cls = get_registered_model_cls(candidate)
         if model_cls is not None:
             architecture = candidate
             break

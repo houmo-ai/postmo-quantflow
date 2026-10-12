@@ -205,9 +205,9 @@ def _resolve_hf_assets_dir(model_path: object) -> Path | None:
 def register_architecture() -> None:
     from vllm import ModelRegistry
 
-    from .model_executor.register import get_registered_custom_architectures
+    from .model_executor.register import get_model_registration_paths
 
-    registrations = get_registered_custom_architectures()
+    registrations = get_model_registration_paths()
     supported_archs = set(ModelRegistry.get_supported_archs())
     for architecture_name, model_cls in registrations.items():
         if architecture_name not in supported_archs:

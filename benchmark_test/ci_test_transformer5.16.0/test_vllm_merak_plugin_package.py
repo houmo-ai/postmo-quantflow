@@ -99,6 +99,63 @@ def test_merak_loader_discovery_excludes_native_vllm_models():
     assert _should_import_module_file(Path("wemm_embedding_native.py")) is False
 
 
+@requires_vllm
+def test_merak_registration_and_selected_loader_do_not_import_other_models():
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "\n".join(
+                [
+                    "import importlib.abc, sys",
+                    "class BlockUnusedModels(importlib.abc.MetaPathFinder):",
+                    "    def find_spec(self, fullname, path=None, target=None):",
+                    "        if fullname in ('vllm_merak.model_executor.model_loader.glm53', 'vllm_merak.model_executor.model_loader.gemma4'):",
+                    "            raise AssertionError('Imported an unselected model: ' + fullname)",
+                    "sys.meta_path.insert(0, BlockUnusedModels())",
+                    "from vllm_merak import register_plugins",
+                    "register_plugins()",
+                    "from vllm import ModelRegistry",
+                    "assert 'Glm53MerakForCausalLM' in ModelRegistry.get_supported_archs()",
+                    "assert 'Gemma4UnifiedMerakForCausalLM' in ModelRegistry.get_supported_archs()",
+                    "from vllm_merak.model_executor.register import get_registered_model_cls, get_model_registration_paths",
+                    "paths = get_model_registration_paths()",
+                    "assert paths['DeepseekV4MerakForCausalLM'].endswith('deepseek_v4:DeepseekV4MerakForCausalLM')",
+                    "cls = get_registered_model_cls('DeepseekV4ForCausalLM')",
+                    "assert cls.__name__ == 'DeepseekV4MerakForCausalLM'",
+                    "assert get_registered_model_cls(cls.__name__) is cls",
+                    "assert get_registered_model_cls('UnknownArchitecture') is None",
+                    "assert 'vllm_merak.model_executor.model_loader.glm53' not in sys.modules",
+                    "assert 'vllm_merak.model_executor.model_loader.gemma4' not in sys.modules",
+                ]
+            ),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@requires_vllm
+def test_merak_loader_discovery_preserves_runtime_class_overrides(monkeypatch):
+    from vllm_merak.model_executor.register import (
+        MERAK_MODEL_REGISTRY,
+        get_model_registration_paths,
+        get_registered_model_cls,
+    )
+
+    replacement = type("DeepseekV4MerakForCausalLM", (torch.nn.Module,), {})
+    monkeypatch.setitem(
+        MERAK_MODEL_REGISTRY.module_dict, "DeepseekV4ForCausalLM", replacement
+    )
+
+    assert get_registered_model_cls("DeepseekV4ForCausalLM") is replacement
+    assert get_registered_model_cls("DeepseekV4MerakForCausalLM") is replacement
+    assert get_model_registration_paths()["DeepseekV4MerakForCausalLM"] is replacement
+
+
 class _WeMMTokenizer:
     def encode(self, text: str, *, add_special_tokens: bool) -> list[int]:
         assert add_special_tokens is False

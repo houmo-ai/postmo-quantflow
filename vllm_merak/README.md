@@ -12,6 +12,10 @@ ModelZoo 的量化、导出环境强制安装 vLLM。
   `config_format="merak_llm"`、`load_format="merak_llm"`；
 - 两类进程使用独立环境，避免插件平台选择和 Torch/xhquant ABI 相互污染。
 
+Merak 启动时通过源码中的字面量注册声明发现 loader，向 vLLM 注册延迟导入路径。
+配置解析和模型加载只导入选中的 loader；未选中模型的 Transformers 模块不参与启动。
+新增 loader 的 `MERAK_MODEL_REGISTRY.register_module` 名称须使用字符串或字符串列表字面量。
+
 ## 目录与维护边界
 
 ```text
