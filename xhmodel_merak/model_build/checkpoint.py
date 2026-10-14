@@ -617,10 +617,22 @@ def _inspect_quant_weight_files(path: Path, plan: BuildPlan) -> dict[str, Any]:
             symlinks=sorted(symlinks),
         )
 
+    from xhmodel_merak.model_catalog.loading import load_adapter
+
+    reference = getattr(plan, "build_adapter", None)
+    adapter = load_adapter("build", reference) if reference else None
+    inspect_auxiliary = getattr(adapter, "inspect_auxiliary_checkpoint_weights", None)
+    auxiliary = inspect_auxiliary(path, plan) if callable(inspect_auxiliary) else {}
+    auxiliary_weight_paths = {Path(value).resolve() for entry in auxiliary.values() for value in entry["weight_paths"]}
+    auxiliary_indexes = {Path(entry["index_path"]).resolve() for entry in auxiliary.values()}
+    if any(not value.is_relative_to(path.resolve()) for value in auxiliary_weight_paths | auxiliary_indexes):
+        raise ModelError(ErrorCode.QUANT_ARTIFACT_MISMATCH, "Auxiliary checkpoint paths escape the Quant Artifact",
+                         model=plan.model_id)
     indexes = sorted(
         candidate
         for candidate in path.rglob("*.index.json")
         if candidate.is_file() and candidate.name.endswith((".safetensors.index.json", ".bin.index.json"))
+        and candidate.resolve() not in auxiliary_indexes
     )
     if len(indexes) > 1:
         raise ModelError(
@@ -691,6 +703,7 @@ def _inspect_quant_weight_files(path: Path, plan: BuildPlan) -> dict[str, Any]:
         candidate.resolve()
         for candidate in path.rglob("*")
         if candidate.is_file()
+        and candidate.resolve() not in auxiliary_weight_paths
         and candidate.name != "model_extra_tensors.safetensors"
         and (
             candidate.suffix == ".safetensors"
@@ -759,7 +772,10 @@ def _inspect_quant_weight_files(path: Path, plan: BuildPlan) -> dict[str, Any]:
         )
     if formats <= {"safetensors", "torch_zip"}:
         _verify_named_checkpoint_tensors(path, container_summaries, index_assignments, plan)
-    return {"weight_indexes": index_metadata, "weights": weights}
+    result = {"weight_indexes": index_metadata, "weights": weights}
+    if auxiliary:
+        result["auxiliary_components"] = {name: entry["evidence"] for name, entry in auxiliary.items()}
+    return result
 
 
 def _verify_named_checkpoint_tensors(

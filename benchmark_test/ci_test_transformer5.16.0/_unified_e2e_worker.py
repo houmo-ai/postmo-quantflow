@@ -32,6 +32,22 @@ def prepare(case, root, monkeypatch):
     inputs = {"prompt": "hello world", "max_new_tokens": 2}
     replacements = dict(recipe.config_replacements)
     family = case.fixture
+    if family == "deepseek_v4":
+        from _deepseek_v4_small_fixture import write_deepseek_v4_checkpoint
+        config = write_deepseek_v4_checkpoint(source)
+        geometry = {key: config[key] for key in ("hidden_size", "num_attention_heads", "head_dim",
+            "q_lora_rank", "sliding_window", "hc_mult", "hc_sinkhorn_iters", "index_topk", "index_head_dim")}
+        replacements.update({"export.model.max_layers": 4, "export.model.graph_geometry": geometry})
+        if case.variant == "dspark":
+            replacements["export.model.dspark.target_layer_ids"] = [1, 2, 3]
+            kwargs["speculative"] = {"mode": "dspark", "num_draft_tokens": 5}
+            inputs["max_new_tokens"] = 8
+        kwargs.update(context_length=2048, prefill_chunk_length=256, quant_checkpoint=str(source))
+        monkeypatch.setitem(catalog._recipes, case.model_id, replace(recipe,
+            source_constraints=(("model_type", "deepseek_v4"),), max_pe_length=2048,
+            config_replacements=tuple(replacements.items())))
+        inputs["devices"] = ["cuda:0"]
+        return kwargs, inputs
     if family == "qwen_image21":
         from _qwen_image21_small_fixture import prepare_qwen_image21
 
@@ -347,6 +363,7 @@ def run(case, root, *, low_memory=None):
                 "quant",
                 "assistant",
                 "draft",
+                "native_draft",
                 "base_quant",
                 "base_artifact",
                 "lora",
@@ -409,8 +426,8 @@ def run(case, root, *, low_memory=None):
                     assert isinstance(output.output_text, str) and output.output_text.strip()
                 elif hasattr(output, "output_tokens"):
                     assert output.output_tokens > 0
-                if case.variant in ("mtp", "lora_mtp", "dflash", "dflash2"):
-                    assert output.spec_decode_mode == (case.variant if case.variant in {"dflash", "dflash2"} else "mtp")
+                if case.variant in ("mtp", "lora_mtp", "dflash", "dflash2", "dspark"):
+                    assert output.spec_decode_mode == (case.variant if case.variant in {"dflash", "dflash2", "dspark"} else "mtp")
                 if hasattr(output, "actions"):
                     assert (output.horizon, output.action_dim) == (50, 7)
                     assert len(output.actions) == 50

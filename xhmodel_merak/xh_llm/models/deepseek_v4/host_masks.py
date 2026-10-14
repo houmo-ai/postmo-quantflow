@@ -118,7 +118,7 @@ def build_deepseek_v4_attention_masks(
     past_length = int(past_length)
     current_length = int(current_length)
     batch_size = int(batch_size)
-    if input_sequence_length not in {1, spec.prefill_chunk_length}:
+    if input_sequence_length not in {1, spec.decode_sequence_length, spec.prefill_chunk_length}:
         raise ValueError("input_sequence_length must be the wrapped prefill chunk length or decode length 1")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")

@@ -2,8 +2,6 @@
   "version": 1,
   "frozen_at": "db7a3c99d54b4cbc0cd70f5f69989eaba0a7e532",
   "missing_recipes": [
-    "xh_llm/deepseek_v4/",
-    "xh_llm/deepseek_v4:DeepseekV4ForCausalLM",
     "xh_llm/emotion2vec/",
     "xh_llm/emotion2vec:Emotion2vecForEmotionRecognition",
     "xh_llm/gemma4/",

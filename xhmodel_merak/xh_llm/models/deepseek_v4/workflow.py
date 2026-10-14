@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import gc
+import tempfile
+from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
 
@@ -17,6 +19,12 @@ class DeepSeekV4Workflow(BaseLLMWorkflow):
 
     expected_model_config_cls_name = "XHDeepSeekV4ModelConfig"
     expected_model_cls_name = "XHDeepSeekV4Model"
+
+    def get_model(self, quant_result=None, config_overrides=None, work_dir=None):
+        model = super().get_model(quant_result, config_overrides, work_dir)
+        if hasattr(self, "_dspark_export_device"):
+            model._dspark_export_device = self._dspark_export_device
+        return model
 
     def export(
         self,
@@ -33,6 +41,23 @@ class DeepSeekV4Workflow(BaseLLMWorkflow):
         if not isinstance(low_memory, bool):
             raise TypeError("DeepSeek-V4 workflow runtime.low_memory must be a boolean")
         configure_huge_model_export(low_memory)
+        self._dspark_export_device = device
+        dspark = workflow_config.export["model"].get("dspark")
+        if dspark and not dspark.get("model_dir"):
+            # Native FP4/FP8 decoding belongs to the producer. Keep the large
+            # BF16 preparation outside the published stage and remove it once
+            # the W4/W8 runtime graphs have been exported.
+            from gptqmodel.utils.deepseek_v4_dspark import prepare_deepseek_v4_dspark_bf16
+
+            parent = Path(output_dir).resolve().parent
+            parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="dspark-preparation-", dir=parent) as temporary:
+                prepared = Path(temporary) / "bf16"
+                prepare_deepseek_v4_dspark_bf16(self._resolve_export_model_dir(quant_result), prepared, device=device)
+                overrides = dict(config_overrides or {})
+                overrides["export.model.dspark.model_dir"] = str(prepared)
+                return super().export(quant_result=quant_result, output_dir=output_dir,
+                                      device=device, config_overrides=overrides)
         return super().export(
             quant_result=quant_result,
             output_dir=output_dir,

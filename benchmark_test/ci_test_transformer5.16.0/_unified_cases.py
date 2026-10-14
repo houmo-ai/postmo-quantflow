@@ -17,6 +17,7 @@ class UnifiedCase:
 
 
 MODELS = {
+    "deepseek-v4-flash-0731": ("deepseek_v4", ("full", "dspark")),
     "gemma4-12b-unified": ("gemma_unified", ("full", "mtp")),
     "gemma4-26b-a4b": ("gemma_moe", ("full", "mtp")),
     "gemma4-31b": ("gemma_dense", ("full", "mtp")),

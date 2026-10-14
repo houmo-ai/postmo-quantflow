@@ -43,7 +43,7 @@ def test_family_returns_sdk_files_unchanged(tmp_path, monkeypatch, sdk_export, f
     # The family export_hmonnx method itself runs unchanged in both branches.
     class ExportHarness(parent):
         def __init__(self):
-            self.config = SimpleNamespace(lora=None, context_max_length=64)
+            self.config = SimpleNamespace(lora=None, context_max_length=64, dspark=None)
             self.visual = None
             self._state = LLMModelState.QUANTED_ALIGNED
             self._quanted_model = ModelSwitcher({"prefill": SimpleNamespace(fixed=lambda: None),
@@ -92,7 +92,7 @@ def test_deepseek_metadata_hashes_final_streamed_graphs(tmp_path, monkeypatch, s
 
     class ExportHarness(XHDeepSeekV4Model):
         def __init__(self):
-            self.config = SimpleNamespace(context_max_length=64)
+            self.config = SimpleNamespace(context_max_length=64, dspark=None)
 
         def get_export_info(self, output_dir):
             info = ExportData()

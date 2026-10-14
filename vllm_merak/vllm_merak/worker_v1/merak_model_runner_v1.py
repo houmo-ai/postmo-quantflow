@@ -2976,6 +2976,15 @@ class MerakModelRunnerV1(GPUModelRunner):
                     "DeepSeek-V4 HMONNX exports only final-token logits and does not "
                     "support prompt logprobs."
                 )
+            spec_proposer = getattr(self, "_merak_spec_proposer", None)
+            if spec_proposer is not None:
+                return spec_proposer.forward_target(
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
+                    request_id=req_ids[0],
+                    **model_kwargs,
+                )
             return merak_model.forward(
                 input_ids=input_ids,
                 positions=positions,

@@ -291,11 +291,11 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
                 )
         self.layer_caches = updated
 
-    def apply_flat_state_outputs(self, outputs: Tensor | Sequence[Tensor]) -> Tensor:
+    def apply_flat_state_outputs(self, outputs: Tensor | Sequence[Tensor], *, auxiliary_output: bool = False) -> Tensor:
         """Commit the flat HMONNX output ABI and return its logits tensor."""
 
         values = (outputs,) if isinstance(outputs, Tensor) else tuple(outputs)
-        expected = 1 + 4 * len(self.abi.csa_layers) + 2 * len(self.abi.hca_layers)
+        expected = 1 + 4 * len(self.abi.csa_layers) + 2 * len(self.abi.hca_layers) + int(auxiliary_output)
         if len(values) != expected:
             raise ValueError(f"expected {expected} DeepSeek-V4 graph outputs, got {len(values)}")
 
@@ -309,6 +309,8 @@ class DeepSeekV4CacheMixin(KVCacheMixin):
             hca_states.append(HCAStateOutput(*values[cursor : cursor + 2]))
             cursor += 2
         self.apply_state_outputs(tuple(csa_states), tuple(hca_states))
+        if auxiliary_output:
+            self.last_target_hidden = values[-1]
         return values[0]
 
 
@@ -350,6 +352,7 @@ class DeepSeekV4DataPreprocess(BaseLLMInputProcessor):
         if input_ids.ndim != 2 or input_ids.shape[0] != self.cache_mixin.abi.batch_size:
             raise ValueError("input_ids must be [B,S] with the wrapped batch size")
         current_length = int(input_ids.shape[1])
+        self.valid_input_length = current_length
         if current_length <= 0 or current_length > self.input_sequence_length:
             raise ValueError(f"current input length must be in [1,{self.input_sequence_length}], got {current_length}")
         if current_length < self.input_sequence_length:

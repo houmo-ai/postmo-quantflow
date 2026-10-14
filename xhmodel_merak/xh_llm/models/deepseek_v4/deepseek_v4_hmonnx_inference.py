@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import torch
 
@@ -73,9 +74,20 @@ class XHDeepSeekV4HMONNXModel(TextLLMHMONNXModel):
         configured_layers = getattr(model_config, "max_layers", None)
         configured_layers = 43 if configured_layers is None else int(configured_layers)
         layer_types = tuple(getattr(meta_info, "layer_types", default_layer_types(configured_layers)))
+        geometry = {}
+        if getattr(meta_info, "dspark", None) or getattr(model_config, "graph_geometry", None):
+            from transformers import AutoConfig
+
+            config = AutoConfig.from_pretrained(self.hf_model_dir)
+            geometry = {"sliding_window": int(config.sliding_window),
+                        "latent_head_dim": int(config.head_dim),
+                        "index_head_dim": int(config.index_head_dim),
+                        "index_topk": int(config.index_topk)}
         spec = DeepSeekV4StaticCacheSpec(
             max_context_length=int(model_config.context_max_length),
             prefill_chunk_length=int(model_config.prefill_chunk_length),
+            decode_sequence_length=int(getattr(model_config, "num_logits_to_keep", 1)),
+            **geometry,
         )
         self.cache_abi = DeepSeekV4CacheABI(
             spec=spec,
@@ -106,7 +118,7 @@ class XHDeepSeekV4HMONNXModel(TextLLMHMONNXModel):
                         "DeepSeek-V4 non-sliding cache writer count mismatch: "
                         f"expected={expected_inplace_updates}, enabled={enabled}"
                     )
-            if self.enable_cuda_graph and not enable_auto_offload:
+            if graph_model.enable_cuda_graph and not enable_auto_offload:
                 enable_borrowed_outputs = getattr(session, "enable_borrowed_cuda_graph_outputs", None)
                 if callable(enable_borrowed_outputs):
                     state_outputs = [
@@ -123,9 +135,84 @@ class XHDeepSeekV4HMONNXModel(TextLLMHMONNXModel):
             pad_token_id=self.pad_token_id,
         )
 
+    def get_input_sequence_length(self) -> int:
+        config = self.meta_info.model_config
+        return int(config.prefill_chunk_length if self._llm_prefill else config.num_logits_to_keep)
+
+    def _load_hmonnx_graphs(self, prefill_hmonnx: str, decode_hmonnx: str):
+        dspark = getattr(self.meta_info, "dspark", None)
+        if not dspark:
+            return super()._load_hmonnx_graphs(prefill_hmonnx, decode_hmonnx)
+        from xhquant.xhonnxruntime.llm_hmonnx_loader import MultiHMONNXLoader
+
+        root = Path(self.meta_info.prefill_hmonnx).parent.parent.resolve()
+        paths = {"prefill": prefill_hmonnx, "decode": decode_hmonnx}
+        expected = {"dspark_context", "dspark_context_decode", "dspark_draft_decode", "dspark_markov"}
+        if set(dspark["components"]) != expected:
+            raise ValueError("DSpark runtime package must contain all four draft components")
+        for name, entry in dspark["components"].items():
+            relative = Path(entry["path"])
+            path = (root / relative).resolve()
+            if relative.is_absolute() or ".." in relative.parts or not path.is_relative_to(root):
+                raise ValueError("DSpark component path must stay inside the runtime package")
+            paths[name] = str(path)
+        loader = MultiHMONNXLoader(paths)
+        self._llm_graph_loader = loader
+        # Prime and drain the requested CUDA contexts before free-memory-based
+        # placement. The shared graph weights are still CPU resident here.
+        for device in self._valid_devices:
+            if torch.device(device).type == "cuda":
+                torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        return loader.graphs["prefill"], loader.graphs["decode"], loader.initializer_pool.summary()
+
+    def build_dspark_engine(self, *, device: str | None = None):
+        from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceV2, HMONNXInferenceConfig
+        from .dspark import DSparkSpec
+        from .dspark_engine import DSparkEngine
+
+        metadata = getattr(self.meta_info, "dspark", None)
+        if not metadata:
+            raise ValueError("DSpark generation requires the complete target/draft runtime package")
+        spec = DSparkSpec(**metadata["spec"])
+        resolved = torch.device(device or str(self.device))
+        loader = self._llm_graph_loader
+        graphs = {name: HMONNXInferenceV2.from_onnx_graph(
+                      loader.graph_files[name], loader.graphs[name],
+                      session_config=HMONNXInferenceConfig(exec_devices=[resolved],
+                                                          enable_cuda_graph=self.enable_cuda_graph))
+                  for name in metadata["components"]}
+
+        def forward(ids, past, prefill):
+            self.set_prefill() if prefill else self.set_decode()
+            args = self.get_data_preprocessor()({"input_ids": ids, "past_seq_length": past})
+            return self.forward_verify(*args)
+
+        def embedding(ids):
+            return self.embed_tokens(ids.to(self.device).long()).to(resolved)
+
+        return DSparkEngine(spec, target_forward=forward, target_cache=self._kvcache_mixin,
+                            embedding=embedding, context=graphs["dspark_context"],
+                            context_decode=graphs["dspark_context_decode"],
+                            draft=graphs["dspark_draft_decode"], markov=graphs["dspark_markov"], device=resolved)
+
     def forward(self, *args):
         outputs = super().forward(*args)
-        return self._kvcache_mixin.apply_flat_state_outputs(outputs)
+        has_auxiliary = bool(getattr(self.meta_info.model_config, "dspark", None))
+        logits = self._kvcache_mixin.apply_flat_state_outputs(outputs, auxiliary_output=has_auxiliary)
+        if has_auxiliary and logits.shape[1] > 1:
+            valid = getattr(self._data_processor, "valid_input_length", None)
+            last = int(args[4].item()) if valid is None else int(valid) - 1
+            return logits[:, last:last + 1]
+        return logits
+
+    def forward_verify(self, *args):
+        """Run the multi-token decode graph and retain every candidate logit."""
+        if not getattr(self.meta_info.model_config, "dspark", None):
+            raise ValueError("DSpark verification requires a DSpark target export")
+        outputs = super().forward(*args)
+        logits = self._kvcache_mixin.apply_flat_state_outputs(outputs, auxiliary_output=True)
+        return logits, self._kvcache_mixin.last_target_hidden
 
 
 __all__ = ["XHDeepSeekV4HMONNXModel"]

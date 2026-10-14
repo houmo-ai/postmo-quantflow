@@ -1349,3 +1349,13 @@ Usage in this project:
 The following paths are used:
     (stub implementations only)
 Users are responsible for verifying license compliance before any use.
+
+Component Name: DeepSeek-V4 Flash single-turn chat encoding
+Upstream URL: https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731
+Upstream Version: Flash-0731; encoding_dsv4.py SHA256 recorded in FLASH_CHAT_TEMPLATE
+License: MIT
+License File: licenses/DeepSeek-V4/LICENSE
+Files: xhmodel_merak/xh_llm/models/deepseek_v4/chat.py
+Scope: Official reasoning-effort text and single-user token protocol adapted to
+Jinja for the public text API; copyright and MIT permission notice retained
+inside the distributed tokenizer template.

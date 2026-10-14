@@ -24,6 +24,7 @@ from ...text_llm_hf_compatible import TextLLMHFCompatible
 from ...text_llm_model import TextLLMModel
 from ...types import LLMModelMeta, LLMModelState, ModelSwitcher
 from ...utils import is_huge_model_export_enabled
+from ...shared_head import SharedHeadMixin, quantized_head
 from .cache_abi import CSA, HCA, SLIDING, DeepSeekV4CacheABI, default_layer_types
 from .deepseek_v4_hmonnx_inference import XHDeepSeekV4HMONNXModel
 from .full_model import StaticDeepSeekV4ForCausalLM
@@ -115,8 +116,8 @@ def build_deepseek_v4_hf_compatible_model(
 
 
 @register_llm_model("DeepseekV4ForCausalLM")
-class XHDeepSeekV4Model(TextLLMModel):
-    """Fixed prefill-256/decode-1 DeepSeek-V4 Flash exporter."""
+class XHDeepSeekV4Model(SharedHeadMixin, TextLLMModel):
+    """Flash exporter with single-token or DSpark block verification."""
 
     WORKFLOW_CLS = "xhmodel_merak.xh_llm.models.deepseek_v4.workflow:DeepSeekV4Workflow"
     transformers_min_version = "5.13.0"
@@ -272,6 +273,10 @@ class XHDeepSeekV4Model(TextLLMModel):
         spec = DeepSeekV4StaticCacheSpec(
             max_context_length=self.config.context_max_length,
             prefill_chunk_length=self.config.prefill_chunk_length,
+            decode_sequence_length=int(self.config.num_logits_to_keep),
+            **{key: value for key, value in self.config.graph_geometry.items()
+               if key in {"sliding_window", "index_topk", "index_head_dim"}},
+            latent_head_dim=self.config.graph_geometry.get("head_dim", 512),
         )
         self.cache_abi = DeepSeekV4CacheABI(
             spec=spec,
@@ -289,9 +294,12 @@ class XHDeepSeekV4Model(TextLLMModel):
         self._kvcache_mixin = DeepSeekV4CacheMixin(self.cache_abi, self.kvcache_config)
         self._decode_wrap_model: StaticDeepSeekV4ForCausalLM | None = None
         self.layer_types = self.cache_abi.layer_types
+        # The base HMONNX exporter consults this separately from set_decode.
+        self._decode_input_sequence_length = int(self.config.num_logits_to_keep)
 
     @staticmethod
-    def _validate_checkpoint(model: DeepseekV4ForCausalLM, expected_layers: tuple[str, ...]) -> None:
+    def _validate_checkpoint(model: DeepseekV4ForCausalLM, expected_layers: tuple[str, ...],
+                             *, graph_geometry: dict | None = None) -> None:
         config = model.config
         checks = {
             "hidden_size": (int(config.hidden_size), 4096),
@@ -303,6 +311,8 @@ class XHDeepSeekV4Model(TextLLMModel):
             "hc_sinkhorn_iters": (int(config.hc_sinkhorn_iters), 20),
             "index_topk": (int(config.index_topk), 512),
         }
+        for name, expected in (graph_geometry or {}).items():
+            checks[name] = (int(getattr(config, name)), expected)
         mismatches = {
             name: {"checkpoint": actual, "expected": expected}
             for name, (actual, expected) in checks.items()
@@ -348,13 +358,14 @@ class XHDeepSeekV4Model(TextLLMModel):
     def init_wrap_model(self, hf_model: Any) -> Any:
         if not isinstance(hf_model, DeepseekV4ForCausalLM):
             raise TypeError(f"expected DeepseekV4ForCausalLM, got {type(hf_model)}")
-        self._validate_checkpoint(hf_model, self.layer_types)
+        self._validate_checkpoint(hf_model, self.layer_types, graph_geometry=self.config.graph_geometry)
         max_layers = len(self.layer_types)
         common = {
             "max_context_length": self.config.context_max_length,
             "max_layers": max_layers,
             "moe_fast_mode": True,
             "swa_backing_length": self.cache_abi.persistent_swa_length,
+            "auxiliary_layer_ids": tuple(self.config.dspark["target_layer_ids"]) if self.config.dspark else (),
         }
         prefill = StaticDeepSeekV4ForCausalLM.from_hf(
             hf_model,
@@ -363,7 +374,8 @@ class XHDeepSeekV4Model(TextLLMModel):
         )
         decode = StaticDeepSeekV4ForCausalLM.from_hf(
             hf_model,
-            input_sequence_length=1,
+            input_sequence_length=int(self.config.num_logits_to_keep),
+            return_all_logits=bool(self.config.dspark),
             **common,
         )
         # The host performs token embedding. Keep an independent copy because
@@ -406,6 +418,8 @@ class XHDeepSeekV4Model(TextLLMModel):
         kwargs.setdefault("infer_shape", False)
         self.set_prefill()
         prefill = super()._to_quanted(frontend_model.prefill, state, **kwargs)
+        if getattr(self.config, "dspark", None):
+            self.bind_target_head(quantized_head(prefill))
         prefill.cpu()
         frontend_model.prefill.cpu()
         gc.collect()
@@ -446,6 +460,7 @@ class XHDeepSeekV4Model(TextLLMModel):
         }:
             self._quanted_model.set_activate_model("decode")
         super().set_decode()
+        self.set_input_sequence_length(int(self.config.num_logits_to_keep))
 
     def _get_data_preprocessor(self):
         if self.embed_tokens is None:
@@ -527,6 +542,8 @@ class XHDeepSeekV4Model(TextLLMModel):
                     "main_score_state",
                 )
             )
+        if getattr(getattr(self, "config", None), "dspark", None):
+            outputs.append("target_hidden")
         return {"input_names": inputs, "output_names": outputs}
 
     def _get_big_language_placeholder_export_components(self):
@@ -561,7 +578,7 @@ class XHDeepSeekV4Model(TextLLMModel):
             self.hf_model_dir,
             dtype=self.dtype,
         )
-        self._validate_checkpoint(empty_hf_model, self.layer_types)
+        self._validate_checkpoint(empty_hf_model, self.layer_types, graph_geometry=self.config.graph_geometry)
         self._check_big_language_placeholder_export_supported(empty_hf_model)
         available_placeholder_prefixes = big_hf_model_cls.resolve_placeholder_prefixes(
             empty_hf_model,
@@ -699,11 +716,57 @@ class XHDeepSeekV4Model(TextLLMModel):
         meta_info.decode_onnx = meta_info.decode_hmonnx
         meta_info.token_embedding_file = meta_info.quant_embedding
         meta_info.max_context_tokens = self.config.context_max_length
+        if self.config.dspark:
+            meta_info.dspark = self._export_dspark_components(exported_dir)
         meta_path = Path(exported_info.exported_dir) / "golden_meta_info.json"
         meta_path.write_text(json.dumps(meta_info.to_dict(), indent=4), encoding="utf-8")
         self._write_merak_config(exported_info.exported_dir)
         logger.info(f"DeepSeek-V4 export completed: {exported_info.exported_dir}")
         return meta_info
+
+    def _export_dspark_components(self, exported_dir: Path) -> dict:
+        from safetensors import safe_open
+        from .dspark_checkpoint import load_dspark_checkpoint
+        from .dspark_export import export_dspark_components
+
+        prepared = self.config.dspark.get("model_dir")
+        if not prepared:
+            raise ValueError("DSpark export requires the producer-prepared draft checkpoint")
+        fixed_head = getattr(self, "_shared_target_head", None)
+        if fixed_head is None:
+            raise RuntimeError("Quantize the target shared head before exporting DSpark")
+        source = Path(self.hf_model_dir)
+        index_path = source / "model.safetensors.index.json"
+        if index_path.is_file():
+            index = json.loads(index_path.read_text())["weight_map"]
+        else:
+            with safe_open(source / "model.safetensors", framework="pt", device="cpu") as reader:
+                index = dict.fromkeys(reader.keys(), "model.safetensors")
+        if "lm_head.weight" in index:
+            with safe_open(source / index["lm_head.weight"], framework="pt", device="cpu") as reader:
+                weight = reader.get_tensor("lm_head.weight").half()
+            head = nn.Linear(weight.shape[1], weight.shape[0], bias=False, device="meta", dtype=weight.dtype)
+            head.weight = nn.Parameter(weight, requires_grad=False)
+        else:
+            from ...shared_head import load_packed_head
+            head, bits = load_packed_head(source)
+            if bits != self.config.dspark["head_weight_bits"]:
+                raise ValueError("A prequantized target head must retain its original logical bit width")
+        spec, draft, projection, norm, markov = load_dspark_checkpoint(
+            prepared, head, context_chunk_length=self.config.prefill_chunk_length,
+            block_size=self.config.dspark["block_size"],
+            head_weight_bits=self.config.dspark["head_weight_bits"],
+            target_layer_ids=tuple(self.config.dspark["target_layer_ids"]),
+            max_context_length=self.config.context_max_length,
+        )
+        activation_bits = int(self.get_quant_cfg().get("act_schema", {}).get("bits", 8))
+        scheme = self.config.quant_scheme.to_dict() if hasattr(self.config.quant_scheme, "to_dict") else self.config.quant_scheme
+        if "a16" in str(scheme.get("quant_type", "")):
+            activation_bits = 16
+        return export_dspark_components(draft, projection, norm, markov, self.embed_tokens,
+                                         exported_dir, activation_bits=activation_bits,
+                                         device=getattr(self, "_dspark_export_device", str(self.device)),
+                                         fixed_target_head=fixed_head)
 
     @staticmethod
     def _write_merak_config(exported_dir: str | Path) -> Path:
@@ -738,6 +801,7 @@ class XHDeepSeekV4Model(TextLLMModel):
         meta_info.pad_token_id = self.pad_token_id
         meta_info.layer_types = list(self.layer_types)
         meta_info.deepseek_v4_state_abi_version = 2
+        meta_info.deepseek_v4_auxiliary_layer_ids = list(self.config.dspark["target_layer_ids"]) if self.config.dspark else []
         return meta_info
 
 

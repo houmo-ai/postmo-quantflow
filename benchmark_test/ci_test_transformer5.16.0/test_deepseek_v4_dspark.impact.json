@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "deepseek-v4-dspark",
+    "patterns": [
+    "xhmodel_merak/model_integrations/deepseek_v4/**",
+    "configs_merak/workflows/xh2a/llm_models/deepseek_v4/flash_0731/*dspark*",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/workflow.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/dspark*.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/full_model.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/xh_deepseek_v4_config.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/deepseek_v4_model.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/deepseek_v4_hmonnx_inference.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/runtime.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/cache_abi.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/static_cache.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/host_masks.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/decoder.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/swa.py",
+    "xhmodel_merak/xh_llm/models/deepseek_v4/mhc.py",
+    "xhmodel_merak/xh_llm/shared_head.py"
+    ]
+  }]
+}

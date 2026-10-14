@@ -129,7 +129,7 @@ class DeepSeekV4CacheABI:
         if stage == "prefill":
             input_sequence_length = self.spec.prefill_chunk_length
         elif stage == "decode":
-            input_sequence_length = 1
+            input_sequence_length = self.spec.decode_sequence_length
         else:
             raise ValueError("stage must be prefill or decode")
         return aligned_swa_attention_length(
@@ -142,7 +142,7 @@ class DeepSeekV4CacheABI:
         if stage == "prefill":
             query_length = self.spec.prefill_chunk_length
         elif stage == "decode":
-            query_length = 1
+            query_length = self.spec.decode_sequence_length
         else:
             raise ValueError("stage must be prefill or decode")
         swa_length = self.attention_swa_length(stage)

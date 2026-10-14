@@ -52,7 +52,7 @@ class VisionRequest:
 
 @dataclass(frozen=True)
 class SpeculativeRequest:
-    mode: Literal["mtp", "dflash", "dflash2"]
+    mode: Literal["mtp", "dflash", "dflash2", "dspark"]
     num_draft_tokens: int | None = None
 
 

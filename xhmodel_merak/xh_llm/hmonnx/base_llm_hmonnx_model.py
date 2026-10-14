@@ -71,10 +71,8 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
                 enable_page_attention=enable_page_attention,
                 convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
             )
-        llm_loader = LLMHMONNXLoader(prefill_hmonnx, decode_hmonnx)
-        prefill_graph = llm_loader.prefill_graph
-        decode_graph = llm_loader.decode_graph
-        self._llm_initializer_pool_summary = dict(llm_loader.initializer_pool.summary())
+        prefill_graph, decode_graph, summary = self._load_hmonnx_graphs(prefill_hmonnx, decode_hmonnx)
+        self._llm_initializer_pool_summary = dict(summary)
         prefill_cuda_graph = enable_cuda_graph if enable_prefill_cuda_graph is None else enable_prefill_cuda_graph
         decode_cuda_graph = enable_cuda_graph if enable_decode_cuda_graph is None else enable_decode_cuda_graph
 
@@ -105,6 +103,11 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         self._kvcache_mixin = KVCacheMixin(self.kvcache_config)
         self._sync_page_attention_mode_to_kvcache()
         self.pad_token_id = self.meta_info.pad_token_id
+
+    def _load_hmonnx_graphs(self, prefill_hmonnx: str, decode_hmonnx: str):
+        """Allow a family to include speculative graphs in the same weight pool."""
+        loader = LLMHMONNXLoader(prefill_hmonnx, decode_hmonnx)
+        return loader.prefill_graph, loader.decode_graph, loader.initializer_pool.summary()
 
     @property
     def shared_weight_summary(self) -> dict[str, int]:

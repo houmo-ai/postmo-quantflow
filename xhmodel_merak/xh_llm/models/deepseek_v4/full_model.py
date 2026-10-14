@@ -13,6 +13,7 @@ therefore explicit graph inputs/outputs, one state tuple per compressed layer.
 
 from __future__ import annotations
 
+import copy
 from typing import NamedTuple
 
 import torch
@@ -72,10 +73,24 @@ class StaticBlocksOutput(NamedTuple):
     hca_states: tuple[HCAStateOutput, ...]
 
 
+class StaticBlocksAuxOutput(NamedTuple):
+    hidden_states: Tensor
+    csa_states: tuple[CSAStateOutput, ...]
+    hca_states: tuple[HCAStateOutput, ...]
+    target_hidden: Tensor
+
+
 class StaticCausalLMOutput(NamedTuple):
     logits: Tensor
     csa_states: tuple[CSAStateOutput, ...]
     hca_states: tuple[HCAStateOutput, ...]
+
+
+class StaticCausalLMAuxOutput(NamedTuple):
+    logits: Tensor
+    csa_states: tuple[CSAStateOutput, ...]
+    hca_states: tuple[HCAStateOutput, ...]
+    target_hidden: Tensor
 
 
 class StaticDeepSeekV4Blocks(nn.Module):
@@ -93,6 +108,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
         layer_types: tuple[str, ...],
         *,
         hc_mult: int,
+        auxiliary_layer_ids: tuple[int, ...] = (),
     ) -> None:
         super().__init__()
         if not layers:
@@ -105,6 +121,11 @@ class StaticDeepSeekV4Blocks(nn.Module):
         self.layers = nn.ModuleList(layers)
         self.layer_types = tuple(layer_types)
         self.hc_mult = int(hc_mult)
+        self.auxiliary_layer_ids = tuple(auxiliary_layer_ids)
+        if any(index < 0 or index >= len(layers) for index in self.auxiliary_layer_ids):
+            raise ValueError("auxiliary feature layers must exist in the exported target")
+        if tuple(sorted(set(self.auxiliary_layer_ids))) != self.auxiliary_layer_ids:
+            raise ValueError("auxiliary feature layers must be unique and ordered")
         # These are execution boundaries, not optional graph decoration.
         # HMONNX model parallelism uses one LLM Tag per decoder block to keep
         # every block and its cache inputs on one GPU, and to project the same
@@ -123,6 +144,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
         max_layers: int | None = None,
         moe_fast_mode: bool = True,
         swa_backing_length: int | None = None,
+        auxiliary_layer_ids: tuple[int, ...] = (),
     ) -> "StaticDeepSeekV4Blocks":
         base = model.model if hasattr(model, "model") and hasattr(model.model, "layers") else model
         if not hasattr(base, "layers"):
@@ -178,6 +200,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
             layers,
             tuple(layer_types),
             hc_mult=int(source_layers[0].attn_hc.hc_mult),
+            auxiliary_layer_ids=auxiliary_layer_ids,
         )
 
     def initial_cache_inputs(
@@ -334,6 +357,7 @@ class StaticDeepSeekV4Blocks(nn.Module):
         hidden_states = inputs_embeds.unsqueeze(2).expand(-1, -1, self.hc_mult, -1)
         csa_states: list[CSAStateOutput] = []
         hca_states: list[HCAStateOutput] = []
+        auxiliary_hidden = []
         for layer_index, (layer_type, layer) in enumerate(zip(self.layer_types, self.layers, strict=True)):
             cache = caches[layer_index]
             if layer_type == "sliding_attention":
@@ -402,8 +426,14 @@ class StaticDeepSeekV4Blocks(nn.Module):
                 )
                 hca_states.append(self._hca_state(output))
             hidden_states = self.layer_tags[layer_index](output.hidden_states)
+            if layer_index in self.auxiliary_layer_ids:
+                auxiliary_hidden.append(hidden_states.mean(dim=2))
 
         values = (hidden_states, tuple(csa_states), tuple(hca_states))
+        if self.auxiliary_layer_ids:
+            target_hidden = torch.cat(auxiliary_hidden, dim=-1)
+            values = (*values, target_hidden)
+            return values if is_fx_proxy(hidden_states) else StaticBlocksAuxOutput(*values)
         return values if is_fx_proxy(hidden_states) else StaticBlocksOutput(*values)
 
 
@@ -421,16 +451,21 @@ class StaticDeepSeekV4ForCausalLM(nn.Module):
         csa_ratio: int,
         hca_ratio: int,
         max_context_length: int,
+        return_all_logits: bool = False,
     ) -> None:
         super().__init__()
         self.blocks = blocks
         self.hc_head = hc_head
         self.norm = norm
-        self.lm_head = lm_head
+        memo = {id(value): nn.Parameter(value.detach(), requires_grad=value.requires_grad)
+                for value in lm_head.parameters()}
+        memo.update({id(value): value for value in lm_head.buffers()})
+        self.lm_head = copy.deepcopy(lm_head, memo)
         self.last_token_gather = xhnn.Gather(axis=1)
         self.csa_ratio = int(csa_ratio)
         self.hca_ratio = int(hca_ratio)
         self.max_context_length = int(max_context_length)
+        self.return_all_logits = bool(return_all_logits)
         self.input_sequence_length = int(blocks.layers[0].attention.input_sequence_length)
         self.csa_outputs = (self.input_sequence_length + self.csa_ratio - 1) // self.csa_ratio
         self.hca_outputs = (self.input_sequence_length + self.hca_ratio - 1) // self.hca_ratio
@@ -490,6 +525,8 @@ class StaticDeepSeekV4ForCausalLM(nn.Module):
         max_layers: int | None = None,
         moe_fast_mode: bool = True,
         swa_backing_length: int | None = None,
+        auxiliary_layer_ids: tuple[int, ...] = (),
+        return_all_logits: bool = False,
     ) -> "StaticDeepSeekV4ForCausalLM":
         if not hasattr(model, "model") or not hasattr(model, "lm_head"):
             raise ValueError("model must be a DeepseekV4ForCausalLM-like module")
@@ -500,6 +537,7 @@ class StaticDeepSeekV4ForCausalLM(nn.Module):
             max_layers=max_layers,
             moe_fast_mode=moe_fast_mode,
             swa_backing_length=swa_backing_length,
+            auxiliary_layer_ids=auxiliary_layer_ids,
         )
         return cls(
             blocks,
@@ -510,6 +548,7 @@ class StaticDeepSeekV4ForCausalLM(nn.Module):
             csa_ratio=int(model.config.compress_rates["compressed_sparse_attention"]),
             hca_ratio=int(model.config.compress_rates["heavily_compressed_attention"]),
             max_context_length=int(max_context_length),
+            return_all_logits=return_all_logits,
         )
 
     def initial_cache_inputs(self, *args, **kwargs) -> tuple[LayerCacheInputs, ...]:
@@ -596,15 +635,21 @@ class StaticDeepSeekV4ForCausalLM(nn.Module):
         hidden_states = self.norm(self.hc_head(output[0]))
         # Host already knows the valid length.  Supplying the final-token index
         # directly avoids rebuilding a coordinate with Sub in the static graph.
-        token_index = one_element_int(last_token_index, name="last_token_index")
-        last_hidden = self.last_token_gather(hidden_states, token_index)
-        logits = self.lm_head(last_hidden)
+        if self.return_all_logits:
+            logits = self.lm_head(hidden_states)
+        else:
+            token_index = one_element_int(last_token_index, name="last_token_index")
+            last_hidden = self.last_token_gather(hidden_states, token_index)
+            logits = self.lm_head(last_hidden)
         if is_fx_proxy(logits):
             return (
                 logits,
                 *(value for state in output[1] for value in state),
                 *(value for state in output[2] for value in state),
+                *((output[3],) if self.blocks.auxiliary_layer_ids else ()),
             )
+        if self.blocks.auxiliary_layer_ids:
+            return StaticCausalLMAuxOutput(logits, output[1], output[2], output[3])
         return StaticCausalLMOutput(logits, output[1], output[2])
 
 

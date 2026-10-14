@@ -18,7 +18,7 @@
 | TTS | `text_duration_t0032/`、`frame_acoustic_f0160/`、`phase_core_f0160/`、`generator_istft_f0160/` | 按实际角色和 T/F 档位命名；CPU 相位图单独保留 |
 | AIGC | `text_encode/`、`denoise_<档位>/`、`vae_encode/`、`vae_decode/` | 只交付实际使用的角色；VAE decode 不属于自回归 decode |
 | VLA | `visual_<档位>/`、`gemma_prefill/`、`gemma_decode/`、`expert_prefill/`、`expert_decode/`、`action_in_proj/`、`action_out_proj/`、`time_mlp/` | 多主干用语义前缀区分，不用 `Other/` 聚合不相关图 |
-| 投机解码 | `mtp_draft_*/`、`dflash_draft_*/` | 沿现有扁平命名，不再套 mtp/dflash 层级 |
+| 投机解码 | `mtp_draft_*/`、`dflash_draft_*/`、`dspark_*/` | 沿现有扁平命名；DSpark 的 context、context_decode、draft_decode、markov 按角色平铺 |
 
 每个组件目录放实际图与其 external_data 权重。图文件沿用发布前缀；不能只改权重文件名而
 不更新 ONNX 引用。尺寸含义和轴顺序由模型 README 说明，不凭目录数字猜测。

@@ -96,10 +96,9 @@ class DeepseekV4MerakForCausalLM(ContiguousHMONNXForCausalLM):
                 "its heterogeneous HMONNX cache is request-local."
             )
         if vllm_config.speculative_config is not None:
-            raise ValueError(
-                "DeepSeek-V4 Flash Merak runtime does not support speculative "
-                "decoding because SWA/CSA/HCA state has no rollback contract."
-            )
+            from ...spec_decode.dspark import validate_dspark_service_config
+
+            validate_dspark_service_config(vllm_config)
         normalized_cache_dtype = str(kv_cache_dtype).lower()
         if normalized_cache_dtype not in {"auto", "float16", "fp16", "torch.float16"}:
             raise ValueError(
@@ -140,9 +139,15 @@ class DeepseekV4MerakForCausalLM(ContiguousHMONNXForCausalLM):
             )
 
         hmonnx_meta_file = str(config_dir / "golden_meta_info.json")
+        runtime_kwargs = get_hmonnx_runtime_kwargs(config)
+        if vllm_config.speculative_config is not None:
+            runtime_kwargs["enable_prefill_cuda_graph"] = False
+            # Keep the six graphs on the package's shared weight pool, as in
+            # the direct runtime comparison. Fusion is a separate optimization.
+            runtime_kwargs["enable_parallel_linear_fusion"] = False
         hmonnx_model = AutoLLMHONNXModel.from_pretrained(
             hmonnx_meta_file,
-            **get_hmonnx_runtime_kwargs(config),
+            **runtime_kwargs,
         )
         if not isinstance(hmonnx_model, XHDeepSeekV4HMONNXModel):
             raise TypeError(

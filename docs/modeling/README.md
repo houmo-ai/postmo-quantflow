@@ -14,6 +14,7 @@
 | Ling MLA 先融合再量化、K/V 独立 SEFP 指数域与 cache | [Ling MLA 量化边界](structures/ling-mla-quantization.md) |
 | RMSNorm 权重、gating、padding 对归一化的影响 | [归一化算子](operators/normalization.md) |
 | prefill/decode、混合状态、投机验证回滚 | [Cache 与状态](structures/cache.md) |
+| DeepSeek-V4 Flash 0731 DSpark 组件、W4/W8、共享 head 与回滚 | [DSpark](structures/deepseek-v4-dspark.md) |
 | expert 权重、路由与量化载荷 | [MoE](structures/moe.md) |
 | 视觉 token 档位、多图与 Host 边界 | [多模态与多组件](structures/multimodal.md) |
 | Qwen-Image-2.1 的特征边界、共享调制、前缀 KV 与浮点诊断 | [接入记录（进行中）](structures/qwen-image21.md) |

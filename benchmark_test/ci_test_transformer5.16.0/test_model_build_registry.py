@@ -14,6 +14,7 @@ from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_
 
 
 EXPECTED_VARIANTS = {
+    "deepseek-v4-flash-0731": ["full", "dspark"],
     "qwen-image-2.1": ["full"],
     "macaron-v1-tall": ["full", "lora"],
     "minicpm-v-4.7-1b": ["full"],

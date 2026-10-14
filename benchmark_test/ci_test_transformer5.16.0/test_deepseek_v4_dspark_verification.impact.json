@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "deepseek-v4-dspark-verification",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/deepseek_v4/dspark_verification.py",
+      "xhmodel_merak/xh_llm/models/deepseek_v4/runtime.py",
+      "xhmodel_merak/xh_llm/models/deepseek_v4/static_cache.py",
+      "xhmodel_merak/xh_llm/models/deepseek_v4/cache_abi.py"
+    ]
+  }]
+}

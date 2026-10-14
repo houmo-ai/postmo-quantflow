@@ -42,6 +42,7 @@ class DeepSeekV4StaticCacheSpec:
     csa_ratio: int = 4
     hca_ratio: int = 128
     index_topk: int = 512
+    decode_sequence_length: int = 1
 
     def __post_init__(self) -> None:
         for name in (
@@ -53,11 +54,14 @@ class DeepSeekV4StaticCacheSpec:
             "csa_ratio",
             "hca_ratio",
             "index_topk",
+            "decode_sequence_length",
         ):
             if int(getattr(self, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.max_context_length < self.sliding_window:
             raise ValueError("max_context_length must cover the sliding window")
+        if self.decode_sequence_length > self.prefill_chunk_length:
+            raise ValueError("decode_sequence_length cannot exceed the prefill backing capacity")
 
     @property
     def swa_logical_backing_length(self) -> int:

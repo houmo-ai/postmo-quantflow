@@ -526,6 +526,19 @@
       "nodes": [
         "test_public_build_relocate_and_inference[wemm-embedding-9b/full]"
       ]
+    },
+    {
+      "id": "unified-deepseek-v4",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/deepseek_v4/**",
+        "xhmodel_merak/model_integrations/deepseek_v4/**",
+        "configs_merak/workflows/xh2a/llm_models/deepseek_v4/flash_0731/**",
+        "benchmark_test/ci_test_transformer5.16.0/_deepseek_v4_small_fixture.py"
+      ],
+      "nodes": [
+        "test_public_build_relocate_and_inference[deepseek-v4-flash-0731/full]",
+        "test_public_build_relocate_and_inference[deepseek-v4-flash-0731/dspark]"
+      ]
     }
   ]
 }

@@ -927,8 +927,8 @@ def _coerce_speculative(
         if not isinstance(value, Mapping):
             raise invalid_parameter(model, "speculative", value, "must be a SpeculativeRequest or mapping")
         unknown = sorted(set(value) - {"mode", "num_draft_tokens"})
-        if unknown or value.get("mode") not in {"mtp", "dflash", "dflash2"}:
-            raise invalid_parameter(model, "speculative", value, "requires mode='mtp', mode='dflash' or mode='dflash2'")
+        if unknown or value.get("mode") not in {"mtp", "dflash", "dflash2", "dspark"}:
+            raise invalid_parameter(model, "speculative", value, "requires a registered mtp/dflash/dflash2/dspark mode")
         request = SpeculativeRequest(mode=value["mode"], num_draft_tokens=value.get("num_draft_tokens"))
     num_draft_tokens = request.num_draft_tokens
     if num_draft_tokens is not None and (

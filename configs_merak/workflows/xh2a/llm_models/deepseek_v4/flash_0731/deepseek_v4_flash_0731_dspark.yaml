@@ -1,0 +1,26 @@
+quant: null
+runtime:
+  low_memory: true
+export:
+  model:
+    chip_arch: XH2a
+    model_type: DeepseekV4ForCausalLM
+    hf_model: null
+    model_name: deepseek_v4_flash_0731_dspark
+    context_max_length: 262144
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    use_cache: true
+    num_logits_to_keep: 6
+    num_draft_tokens: 5
+    max_layers: null
+    enable_auto_offload: false
+    packed_weight_only: true
+    quant_weight: null
+    dspark:
+      model_dir: null
+      block_size: 5
+      head_weight_bits: 5
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
