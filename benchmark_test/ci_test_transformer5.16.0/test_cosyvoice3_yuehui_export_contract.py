@@ -9,7 +9,7 @@ from xhmodel_merak.xh_other_model.llm_onnx_model import LLMONNXModel
 from xhmodel_merak.xh_other_model.models.cosyvoice3._export_utils import build_quant_config, to_xh_device_type
 from xhmodel_merak.xh_other_model.models.cosyvoice3.llm_hmonnx_model import XHQwen2HMONNXModel
 from xhquant.api import DeviceType
-from xhquant.quantization.yuehui.yuehui_qconfig import YueHuiQuantConfig
+from xhquant.quantization.yuehui._yuehui_quant_schema import YHQuantSchema
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -26,10 +26,10 @@ def test_cosyvoice3_maps_supported_target_devices():
 
 def test_cosyvoice3_builds_yuehui_w8a16_quant_config():
     config = build_quant_config("YueHui", "w8a16_sefp")
-    effective = YueHuiQuantConfig.from_schema(config)
+    effective = YHQuantSchema.from_schema(config).get_quant_config(module_type=torch.nn.Linear)
 
-    assert effective.w_cfg.bits == 8
-    assert effective.a_cfg.bits == 16
+    assert effective.w_cfg.quantizer.qspec.man_bit == 8
+    assert effective.i_cfg.quantizer.qspec.man_bit == 16
 
 
 def test_cosyvoice3_yuehui_workflow_config_selects_verified_w8_baseline():

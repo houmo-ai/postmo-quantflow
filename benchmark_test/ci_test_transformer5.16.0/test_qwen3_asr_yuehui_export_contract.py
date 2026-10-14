@@ -5,9 +5,10 @@ from pathlib import Path
 
 import pytest
 import yaml
+from torch import nn
 
 from xhquant.api import DeviceType, QuantScheme, create_quant_config
-from xhquant.quantization.yuehui.yuehui_qconfig import YueHuiQuantConfig
+from xhquant.quantization.yuehui._yuehui_quant_schema import YHQuantSchema
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -48,7 +49,8 @@ def test_qwen3_asr_accepts_yuehui_device_and_quant_schemes() -> None:
             QuantScheme(target_device=DeviceType.YueHui, quant_type=quant_type)
         )
         assert quant_config.arch == "YueHui"
-        assert YueHuiQuantConfig.from_schema(quant_config).w_cfg.nshare == 64
+        effective = YHQuantSchema.from_schema(quant_config).get_quant_config(module_type=nn.Linear)
+        assert effective.w_cfg.quantizer.qspec.nshare == 64
 
 
 @pytest.mark.parametrize(("model_size", "config_path"), CONFIG_PATHS.items())

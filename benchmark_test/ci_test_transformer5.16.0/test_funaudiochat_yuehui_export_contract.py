@@ -10,7 +10,7 @@ from xhmodel_merak.xh_other_model.models.funaudiochat._export_utils import to_de
 from xhmodel_merak.xh_other_model.models.funaudiochat._static_export import FunAudioChatStaticAudioTowerWarp
 from xhmodel_merak.xh_other_model.models.funaudiochat.workflow import _build_export_args
 from xhquant.api import DeviceType, QuantScheme, create_quant_config
-from xhquant.quantization.yuehui.yuehui_qconfig import YueHuiQuantConfig
+from xhquant.quantization.yuehui._yuehui_quant_schema import YHQuantSchema
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -63,11 +63,11 @@ def test_funaudiochat_builds_yuehui_group_64_quant_config(quant_type: str) -> No
     quant_config = create_quant_config(
         QuantScheme(target_device=DeviceType.YueHui, quant_type=quant_type)
     )
-    effective = YueHuiQuantConfig.from_schema(quant_config)
+    effective = YHQuantSchema.from_schema(quant_config).get_quant_config(module_type=torch.nn.Linear)
 
     assert quant_config.arch == "YueHui"
-    assert effective.w_cfg.nshare == 64
-    assert effective.a_cfg.nshare == 64
+    assert effective.w_cfg.quantizer.qspec.nshare == 64
+    assert effective.i_cfg.quantizer.qspec.nshare == 64
 
 
 def test_funaudiochat_yuehui_workflow_contract() -> None:

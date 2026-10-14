@@ -1,5 +1,6 @@
 """Checkpoint loading must not disable later native-model initialization."""
 
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,7 +12,7 @@ import transformers.modeling_utils as modeling_utils
 
 
 def test_autouse_fixture_isolates_success_and_failure(tmp_path):
-    source = Path(__file__).parent
+    source = Path(__file__).resolve().parent
     (tmp_path / "conftest.py").write_bytes((source / "conftest.py").read_bytes())
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "test_sequence.py").write_text('''
@@ -46,11 +47,16 @@ def test_03_next_native_model():
     assert torch.isfinite(model.weight).all()
     assert torch.isfinite(model.bias).all()
 ''')
+    env = os.environ.copy()
+    # The copied conftest imports shared CI helpers from its original directory.
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(source), *filter(None, env.get("PYTHONPATH", "").split(os.pathsep))]
+    )
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-c", str(tmp_path / "pytest.ini"),
          "--confcutdir", str(tmp_path), str(tmp_path / "test_sequence.py"),
          "--junitxml", str(tmp_path / "result.xml"), "-q"],
-        capture_output=True, text=True, timeout=120,
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 1, result.stdout + result.stderr
     cases = list(ET.parse(tmp_path / "result.xml").iter("testcase"))
