@@ -122,7 +122,7 @@ def test_moe_source_selects_its_registered_block_export(filename, expects_layout
     target = f"{SUITE_RELATIVE}/test_qwen35_35b_a3b_block_export.py"
     from _unified_cases import CASES
     expected = POLICY_GATES | {target} | {
-        f"{SUITE_RELATIVE}/test_unified_small_models.py::test_public_build_relocate_and_inference[{case.id}]"
+        f"{SUITE_RELATIVE}/{case.owner}"
         for case in CASES if case.fixture in {"qwen_moe", "macaron"}
     }
     expected.update({

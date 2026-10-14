@@ -52,11 +52,10 @@ def _selected_cases(paths):
 
     from select_tests import SUITE_RELATIVE, select_for_changes
 
-    owner = f"{SUITE_RELATIVE}/test_unified_small_models.py"
     result = select_for_changes(paths, repo_root=Path(__file__).resolve().parents[2])
-    if owner in result.tests:
-        return {c.id for c in CASES}
-    return {t.split("[", 1)[1][:-1] for t in result.tests if t.startswith(owner + "::")}
+    return {case.id for case in CASES
+            if f"{SUITE_RELATIVE}/{case.owner}" in result.tests
+            or f"{SUITE_RELATIVE}/{case.node_id}" in result.tests}
 
 
 def test_each_registered_workflow_selects_only_its_model_variants():
@@ -93,20 +92,139 @@ def test_public_unified_changes_select_all_cases_and_mixed_private_changes_union
 
 
 def test_impact_parameter_nodes_match_real_pytest_collection():
-    import json
     import subprocess
     import sys
     from pathlib import Path
 
     suite = Path(__file__).resolve().parent
-    declaration = json.loads((suite / "test_unified_small_models.impact.json").read_text())
-    nodes = {node for rule in declaration["rules"] for node in rule.get("nodes", [])}
-    expected = {f"test_public_build_relocate_and_inference[{c.id}]" for c in CASES}
-    assert nodes == expected
-    # Exercise pytest's real node-id parser without running GPU fixtures.
-    targets = [str(suite / "test_unified_small_models.py") + "::" + node for node in sorted(nodes)]
+    # Collect entire owner files so unexpected or missing parameters also fail.
+    targets = [str(suite / owner) for owner in sorted({case.owner for case in CASES})]
     result = subprocess.run([sys.executable, "-m", "pytest", "-c", str(suite / "pytest.ini"),
-                             "--confcutdir=" + str(suite), "--collect-only", "-q", *targets],
+                             "--confcutdir=" + str(suite), "--collect-only", "-q", "-o", "addopts=", *targets],
                             text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"{len(CASES)} tests collected" in result.stdout or f"collected {len(CASES)} items" in result.stdout
+
+    actual = {line.strip() for line in result.stdout.splitlines() if "::test_public_build_relocate_and_inference[" in line}
+    assert actual == {case.node_id for case in CASES}
+
+
+def test_model_declarations_and_manifests_select_only_their_owner():
+    from select_tests import SUITE_RELATIVE
+
+    for owner in {case.owner for case in CASES}:
+        expected = {case.id for case in CASES if case.owner == owner}
+        for path in (owner, owner.replace(".py", ".impact.json")):
+            assert _selected_cases([f"{SUITE_RELATIVE}/{path}"]) == expected
+
+
+def test_helpers_select_only_actual_model_consumers():
+    from select_tests import SUITE_RELATIVE
+
+    def selected(helper):
+        return _selected_cases([f"{SUITE_RELATIVE}/{helper}"])
+
+    assert selected("_unified_reporting.py") == set()
+    assert selected("_unified_assets.py") == {case.id for case in CASES if case.fixture in {"kokoro", "moss"}}
+    assert selected("_unified_fixtures/deepseek_v4.py") == {case.id for case in CASES if case.fixture == "deepseek_v4"}
+    assert selected("fixtures/unified/qwen_dense.json") == {case.id for case in CASES if case.fixture == "qwen_dense"}
+    for helper in ("_unified_runner.py", "_unified_e2e_worker.py", "_unified_preparation.py"):
+        assert selected(helper) == {case.id for case in CASES}
+
+
+@pytest.mark.parametrize("declaration", [
+    "", "CASE_SPEC = ('model', 'fixture', 'module', ())",
+    "CASE_SPEC = ('model', 'fixture', 'module', ('full', 'full'))",
+])
+def test_discovery_rejects_missing_invalid_or_duplicate_variants(tmp_path, declaration):
+    from _unified_cases import discover_cases
+
+    (tmp_path / "test_unified_model_a.py").write_text(declaration)
+    with pytest.raises(ValueError):
+        discover_cases(tmp_path)
+
+
+def test_discovery_rejects_duplicate_model_owners(tmp_path):
+    from _unified_cases import discover_cases
+
+    for name in ("a", "b"):
+        (tmp_path / f"test_unified_model_{name}.py").write_text(
+            "CASE_SPEC = ('model', 'fixture', 'module', ('full',))")
+    with pytest.raises(ValueError, match="duplicate"):
+        discover_cases(tmp_path)
+
+
+def test_selected_cases_span_modules_and_reject_duplicate_execution():
+    from types import SimpleNamespace
+    from _unified_runner import selected_cases
+
+    def item(case):
+        return SimpleNamespace(callspec=SimpleNamespace(params={"case": case}))
+
+    cases = [CASES[0], next(case for case in CASES if case.owner != CASES[0].owner)]
+    assert selected_cases([item(cases[0]), SimpleNamespace(), item("unrelated"), item(cases[1])]) == cases
+    with pytest.raises(AssertionError, match="Duplicate"):
+        selected_cases([item(cases[0]), item(cases[0])])
+
+
+def test_session_scheduler_runs_each_selected_case_once_without_gpu_overlap(tmp_path, monkeypatch):
+    """Exercise real child scheduling with a tiny CPU worker and synthetic GPU IDs."""
+    import json
+    from types import SimpleNamespace
+    import _unified_runner as runner
+
+    script = tmp_path / "fixture" / "suite" / "_unified_e2e_worker.py"
+    script.parent.mkdir(parents=True)
+    script.write_text('''import json, os, sys, time
+from pathlib import Path
+folder = Path(sys.argv[2])
+device = os.environ["CUDA_VISIBLE_DEVICES"]
+lock = folder.parents[1] / ("device-" + device)
+# Exclusive creation fails if another worker owns the same device.
+with lock.open("x"):
+    time.sleep(0.05)
+    (folder / "result.json").write_text(json.dumps({
+        "passed": True, "stage": "complete", "case": sys.argv[1], "device": device}))
+lock.unlink()
+''')
+    monkeypatch.setattr(runner, "__file__", str(script.with_name("_unified_runner.py")))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "synthetic-0,synthetic-1")
+    selected = [CASES[0], CASES[1], next(case for case in CASES if case.owner != CASES[0].owner)]
+    items = [SimpleNamespace(callspec=SimpleNamespace(params={"case": case})) for case in selected]
+    request = SimpleNamespace(session=SimpleNamespace(items=items))
+    root = tmp_path / "runs"
+    root.mkdir()
+    factory = SimpleNamespace(mktemp=lambda _: root)
+    generator = runner.unified_runs.__wrapped__(request, factory)
+    try:
+        futures = next(generator)
+        assert set(futures) == {case.id for case in selected}
+        for case in selected:
+            runner.check_case_result(case, futures)
+        records = [json.loads(path.read_text()) for path in root.glob("*/*/result.json")]
+        assert sorted(record["case"] for record in records) == sorted(case.id for case in selected)
+        assert {record["device"] for record in records} == {"synthetic-0", "synthetic-1"}
+    finally:
+        generator.close()
+    assert not list(root.glob("device-*"))
+
+
+def test_every_case_has_an_importable_preparation_entry():
+    from importlib import import_module
+
+    for module in {case.preparation for case in CASES}:
+        assert callable(import_module(module).prepare), module
+
+
+def test_pi05_preparation_preserves_public_build_and_action_inputs(tmp_path, monkeypatch):
+    from _unified_e2e_worker import prepare
+    from xhmodel_merak.model_catalog.registry import get_catalog
+
+    case = next(case for case in CASES if case.fixture == "pi05")
+    kwargs, inputs = prepare(case, tmp_path, monkeypatch)
+    assert kwargs["model_id"] == case.model_id
+    assert kwargs["resources"] == {"tokenizer": str(tmp_path / "tokenizer")}
+    assert (tmp_path / "source" / "config.json").is_file()
+    assert inputs["observation.state"] == [0.0] * 8
+    assert inputs["seed"] == 1 and inputs["task"]
+    assert dict(get_catalog()._recipes[case.model_id].config_replacements)["export.other.hidden_size"] == 64

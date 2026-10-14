@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test_unified_model_glm_5_3_flash-unified-common",
+      "patterns": [
+        "xhmodel_merak/model_build/**",
+        "xhmodel_merak/model_inference/**",
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_artifact/**",
+        "xhmodel_merak/_requirements.py",
+        "xhmodel_merak/_environment.py",
+        "xhmodel_merak/model_integrations/autoregressive/**",
+        "xhmodel_merak/xh_llm/workflows/**",
+        "xhmodel_merak/workflows/**",
+        "xhmodel_merak/model_integrations/__init__.py",
+        "xhmodel_merak/model_integrations/_shared.py",
+        "xhmodel_merak/model_integrations/_dependencies.py"
+      ]
+    },
+    {
+      "id": "test_unified_model_glm_5_3_flash-unified-glm",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/glm5_3_flash/**",
+        "xhmodel_merak/model_integrations/glm53/**",
+        "benchmark_test/ci_test_transformer5.16.0/_glm53_packed_fixture.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_glm53_multimodal.py"
+      ]
+    },
+    {
+      "id": "test_unified_model_glm_5_3_flash-unified-config-glm-5-3-flash",
+      "patterns": [
+        "configs_merak/workflows/xh2a/llm_models/glm5_3_flash/glm5_3_flash*.yaml"
+      ]
+    },
+    {
+      "id": "test_unified_model_glm_5_3_flash-fixtures",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_unified_cases.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_e2e_worker.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/__init__.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/glm.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/transformer.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_preparation.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_runner.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_small_model.py"
+      ]
+    }
+  ]
+}

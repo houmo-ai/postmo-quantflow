@@ -26,7 +26,9 @@
         "benchmark_test/ci_test_transformer5.16.0/test_model_build_registry.py",
         "xhmodel_merak/errors.py",
         "xhmodel_merak/model_artifact/**",
-        "xhmodel_merak/model_integrations/_dependencies.py"
+        "xhmodel_merak/model_integrations/_dependencies.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_unified_model_*.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_cases.py"
       ]
     }
   ]

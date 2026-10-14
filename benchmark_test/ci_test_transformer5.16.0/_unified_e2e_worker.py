@@ -4,276 +4,23 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import shutil
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 
 from _unified_cases import CASES
-from _unified_small_model import write_auxiliary, write_calibration, write_native_checkpoint
+
+
+def fixture_module(case):
+    from importlib import import_module
+
+    return import_module(case.preparation)
 
 
 def prepare(case, root, monkeypatch):
-    from xhmodel_merak.model_catalog.registry import get_catalog
-
-    catalog = get_catalog()
-    recipe = catalog._recipes[case.model_id]
-    source = root / "source"
-    calibration, image = write_calibration(root)
-    kwargs = {
-        "model_id": case.model_id,
-        "model_dir": str(source),
-        "output_dir": str(root / "artifact"),
-        "device": "cuda:0",
-    }
-    inputs = {"prompt": "hello world", "max_new_tokens": 2}
-    replacements = dict(recipe.config_replacements)
-    family = case.fixture
-    if family == "deepseek_v4":
-        from _deepseek_v4_small_fixture import write_deepseek_v4_checkpoint
-        config = write_deepseek_v4_checkpoint(source)
-        geometry = {key: config[key] for key in ("hidden_size", "num_attention_heads", "head_dim",
-            "q_lora_rank", "sliding_window", "hc_mult", "hc_sinkhorn_iters", "index_topk", "index_head_dim")}
-        replacements.update({"export.model.max_layers": 4, "export.model.graph_geometry": geometry})
-        if case.variant == "dspark":
-            replacements["export.model.dspark.target_layer_ids"] = [1, 2, 3]
-            kwargs["speculative"] = {"mode": "dspark", "num_draft_tokens": 5}
-            inputs["max_new_tokens"] = 8
-        kwargs.update(context_length=2048, prefill_chunk_length=256, quant_checkpoint=str(source))
-        monkeypatch.setitem(catalog._recipes, case.model_id, replace(recipe,
-            source_constraints=(("model_type", "deepseek_v4"),), max_pe_length=2048,
-            config_replacements=tuple(replacements.items())))
-        inputs["devices"] = ["cuda:0"]
-        return kwargs, inputs
-    if family == "qwen_image21":
-        from _qwen_image21_small_fixture import prepare_qwen_image21
-
-        inputs = prepare_qwen_image21(source, root, catalog, recipe, monkeypatch)
-        kwargs["deployment_precision"] = {"image": "w8a8_sefp"}
-        return kwargs, inputs
-    if family == "pi05":
-        from _pi05_small_fixture import write_pi05
-
-        tokenizer = root / "tokenizer"
-        write_pi05(source, tokenizer, monkeypatch)
-        monkeypatch.setitem(
-            catalog._recipes,
-            recipe.model_id,
-            replace(
-                recipe,
-                config_replacements=(*recipe.config_replacements, ("export.other.hidden_size", 64)),
-            ),
-        )
-        kwargs["resources"] = {"tokenizer": str(tokenizer)}
-        inputs = {
-            "task": "pick up the object",
-            "observation.images.image": str(image),
-            "observation.images.image2": str(image),
-            "observation.state": [0.0] * 8,
-            "seed": 1,
-        }
-        return kwargs, inputs
-    if family == "minimax":
-        # Packaging-only unified case: stub the heavy converter, keep public
-        # build/relocate/validation, and assert unsupported unified inference.
-        source.mkdir()
-        from _unified_special_fixtures import configure_minimax_packaging_stub
-
-        configure_minimax_packaging_stub(source, monkeypatch)
-        inputs = {"prompt": "a clay fox walks across wet sand", "image": str(image), "workflow": "fl2va"}
-        return kwargs, inputs
-    if family == "minicpm_v47":
-        # Packaging-only unified case: stub the heavy vision+LLM converter,
-        # keep public build/relocate/validation, and assert unsupported inference.
-        from _unified_special_fixtures import configure_minicpm_v47_packaging_stub
-
-        configure_minicpm_v47_packaging_stub(source, monkeypatch, recipe=recipe)
-        inputs = {
-            "prompt": "describe the image briefly",
-            "image": str(image),
-            "max_new_tokens": 2,
-            "downsample_mode": "4x",
-        }
-        return kwargs, inputs
-    if family in ("kokoro", "moss"):
-        # Release assets remain explicit and pinned; no model-hub downloads.
-        if family == "kokoro":
-            from _unified_assets import kokoro_source
-
-            source = kokoro_source()
-        else:
-            from _unified_assets import moss_source
-
-            source = moss_source()
-        kwargs["model_dir"] = str(source)
-        if family == "kokoro":
-            from _unified_special_fixtures import configure_kokoro_minimal
-
-            configure_kokoro_minimal(catalog, recipe, monkeypatch)
-            inputs = {"text": "你好"}
-        else:
-            import numpy as np
-            import soundfile as sf
-
-            audio = root / "audio.wav"
-            sf.write(audio, 0.03 * np.sin(np.arange(16000) * 2 * np.pi * 220 / 16000), 16000)
-            inputs = {"audio": str(audio), "max_new_tokens": 64}
-            kwargs.update(context_length=2048, prefill_chunk_length=512)
-        return kwargs, inputs
-
-    if family == "glm":
-        from _glm53_packed_fixture import write_native_glm53
-
-        write_native_glm53(source)
-        kwargs["quant_output_dir"] = str(root / "quant")
-        config = json.loads((source / "config.json").read_text())
-        calibration.write_text(
-            "".join(
-                json.dumps({"text": " ".join(f"t{2 + (i + row) % 40}" for i in range(128))}) + "\n" for row in range(2)
-            )
-        )
-        inputs["prompt"] = "t2 t3 t4"
-        replacements.update(
-            {
-                "export.model.linear_chunk_size": 8,
-                "export.model.placeholder_export_workers": 1,
-                "export.model.vision_max_patches": 32,
-            }
-        )
-    elif family == "ling":
-        from _unified_special_fixtures import write_ling
-
-        config = write_ling(source)
-        # Match the tiny numeric vocabulary; natural language would become
-        # repeated UNK tokens and be rejected by AutoRound's sample filter.
-        calibration.write_text(
-            "".join(
-                json.dumps({"text": " ".join(str(4 + (i + row) % 6) for i in range(128))}) + "\n" for row in range(2)
-            )
-        )
-        inputs["prompt"] = "4 5 6"
-    else:
-        config = write_native_checkpoint(source, "qwen_moe" if family == "macaron" else family)
-    gemma = family.startswith("gemma")
-    context = 320 if gemma else 256 if family == "paddleocr" else 64
-    prefill = 320 if gemma else 64 if family in ("paddleocr", "ling") else 8
-    kwargs.update(context_length=context, prefill_chunk_length=prefill)
-    if "calibration" in recipe.required_resources:
-        kwargs["resources"] = {"calibration": str(calibration)}
-    if family == "paddleocr":
-        kwargs["resources"] = {"calibration": str(calibration)}
-        inputs["image"] = str(image)
-        inputs["prompt"] = "OCR:"
-    if case.model_id.startswith("wemm"):
-        inputs = {"text": "hello world"}
-    if case.variant in ("mtp", "lora_mtp"):
-        kwargs["speculative"] = {"mode": "mtp"}
-        if gemma:
-            from _unified_special_fixtures import write_gemma_assistant
-
-            assistant = root / "assistant"
-            replacements.update(write_gemma_assistant(assistant, config, ordered=family in ("gemma_e2b", "gemma_e4b")))
-            kwargs["sources"] = {"mtp": str(assistant)}
-        else:
-            write_auxiliary(source, family + "_mtp")
-            replacements.update(
-                {
-                    "export.model.mtp_config.hidden_size": 64,
-                    "export.model.mtp_config.num_key_value_heads": 2,
-                    "export.model.mtp_config.head_dim": 32,
-                    "export.model.mtp_config.input_sequence_length": 8,
-                    "export.model.mtp_config.max_pe_length": 128,
-                }
-            )
-    if case.variant in {"dflash", "dflash2"}:
-        draft = root / "draft"
-        write_auxiliary(draft, case.variant, target_config=config)
-        kwargs.update(speculative={"mode": case.variant}, sources={case.variant: str(draft)})
-    if case.variant in ("lora", "lora_mtp") and family != "macaron":
-        adapter = root / "lora"
-        write_auxiliary(adapter, "qwen_lora")
-        kwargs["lora"] = {"paths": [str(adapter)]}
-    if family == "macaron" and case.variant == "lora":
-        from _unified_special_fixtures import write_macaron_loras
-
-        write_macaron_loras(source)
-        kwargs["lora"] = {"paths": [str(source / "loras" / f"L{i}") for i in range(3)]}
-    constraints = (("model_type", config["model_type"]),)
-    if family in ("minicpm", "ling"):
-        constraints = (("architectures.0", config["architectures"][0]),)
-    monkeypatch.setitem(
-        catalog._recipes,
-        case.model_id,
-        replace(
-            recipe,
-            source_constraints=constraints,
-            max_pe_length=512 if gemma else max(128, context),
-            config_replacements=tuple(replacements.items()),
-        ),
-    )
-    configure_calibration(case, calibration, monkeypatch)
-    return kwargs, inputs
-
-
-def configure_calibration(case, calibration, monkeypatch):
-    """Change test data and calibration budget, never bypass quant/export calls."""
-    import xhmodel_merak.model_build.api as api
-
-    if case.fixture == "minicpm":
-        import datasets
-
-        def local_wikitext(name, config, *, split):
-            assert (name, config, split) == ("Salesforce/wikitext", "wikitext-2-raw-v1", "train")
-            return datasets.Dataset.from_dict({"text": ["hello world " * 32] * 2})
-
-        # The legacy workflow owns a fixed dataset request. Replace only that
-        # external data boundary; quantization itself executes unchanged.
-        monkeypatch.setattr(datasets, "load_dataset", local_wikitext)
-        return
-
-    original = api.resolve_build_plan
-
-    def resolve(**kwargs):
-        plan = original(**kwargs)
-        replacements = copy.deepcopy(plan.config_replacements)
-        quant = replacements.get("quant")
-        fields = {
-            "calibration.dataset": str(calibration),
-            "calibration.nsamples": 2,
-            "calibration.seqlen": 64,
-            "runtime.batch_size": 1,
-        }
-        if case.fixture in ("qwen_next", "glm", "ling"):
-            fields["calibration.jsonl"] = fields.pop("calibration.dataset")
-        if case.fixture == "qwen_next" and plan.quant_method == "gptq":
-            # A random tiny checkpoint is not a WikiText benchmark. Keep real
-            # quantization/reload and public inference, without hub downloads
-            # or the example script's default 128-token demonstration.
-            fields.update({"validation.skip_ppl": True, "validation.max_new_tokens": 2})
-        if plan.quant_method == "autoround":
-            fields["iters"] = 4
-        if case.fixture == "paddleocr":
-            fields = {"nsamples": 2, "iters": 4}
-        for key, value in fields.items():
-            # A resource binding may already occupy this dotted path after the
-            # whole quant mapping. Ensure the fixture data remains the last write.
-            replacements.pop("quant." + key, None)
-            if isinstance(quant, dict):
-                node = quant
-                parts = key.split(".")
-                for part in parts[:-1]:
-                    node = node.setdefault(part, {})
-                node[parts[-1]] = value
-            else:
-                replacements["quant." + key] = value
-        if isinstance(quant, dict) and quant.get("mtp"):
-            quant["mtp"].update(validation_nsamples=1, iters=4)
-        return replace(plan, config_replacements=replacements)
-
-    monkeypatch.setattr(api, "resolve_build_plan", resolve)
+    return fixture_module(case).prepare(case, root, monkeypatch)
 
 
 def validate_expert_lora_artifacts(meta, adapters):
@@ -341,18 +88,9 @@ def run(case, root, *, low_memory=None):
             assert (artifact / "export_meta_info.json").is_file()
             assert (artifact / "environment.json").is_file()
             assert json.loads((artifact / "environment.json").read_text())["variant"] == case.variant
-            if case.fixture == "glm":
-                assert result.quant_artifact is not None
-                reports = list(Path(result.quant_artifact).rglob("glm53_quantization_recipe.json"))
-                assert len(reports) == 1, "GLM checkpoint must preserve real quantization evidence"
-                evidence = json.loads(reports[0].read_text())
-                provenance = evidence["provenance"]
-                assert evidence["method"] == "autoround" and provenance["dry_run"] is False
-                assert provenance["iters"] == 4 and provenance["tuning"]["loss_evaluations"] > 0
-                assert evidence["calibration"]["actual_nsamples"] == 2
-                assert evidence["calibration"]["actual_tokens"] == 128
-                assert all(provenance["audit"][key] > 0 for key in ("w4_modules", "w8_modules"))
-                record["quantization_evidence"] = evidence
+            fixture = fixture_module(case)
+            if hasattr(fixture, "validate_build"):
+                fixture.validate_build(case, result, record)
             moved = root / "relocated"
             artifact.rename(moved)
             # Generated checkpoints disappear before inference: no accidental
@@ -373,48 +111,8 @@ def run(case, root, *, low_memory=None):
                 if path.is_dir():
                     shutil.rmtree(path)
             record["stage"] = "inference"
-            if case.fixture == "minimax":
-                from xhmodel_merak.errors import ErrorCode, ModelError
-
-                with pytest.raises(ModelError) as exc_info:
-                    inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
-                error = exc_info.value
-                values = error.details.get("values", {})
-                assert error.code == ErrorCode.UNSUPPORTED_COMBINATION
-                assert values.get("workflow") == "fl2va"
-                assert values.get("image") == inputs["image"]
-                record.update(
-                    passed=True,
-                    stage="complete",
-                    inference={
-                        "status": "unsupported_combination",
-                        "code": error.code.value,
-                        "workflow": values.get("workflow"),
-                        "prompt": values.get("prompt"),
-                        "image": values.get("image"),
-                    },
-                )
-            elif case.fixture == "minicpm_v47":
-                from xhmodel_merak.errors import ErrorCode, ModelError
-
-                with pytest.raises(ModelError) as exc_info:
-                    inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
-                error = exc_info.value
-                values = error.details.get("values", {})
-                assert error.code == ErrorCode.UNSUPPORTED_COMBINATION
-                assert values.get("image") == inputs["image"]
-                assert values.get("downsample_mode") == inputs["downsample_mode"]
-                record.update(
-                    passed=True,
-                    stage="complete",
-                    inference={
-                        "status": "unsupported_combination",
-                        "code": error.code.value,
-                        "prompt": values.get("prompt"),
-                        "image": values.get("image"),
-                        "downsample_mode": values.get("downsample_mode"),
-                    },
-                )
+            if hasattr(fixture, "check_inference"):
+                fixture.check_inference(moved, inputs, record)
             else:
                 output = inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
                 assert output.model_id == case.model_id
@@ -433,32 +131,8 @@ def run(case, root, *, low_memory=None):
                     assert len(output.actions) == 50
                 if hasattr(output, "num_samples"):
                     assert output.num_samples > 0
-                if case.fixture == "kokoro":
-                    meta = json.loads(Path(output.meta_file).read_text())
-                    routes = meta["bucket_presets"]["routes"]
-                    assert [(r["token_max_length"], r["frame_max_length"]) for r in routes] == [(32, 160)]
-                    assert all(len(c["buckets"]) == 1 for c in meta["components"].values())
-                    assert output.segments[0]["route"] == "t0032_f0160"
-                    record["tested_routes"] = ["t0032_f0160"]
-                if case.fixture == "qwen_image21":
-                    import numpy as np
-
-                    assert (output.height, output.width) == (64, 32)
-                    assert output.image.shape == (64, 32, 4) and output.image.dtype == np.uint8
-                    assert result.deployment_precision == {"image": "w8a8_sefp"}
-                    edited = inference_model(
-                        artifact_dir=str(moved),
-                        device="cuda:0",
-                        inputs={
-                            **inputs,
-                            "prompt": "Make it blue.",
-                            "images": [str(root / "reference.png")],
-                        },
-                    )
-                    assert edited.image.shape == output.image.shape and edited.stats["reference_count"] == 1
-                    repeated = inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
-                    assert np.array_equal(output.image, repeated.image)
-                    record["repeat_bit_exact"] = True
+                if hasattr(fixture, "validate_output"):
+                    fixture.validate_output(case, output, result, moved, inputs, root, record)
                 if case.variant in ("lora", "lora_mtp"):
                     # The public API runs the root model. Exercise the exported
                     # adapter too, through the same runtime used by that API.

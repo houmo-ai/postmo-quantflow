@@ -61,3 +61,7 @@ def restore_model_initialization_state():
     # native model fixture. This is test isolation, not a production workaround.
     with _preserve_initialization_state():
         yield _preserve_initialization_state
+
+
+# One scheduler owns all selected per-model integration cases.
+from _unified_runner import unified_runs  # noqa: E402, F401

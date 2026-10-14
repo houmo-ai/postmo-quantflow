@@ -18,15 +18,14 @@ from pathlib import Path
 
 import pytest
 
-from _unified_cases import CASES
+from _unified_cases import UnifiedCase
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def unified_runs(request, tmp_path_factory):
     import torch
 
-    selected = [item.callspec.params["case"] for item in request.session.items
-                if item.module is sys.modules[__name__] and hasattr(item, "callspec")]
+    selected = selected_cases(request.session.items)
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
     devices = visible.split(",") if visible is not None else [str(i) for i in range(torch.cuda.device_count())]
     assert devices and all(d.strip() and d != "-1" for d in devices), "Unified integration CI requires a visible CUDA GPU"
@@ -66,10 +65,17 @@ def unified_runs(request, tmp_path_factory):
         yield {case.id: pool.submit(execute, case) for case in selected}
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda case: case.id)
-def test_public_build_relocate_and_inference(case, unified_runs):
+def check_case_result(case, unified_runs):
     code, folder = unified_runs[case.id].result()
     log = (folder / "worker.log").read_text(errors="replace")
     assert code == 0, f"{case.id}: exit={code}; full log: {folder / 'worker.log'}\n{log[-10000:]}"
     result = json.loads((folder / "result.json").read_text())
     assert result["passed"] and result["stage"] == "complete", result
+
+
+def selected_cases(items):
+    """Collect the selected model cases once, independent of their test module."""
+    cases = [item.callspec.params.get("case") for item in items if hasattr(item, "callspec")]
+    cases = [case for case in cases if isinstance(case, UnifiedCase)]
+    assert len({case.id for case in cases}) == len(cases), "Duplicate selected unified cases"
+    return cases

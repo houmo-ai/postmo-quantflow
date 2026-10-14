@@ -333,10 +333,20 @@ this is not a full MiniCPM vision/export/runtime correctness suite.
 
 ## Unified model and variant regressions
 
-`test_unified_small_models.py` explicitly enumerates all 31 registered models
-and 51 variants. `test_unified_small_model_coverage.py` fails if the catalog and
-this list diverge, or their dependency profiles cannot share Transformers
-5.16.1. Each selected case runs `build_model`, moves the artifact, removes its
+Each `test_unified_model_<model>.py` declares its model, preparation module and
+variants in a literal `CASE_SPEC`, with its own `.impact.json`. `_unified_cases.py`
+discovers these declarations without importing models. There is no manually
+maintained total count or second model inventory. `test_unified_small_model_coverage.py`
+compares these independent executable cases with the registered recipe variants,
+checks their real pytest collection, and validates the shared Transformers 5.16.1
+environment.
+
+Add a model's case and impact beside the existing model files; reuse or add a
+preparation helper in `_unified_fixtures/`. Declare every actual shared consumer.
+Changing a model's case/manifest selects that model; shared build/load and runner
+changes select all consumers. Report formatting only selects report contract tests.
+One session-scoped scheduler owns the selected cases across all model files and
+runs at most one worker per visible GPU. Each selected case runs `build_model`, moves the artifact, removes its
 generated source/checkpoint directories, and runs `inference_model` in a fresh
 process. Failures retain `worker.log` and `result.json` in pytest's temporary
 directory, including the failing stage, traceback and installed versions.

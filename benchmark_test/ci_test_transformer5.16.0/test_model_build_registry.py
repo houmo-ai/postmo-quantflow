@@ -13,39 +13,9 @@ from xhmodel_merak.model_catalog import list_recipes, resolve_workflow_config
 from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_format_spec
 
 
-EXPECTED_VARIANTS = {
-    "deepseek-v4-flash-0731": ["full", "dspark"],
-    "qwen-image-2.1": ["full"],
-    "macaron-v1-tall": ["full", "lora"],
-    "minicpm-v-4.7-1b": ["full"],
-    "minicpm-v-4.7-35b-a3b": ["full"],
-    "minicpm5-2.6b": ["full"],
-    "qwen3.5-0.8b": ["full"],
-    "qwen3.5-2b": ["full"],
-    "qwen3.5-4b": ["full"],
-    "qwen3.5-9b": ["full", "mtp", "dflash"],
-    "qwen3.6-27b": ["full", "mtp", "dflash"],
-    "qwen3.8-27b": ["full", "mtp", "dflash2"],
-    "qwen3.6-35b-a3b": ["full", "mtp", "dflash", "lora", "lora_mtp"],
-    "ornith-1.0-35b-a3b": ["full"],
-    "qwen3.5-122b-a10b": ["full", "mtp", "dflash"],
-    "qwen3-next-80b-a3b": ["full", "mtp"],
-    "gemma4-12b-unified": ["full", "mtp"],
-    "gemma4-e2b": ["full", "mtp"],
-    "gemma4-e4b": ["full", "mtp"],
-    "gemma4-31b": ["full", "mtp"],
-    "gemma4-26b-a4b": ["full", "mtp"],
-    "ling-3.0-flash": ["full"],
-    "paddleocr-vl-1.6": ["full"],
-    "glm-5.3-flash": ["full"],
-    "minimax-h3-fl2va": ["full"],
-    "pi0.5-libero": ["lerobot-h50"],
-    "kokoro-82m-v1.1-zh": ["full"],
-    "moss-transcribe-diarize-0.9b": ["full"],
-    "wemm-embedding-2b": ["full"],
-    "wemm-embedding-4b": ["full"],
-    "wemm-embedding-9b": ["full"],
-}
+from _unified_cases import MODELS
+
+EXPECTED_VARIANTS = {model: list(variants) for model, (_, variants) in MODELS.items()}
 
 
 def test_registry_exposes_the_stable_cross_task_matrix():

@@ -13,7 +13,7 @@ from xhmodel_merak.model_catalog.dependencies import DependencySpec, dependency_
 
 
 def test_all_registered_variants_have_explicit_dependency_profiles():
-    count = 0
+    assert list_recipes(), "The public model catalog must not be empty"
     for recipe in list_recipes():
         description = describe_model(recipe.model_id, full=True)
         profiles = description["dependencies"]["profiles"]
@@ -25,9 +25,7 @@ def test_all_registered_variants_have_explicit_dependency_profiles():
             assert profile["status"] == "blocked_distribution"
             assert not profile["validation"]["clean_install"]
             assert set(profile["quantization"]) == set(recipe.quant_methods)
-            count += 1
         assert "dependencies" not in describe_model(recipe.model_id)
-    assert count == 51
 
 
 def test_dependencies_are_the_only_recipe_version_declaration():

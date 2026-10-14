@@ -1,8 +1,9 @@
 # Copyright 2026 HOUMO AI
 # SPDX-License-Identifier: Apache-2.0
-"""Explicit public-variant inventory; adding a recipe must add a real case."""
-
+"""Discover explicit cases without importing tests or production recipes."""
+import ast
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -10,43 +11,48 @@ class UnifiedCase:
     model_id: str
     variant: str
     fixture: str
+    preparation: str
+    owner: str
 
     @property
     def id(self):
         return f"{self.model_id}/{self.variant}"
 
+    @property
+    def node_id(self):
+        return f"{self.owner}::test_public_build_relocate_and_inference[{self.id}]"
 
-MODELS = {
-    "deepseek-v4-flash-0731": ("deepseek_v4", ("full", "dspark")),
-    "gemma4-12b-unified": ("gemma_unified", ("full", "mtp")),
-    "gemma4-26b-a4b": ("gemma_moe", ("full", "mtp")),
-    "gemma4-31b": ("gemma_dense", ("full", "mtp")),
-    "gemma4-e2b": ("gemma_e2b", ("full", "mtp")),
-    "gemma4-e4b": ("gemma_e4b", ("full", "mtp")),
-    "glm-5.3-flash": ("glm", ("full",)),
-    "kokoro-82m-v1.1-zh": ("kokoro", ("full",)),
-    "ling-3.0-flash": ("ling", ("full",)),
-    "macaron-v1-tall": ("macaron", ("full", "lora")),
-    "minicpm-v-4.7-1b": ("minicpm_v47", ("full",)),
-    "minicpm-v-4.7-35b-a3b": ("minicpm_v47", ("full",)),
-    "minicpm5-2.6b": ("minicpm", ("full",)),
-    "minimax-h3-fl2va": ("minimax", ("full",)),
-    "moss-transcribe-diarize-0.9b": ("moss", ("full",)),
-    "ornith-1.0-35b-a3b": ("qwen_moe", ("full",)),
-    "paddleocr-vl-1.6": ("paddleocr", ("full",)),
-    "pi0.5-libero": ("pi05", ("lerobot-h50",)),
-    "qwen-image-2.1": ("qwen_image21", ("full",)),
-    "qwen3-next-80b-a3b": ("qwen_next", ("full", "mtp")),
-    "qwen3.5-0.8b": ("qwen_dense", ("full",)),
-    "qwen3.5-122b-a10b": ("qwen_moe", ("full", "mtp", "dflash")),
-    "qwen3.5-2b": ("qwen_dense", ("full",)),
-    "qwen3.5-4b": ("qwen_dense", ("full",)),
-    "qwen3.5-9b": ("qwen_dense", ("full", "mtp", "dflash")),
-    "qwen3.6-27b": ("qwen_dense", ("full", "mtp", "dflash")),
-    "qwen3.6-35b-a3b": ("qwen_moe", ("full", "mtp", "dflash", "lora", "lora_mtp")),
-    "qwen3.8-27b": ("qwen_dense", ("full", "mtp", "dflash2")),
-    "wemm-embedding-2b": ("qwen_dense", ("full",)),
-    "wemm-embedding-4b": ("qwen_dense", ("full",)),
-    "wemm-embedding-9b": ("qwen_dense", ("full",)),
-}
-CASES = tuple(UnifiedCase(mid, variant, fixture) for mid, (fixture, variants) in MODELS.items() for variant in variants)
+
+def discover_cases(directory):
+    cases = []
+    models = set()
+    for path in sorted(Path(directory).glob("test_unified_model_*.py")):
+        declarations = [node.value for node in ast.parse(path.read_text(), filename=str(path)).body
+                        if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "CASE_SPEC" for target in node.targets)]
+        if len(declarations) != 1:
+            raise ValueError(f"{path}: expected one literal CASE_SPEC")
+        spec = ast.literal_eval(declarations[0])
+        if not isinstance(spec, tuple) or len(spec) != 4:
+            raise ValueError(f"{path}: CASE_SPEC must be (model_id, fixture, preparation, variants)")
+        model_id, fixture, preparation, variants = spec
+        if (not all(isinstance(value, str) and value for value in spec[:3])
+                or not isinstance(variants, tuple) or not variants
+                or not all(isinstance(value, str) and value for value in variants)):
+            raise ValueError(f"{path}: invalid CASE_SPEC")
+        if model_id in models or len(set(variants)) != len(variants):
+            raise ValueError(f"{path}: duplicate model or variant declaration")
+        models.add(model_id)
+        cases.extend(UnifiedCase(model_id, variant, fixture, preparation, path.name) for variant in variants)
+    if not cases:
+        raise ValueError(f"{directory}: no unified model cases")
+    return tuple(cases)
+
+
+CASES = discover_cases(Path(__file__).parent)
+MODELS = {case.model_id: (case.fixture, tuple(c.variant for c in CASES if c.model_id == case.model_id))
+          for case in CASES}
+
+
+def cases_for(path):
+    return tuple(case for case in CASES if case.owner == Path(path).name)
