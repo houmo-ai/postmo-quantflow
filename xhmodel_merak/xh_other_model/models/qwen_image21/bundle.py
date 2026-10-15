@@ -5,6 +5,7 @@
 import json
 
 from .artifacts import bundle_path, read_dit_metadata
+from .sampling import BASE_MODEL_ID, TURBO_MODEL_ID, validate_sampling_config
 
 
 def read_bundle_metadata(root):
@@ -72,6 +73,16 @@ def read_bundle_metadata(root):
         bundle_path(root, entry["path"])
     for key in ("embedding", "text_config", "vae_config", "scheduler_config", "transformer_config"):
         bundle_path(root, meta["resources"][key])
+    model_id = meta.get("model_id", BASE_MODEL_ID)
+    pipeline_path = meta["resources"].get("pipeline_config")
+    if model_id == TURBO_MODEL_ID and pipeline_path is None:
+        raise ValueError("Turbo bundle requires the pipeline_config sampling resource")
+    if pipeline_path is not None:
+        pipeline_config = json.loads(bundle_path(root, pipeline_path).read_text())
+        scheduler_config = json.loads(bundle_path(root, meta["resources"]["scheduler_config"]).read_text())
+        validate_sampling_config(pipeline_config, scheduler_config, model_id=model_id)
+    elif model_id != BASE_MODEL_ID:
+        raise ValueError(f"unsupported Qwen-Image model_id: {model_id}")
     files = meta["processor_files"]
     if not files or len(files) != len(set(files)):
         raise ValueError("processor resource files must be nonempty and unique")
@@ -160,4 +171,7 @@ def load_runtime(root, *, device="cuda:0"):
         config("scheduler_config"),
         rope,
         capacity,
+        sample_sigmas=(
+            config("pipeline_config").get("sample_sigmas") if "pipeline_config" in meta["resources"] else None
+        ),
     )

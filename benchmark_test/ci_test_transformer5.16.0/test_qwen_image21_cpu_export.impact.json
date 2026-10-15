@@ -29,7 +29,8 @@
         "xhmodel_merak/xh_other_model/models/qwen_image21/capacity.py",
         "xhmodel_merak/xh_other_model/models/qwen_image21/canvas_vae.py",
         "xhmodel_merak/xh_other_model/models/qwen_image21/vision_graph.py",
-        "xhmodel_merak/xh_other_model/models/qwen_image21/segment_runtime.py"
+        "xhmodel_merak/xh_other_model/models/qwen_image21/segment_runtime.py",
+        "xhmodel_merak/xh_other_model/models/qwen_image21/sampling.py"
       ]
     }
   ]

@@ -14,7 +14,8 @@ def main(argv=None):
     parser.add_argument("--image", action="append", default=[], help="参考图路径；数量和尺寸受包内容量限制")
     parser.add_argument("--height", type=int, help="输出高度；不传时使用包内配置")
     parser.add_argument("--width", type=int, help="输出宽度；不传时使用包内配置")
-    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--steps", type=int, help="模型没有固定采样序列时使用的步数")
+    parser.add_argument("--sigmas", type=float, nargs="+", help="显式覆盖模型的采样序列")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--negative-prompt", help="CFG 负向提示词，可为空字符串")
     parser.add_argument("--guidance-scale", type=float, default=1.0)
@@ -24,9 +25,9 @@ def main(argv=None):
     if args.guidance_scale > 1 and args.negative_prompt is None:
         parser.error("--guidance-scale above 1 requires --negative-prompt")
 
-    inputs = dict(prompt=args.prompt, images=args.image, steps=args.steps, seed=args.seed,
+    inputs = dict(prompt=args.prompt, images=args.image, seed=args.seed,
                   guidance_scale=args.guidance_scale)
-    for name in ("height", "width", "negative_prompt"):
+    for name in ("height", "width", "negative_prompt", "steps", "sigmas"):
         value = getattr(args, name)
         if value is not None:
             inputs[name] = value

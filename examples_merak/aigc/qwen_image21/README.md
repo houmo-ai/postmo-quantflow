@@ -1,4 +1,80 @@
-# Qwen-Image-2.1 构建、推理与浮点诊断
+# Qwen-Image-2.1 / Turbo 构建与推理
+
+## Qwen-Image-2.1-Turbo
+
+Turbo 使用独立的模型 ID `qwen-image-2.1-turbo`，共享普通版的六图实现与容量规则。
+本机已在既有 conda 环境 `xhquant_55` 中补齐构建和推理依赖，直接使用正式仓库
+`/data01/home/jing.huang/xh2modelzoo` 和 `/data01/home/jing.huang/xhquanttool`。
+从仓库根运行；Diffusers 和 Hub 使用与普通版相同的固定版本：
+
+```bash
+conda activate xhquant_55
+cd /data01/home/jing.huang/xh2modelzoo
+python benchmark_test/ci_test_transformer5.16.0/prepare_dependencies.py \
+  --model-id qwen-image-2.1-turbo --packages diffusers huggingface-hub --install
+python -m examples_merak.aigc.qwen_image21.unified \
+  --model-id qwen-image-2.1-turbo \
+  --model-dir /data01/datasets/Qwen-Image-2.1-Turbo \
+  --artifact-dir work_dirs/qwen_image21_turbo/release_w8a16 \
+  --quant-type w8a16_sefp --device cuda:0 \
+  --prompt 'A red ceramic teapot on a wooden table.' \
+  --seed 42 --output work_dirs/qwen_image21_turbo/generated.png
+```
+
+构建目录必须不存在。省略 `--quant-type` 使用 W16A16，W8A8 使用 `w8a8_sefp`；
+全部组件从 Turbo checkpoint 新鲜导出，不复用普通版的量化图。
+本地来源目录中的 ModelScope 缓存 `.msc` 若不可读，会导致构建来源哈希失败；
+此时应提供只含 `model_index.json`、`processor`、`scheduler`、`text_encoder`、`transformer`、`vae`
+的可读副本。SDK 需要包含 `b514c978`（2026-10-09）的 Qwen Image 1MP 支持，
+本次使用 `develop` 的 `b4c7f631`；请核对[接入记录中的 SDK 条件及验证范围](../../../docs/modeling/structures/qwen-image21-turbo.md)。
+已有包推理时省略 `--model-dir` 和 `--quant-type`，保留 `--model-id qwen-image-2.1-turbo`。
+编辑增加 `--image reference.png`，更改输出尺寸增加 `--height 768 --width 1376`。
+支持的尺寸、单参考图、RGBA 输出与普通版一致，均受发布包容量限制。
+
+当前依赖与普通版一致：Diffusers 0.41.0、Hub 1.33.0、Transformers 5.16.1；
+请通过上面的 recipe 准备命令安装。本地既有 `xhquant_55` 的历史环境验证记录位于
+`work_dirs/qwen_image21_turbo_validation_20261012/xhquant_55_environment/`，
+迁移到最新 develop 后的验证记录另见接入记录。
+
+```python
+from xhmodel_merak.model_build import build_model
+from xhmodel_merak.model_inference import inference_model
+
+build = build_model(
+    model_id="qwen-image-2.1-turbo",
+    model_dir="/data01/datasets/Qwen-Image-2.1-Turbo",
+    output_dir="work_dirs/qwen_image21_turbo/api_release",
+    device="cuda:0",
+    deployment_precision={"image": "w8a16_sefp"},
+)
+result = inference_model(
+    artifact_dir=build.output_dir,
+    expected_model_id="qwen-image-2.1-turbo",
+    device="cuda:0",
+    inputs={"prompt": "A red ceramic teapot.", "seed": 42},
+)
+assert result.stats["steps"] == 8
+```
+
+Turbo 的默认 8 步来自 checkpoint 的非均匀 `sample_sigmas`，仅把普通版设为 `steps=8`
+不能复现它的调度。该序列与 scheduler 配置随包保存，搬移后仍可独立推理。
+显式 `sigmas`（CLI 的 `--sigmas`）覆盖默认序列，须严格递减、在 `(0,1]` 内且不包含终点零。
+指定 `steps` 不改变 Turbo 的固定序列；`stats["steps"]` 始终报告实际步数。
+普通版仍默认 20 步。当前固定 Diffusers 版本的原生对照需显式传入 checkpoint sigma，
+部署 runtime 已直接支持随包读取，细节与实际验证范围见[Turbo 接入记录](../../../docs/modeling/structures/qwen-image21-turbo.md)。
+
+配置入口沿用 `configured`，Turbo 必须选用 `qwen_image21_turbo_1mp_*.yaml`，
+其中 `export.model_id` 明确标记 Turbo。公开构建会拒绝把 Turbo checkpoint 当作普通版发布。
+
+完整权重 W8A16 六图包已通过 GPU HMONNX 生成、编辑、多尺寸、CFG 与重复请求检查，
+位于 `work_dirs/qwen_image21_all_configs_export_20261013/qwen_image21_turbo_1mp_w8a16/`。
+seed42、checkpoint 八步、CFG1 的 1024×1024 文生图与 768×1376 编辑，
+对原生 FP16 的 RGB PSNR 分别为 36.18/31.96 dB；
+`work_dirs/qwen_image21_turbo_validation_20261012/` 下的
+`fp16_w8a16_comparison.png` 和 `real_report.json` 保存图片对照及数值。
+W16A16/W8A16/W8A8 均通过六图真实小模型测试；完整权重的本次数值结论限于 W8A16 和上述样本。
+
+## 普通版与浮点诊断
 
 已接入 Merak 统一构建与推理；浮点诊断仍可用于排查数值问题。
 结构、验证范围和产物记录见[接入记录](../../../docs/modeling/structures/qwen-image21.md)。

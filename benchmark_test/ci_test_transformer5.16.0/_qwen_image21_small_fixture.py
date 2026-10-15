@@ -1,5 +1,6 @@
 """Offline native Qwen-Image weights and processor, retaining all six graph roles."""
 
+import json
 from dataclasses import replace
 
 
@@ -41,13 +42,18 @@ def prepare_qwen_image21(source, root, catalog, recipe, monkeypatch):
             latents_mean=[0] * 4,
             latents_std=[1] * 4,
         ).eval().save_pretrained(source / "vae")
+    turbo = recipe.model_id == "qwen-image-2.1-turbo"
+    pipeline_config = {"_class_name": "QwenImage21Pipeline"}
+    if turbo:
+        pipeline_config["sample_sigmas"] = [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568]
+    (source / "model_index.json").write_text(json.dumps(pipeline_config))
     FlowMatchEulerDiscreteScheduler(
         base_image_seq_len=256,
         base_shift=0.5,
         max_image_seq_len=8192,
         max_shift=0.9,
-        shift_terminal=0.02,
-        use_dynamic_shifting=True,
+        shift_terminal=None if turbo else 0.02,
+        use_dynamic_shifting=not turbo,
     ).save_pretrained(source / "scheduler")
     vocab = {
         "[UNK]": 0,
@@ -99,7 +105,7 @@ def prepare_qwen_image21(source, root, catalog, recipe, monkeypatch):
             recipe,
             default_profile="output64x32-reference32x64",
             profiles=("output64x32-reference32x64",),
-            artifact_name_template="hmquant_xh2_qwen_image21_{deployment_precision}_output64x32_reference32x64",
+            artifact_name_template=f"hmquant_xh2_{recipe.export_name}_{{deployment_precision}}_output64x32_reference32x64",
             config_replacements=(
                 *recipe.config_replacements,
                 ("export.output_size", [64, 32]),

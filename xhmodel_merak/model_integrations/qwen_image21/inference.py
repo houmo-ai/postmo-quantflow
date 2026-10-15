@@ -26,6 +26,8 @@ class _ImageAdapter:
         meta, _ = validate_runtime(
             root, recipe.components, resolve_file=lambda path, field: artifact_file(root, manifest, path, field)
         )
+        if meta.get("model_id", "qwen-image-2.1") != recipe.model_id:
+            raise ValueError("runtime model_id disagrees with the requested model identity")
         if manifest.get("parameters", {}).get("precision", {}).get("deployment") != {"image": meta["quant_type"]}:
             raise ValueError("runtime quant_type disagrees with Manifest deployment precision")
 
@@ -34,8 +36,11 @@ class _ImageAdapter:
         from PIL import Image
 
         from xhmodel_merak.xh_other_model.models.qwen_image21.bundle import load_runtime
+        from xhmodel_merak.xh_other_model.models.qwen_image21.sampling import validate_sigmas
 
         values = validate_inputs(recipe, inputs)
+        if "sigmas" in values:
+            values["sigmas"] = validate_sigmas(values["sigmas"])
         meta, _ = validate_runtime(
             root, components, resolve_file=lambda path, field: artifact_file(root, manifest, path, field)
         )
@@ -52,6 +57,7 @@ class _ImageAdapter:
         try:
             image, _ = runtime.generate(**values, images=images)
             latency = time.perf_counter() - started
+            actual_steps = runtime.num_inference_steps
         finally:
             del runtime
         return ImageInferenceResult(
@@ -68,7 +74,7 @@ class _ImageAdapter:
             width=image.width,
             height=image.height,
             seed=values["seed"],
-            stats={"steps": values["steps"], "reference_count": len(images)},
+            stats={"steps": actual_steps, "reference_count": len(images)},
         )
 
 

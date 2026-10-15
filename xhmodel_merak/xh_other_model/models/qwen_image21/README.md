@@ -1,4 +1,18 @@
-# Qwen-Image-2.1
+# Qwen-Image-2.1 / Turbo
+
+统一模型 ID 分别为 `qwen-image-2.1` 和 `qwen-image-2.1-turbo`。
+Turbo 复用本目录的六图结构、容量与 cache ABI，从 Turbo checkpoint 独立导出全部学习组件；
+不复用普通版已量化权重。三档配置为 `qwen_image21_turbo_1mp_w16.yaml`、
+`qwen_image21_turbo_1mp_w8a16.yaml`、`qwen_image21_turbo_1mp_w8.yaml`。
+构建、加载及使用方法见[统一示例](../../../../examples_merak/aigc/qwen_image21/README.md)。
+
+Turbo 默认采样读取 checkpoint 的 `model_index.json.sample_sigmas`，共 8 步；
+scheduler 使用 `use_dynamic_shifting=false`、`shift_terminal=null`、`shift=1`。
+显式 `sigmas` 优先于 checkpoint 序列；仅指定 `steps` 不会重采样 Turbo 的固定序列。
+sigma 须严格递减，取值在 `(0,1]`，不包含终点零（由 scheduler 添加）。
+普通版没有固定序列，仍按 `steps` 生成线性 sigma 并应用原 scheduler 的动态 shift。
+部署包收录 pipeline 与 scheduler JSON，加载不依赖原始模型目录；公开推理的
+`stats["steps"]` 返回实际执行步数。具体验证范围见[Turbo 接入记录](../../../../docs/modeling/structures/qwen-image21-turbo.md)。
 
 默认 1MP 包含六张固定 shape 学习组件图：text_encode、visual、vae_encode、vae_decode、
 denoise_text、denoise_image。batch 为 1；实际输入输出尺寸可在容量内变化，无需新增图。

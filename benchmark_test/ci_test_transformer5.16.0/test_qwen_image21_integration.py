@@ -167,7 +167,7 @@ def test_publication_handoff_relocation_and_manifest_inventory(bundle):
 
     stage = bundle.parent
     quant_type = json.loads((bundle / "runtime_meta_info.json").read_text())["quant_type"]
-    plan = SimpleNamespace(components=("image",), deployment_precision={"image": quant_type})
+    plan = SimpleNamespace(model_id="qwen-image-2.1", components=("image",), deployment_precision={"image": quant_type})
     assert normalize_export(stage, SimpleNamespace(work_dir=str(bundle)), plan) is None
     metadata = validate_artifact(stage, plan)
     assert not (stage / "export_meta_info.json").exists()
@@ -194,7 +194,8 @@ def test_publication_rejects_inconsistent_export_inventory(bundle):
     (bundle / "export_meta_info.json").write_text("{}")
     with pytest.raises(ValueError, match="inventory"):
         quant_type = json.loads((bundle / "runtime_meta_info.json").read_text())["quant_type"]
-        validate_artifact(bundle, SimpleNamespace(components=("image",), deployment_precision={"image": quant_type}))
+        validate_artifact(bundle, SimpleNamespace(model_id="qwen-image-2.1", components=("image",),
+                                                  deployment_precision={"image": quant_type}))
 
 
 def test_publication_rejects_precision_mismatch(bundle):
@@ -204,7 +205,8 @@ def test_publication_rejects_precision_mismatch(bundle):
     quant_type = json.loads((bundle / "runtime_meta_info.json").read_text())["quant_type"]
     wrong_type = "w8a8_sefp" if quant_type == "w16a16_sefp" else "w16a16_sefp"
     with pytest.raises(ValueError, match="planned deployment precision"):
-        validate_artifact(bundle, SimpleNamespace(components=("image",), deployment_precision={"image": wrong_type}))
+        validate_artifact(bundle, SimpleNamespace(model_id="qwen-image-2.1", components=("image",),
+                                                  deployment_precision={"image": wrong_type}))
     manifest = {
         "artifact": {
             "files": [{"path": path.relative_to(bundle).as_posix()} for path in bundle.rglob("*") if path.is_file()]

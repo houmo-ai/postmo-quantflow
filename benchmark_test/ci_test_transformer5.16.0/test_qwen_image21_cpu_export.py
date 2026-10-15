@@ -166,6 +166,7 @@ def test_two_cpu_exported_graphs_preserve_cache_abi_and_request_isolation(
         ("w8a8_sefp", 8, 8),
     ],
 )
+@pytest.mark.parametrize("model_id", ["qwen-image-2.1", "qwen-image-2.1-turbo"])
 def test_public_six_graph_build_relocate_generate_edit_and_repeat(
     tmp_path,
     monkeypatch,
@@ -173,6 +174,7 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
     quant_type,
     weight_bits,
     activation_bits,
+    model_id,
 ):
     import numpy as np
     from _qwen_image21_small_fixture import prepare_qwen_image21
@@ -184,9 +186,9 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
     catalog = get_catalog()
     source_dir = tmp_path / "source"
     with restore_model_initialization_state():
-        inputs = prepare_qwen_image21(source_dir, tmp_path, catalog, catalog._recipes["qwen-image-2.1"], monkeypatch)
+        inputs = prepare_qwen_image21(source_dir, tmp_path, catalog, catalog._recipes[model_id], monkeypatch)
         result = build_model(
-            model_id="qwen-image-2.1",
+            model_id=model_id,
             model_dir=str(source_dir),
             output_dir=str(tmp_path / "artifact"),
             device="cuda:0",
@@ -221,9 +223,14 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
             if node.op_type in {"Linear", "Conv2d"}:
                 expected_type = onnx.TensorProto.INT8 if weight_bits == 8 else onnx.TensorProto.INT16
                 assert initializers[node.input[1]].data_type == expected_type
-    arguments = dict(artifact_dir=str(moved), expected_model_id="qwen-image-2.1", device="cuda:0")
+    arguments = dict(artifact_dir=str(moved), expected_model_id=model_id, device="cuda:0")
     generated = inference_model(**arguments, inputs=inputs)
     assert generated.image.shape == (64, 32, 4) and generated.image.dtype == np.uint8
+    assert generated.stats["steps"] == (8 if model_id.endswith("-turbo") else inputs["steps"])
+    if model_id.endswith("-turbo"):
+        overridden = inference_model(**arguments, inputs={**inputs, "sigmas": [1.0, 0.5]})
+        assert overridden.stats["steps"] == 2
+        assert not np.array_equal(overridden.image, generated.image)
     edited = inference_model(
         **arguments,
         inputs={
@@ -256,12 +263,22 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
 
     cli_generated = tmp_path / "cli" / "generated.png"
     unified.main([
+        "--model-id", model_id,
         "--artifact-dir", str(moved), "--prompt", inputs["prompt"], "--steps", str(inputs["steps"]),
         "--seed", str(inputs["seed"]), "--device", "cuda:0", "--output", str(cli_generated),
     ])
     with Image.open(cli_generated) as image:
         assert image.mode == "RGBA"
         np.testing.assert_array_equal(image, generated.image)
+    if model_id.endswith("-turbo"):
+        cli_override = tmp_path / "cli" / "sigma_override.png"
+        unified.main([
+            "--model-id", model_id, "--artifact-dir", str(moved), "--prompt", inputs["prompt"],
+            "--sigmas", "1", "0.5", "--seed", str(inputs["seed"]), "--device", "cuda:0",
+            "--output", str(cli_override),
+        ])
+        with Image.open(cli_override) as image:
+            np.testing.assert_array_equal(image, overridden.image)
     cli_edit = tmp_path / "cli" / "edited.png"
     generate_image.main([
         "--artifact-dir", str(moved), "--prompt", inputs["prompt"], "--steps", str(inputs["steps"]),

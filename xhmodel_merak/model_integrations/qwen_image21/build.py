@@ -35,8 +35,11 @@ def sanitize_artifact(stage_path, plan):
 
 def validate_artifact(stage_path, plan):
     root = stage_path.resolve()
-    meta, entries = validate_runtime(root, plan.components,
-                                     resolve_file=lambda path, field: confined_file(root, path, field))
+    meta, entries = validate_runtime(
+        root, plan.components, resolve_file=lambda path, field: confined_file(root, path, field)
+    )
+    if meta.get("model_id", "qwen-image-2.1") != plan.model_id:
+        raise ValueError("runtime model_id disagrees with the planned model identity")
     if plan.deployment_precision != {"image": meta["quant_type"]}:
         raise ValueError("runtime quant_type disagrees with planned deployment precision")
     # Direct workflow users need this index too. The public publisher reserves
@@ -46,6 +49,11 @@ def validate_artifact(stage_path, plan):
         raise ValueError("workflow export inventory disagrees with runtime metadata")
     validate_export_info(root, entries)
     index.unlink()
-    return dict(metadata_file="runtime_meta_info.json", export_entries=entries,
-                runtime_kind="qwen_image21", components=list(plan.components),
-                requires_source=False, loadable=True)
+    return dict(
+        metadata_file="runtime_meta_info.json",
+        export_entries=entries,
+        runtime_kind="qwen_image21",
+        components=list(plan.components),
+        requires_source=False,
+        loadable=True,
+    )

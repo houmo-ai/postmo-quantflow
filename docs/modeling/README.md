@@ -18,6 +18,7 @@
 | expert 权重、路由与量化载荷 | [MoE](structures/moe.md) |
 | 视觉 token 档位、多图与 Host 边界 | [多模态与多组件](structures/multimodal.md) |
 | Qwen-Image-2.1 的特征边界、共享调制、前缀 KV 与浮点诊断 | [接入记录（进行中）](structures/qwen-image21.md) |
+| Qwen-Image-2.1-Turbo 的 8 步采样、模型身份与部署验证 | [Turbo 接入记录](structures/qwen-image21-turbo.md) |
 | M50、YH、XH3 如何选择已有路径或扩展 | [目标设备索引](targets/README.md) |
 
 算子页拥有图表达和数值语义，结构页描述组合关系与状态，目标页只记录设备差异和证据入口。

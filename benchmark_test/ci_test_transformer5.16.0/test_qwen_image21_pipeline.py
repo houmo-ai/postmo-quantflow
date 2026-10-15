@@ -10,7 +10,7 @@ import torch
 from xhmodel_merak.xh_other_model.models.qwen_image21.pipeline import ImageRuntime
 
 
-def runtime_fixture():
+def runtime_fixture(**runtime_options):
     # These deterministic graph ports isolate Host behavior from learned model
     # accuracy. In particular, both requests share one mutable head output,
     # exactly the ownership hazard of an HMONNX session used for CFG.
@@ -59,6 +59,7 @@ def runtime_fixture():
             reference_capacity=4,
             visual_patch_capacity=4,
         ),
+        **runtime_options,
     )
     return runtime, requests, decoded
 

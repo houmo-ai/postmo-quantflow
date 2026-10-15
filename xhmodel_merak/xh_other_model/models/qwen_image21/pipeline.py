@@ -10,6 +10,7 @@ from PIL import Image
 
 from .capacity import fit_reference_size, validate_capacity_config, validate_size
 from .layout import prepare_layout
+from .sampling import validate_sigmas
 
 
 class ImageRuntime:
@@ -20,12 +21,15 @@ class ImageRuntime:
     components are supplied deployment sessions, never HF model fallbacks.
     """
 
-    def __init__(self, encoder, denoiser, vae_encoder, vae_decoder, vae_config, scheduler_config, rope, capacity):
+    def __init__(self, encoder, denoiser, vae_encoder, vae_decoder, vae_config, scheduler_config, rope, capacity,
+                 *, sample_sigmas=None):
         self.encoder = encoder
         self.denoiser = denoiser
         self.vae_encoder, self.vae_decoder = vae_encoder, vae_decoder
         self.capacity = validate_capacity_config(capacity)
         self.scheduler_config = dict(scheduler_config)
+        self.sample_sigmas = None if sample_sigmas is None else validate_sigmas(sample_sigmas, field="sample_sigmas")
+        self.num_inference_steps = 0
         self.rope = rope
         self.device = torch.device(denoiser.device)
         channels = denoiser.meta["latent_channels"]
@@ -62,6 +66,7 @@ class ImageRuntime:
         width=None,
         images=None,
         steps=20,
+        sigmas=None,
         seed=42,
         negative_prompt=None,
         guidance_scale=1.0,
@@ -71,6 +76,9 @@ class ImageRuntime:
 
         if type(steps) is not int or steps <= 0:
             raise ValueError("steps must be a positive integer")
+        selected_sigmas = validate_sigmas(sigmas) if sigmas is not None else self.sample_sigmas
+        if selected_sigmas is None:
+            selected_sigmas = np.linspace(1.0, 1 / steps, steps)
         height = self.capacity["output_size"][0] if height is None else height
         width = self.capacity["output_size"][1] if width is None else width
         validate_size((height, width), self.capacity["canvas_size"], self.capacity["target_capacity"])
@@ -130,7 +138,8 @@ class ImageRuntime:
             raise ValueError("scheduler sequence-length bounds must be increasing")
         slope = (config.get("max_shift", 1.15) - config.get("base_shift", 0.5)) / (maximum - base)
         mu = slope * (latents.shape[1] - base) + config.get("base_shift", 0.5)
-        scheduler.set_timesteps(sigmas=np.linspace(1.0, 1 / steps, steps), device=self.device, mu=mu)
+        scheduler.set_timesteps(sigmas=selected_sigmas, device=self.device, mu=mu)
+        self.num_inference_steps = len(scheduler.timesteps)
         scheduler.set_begin_index(0)
         for index, timestep in enumerate(scheduler.timesteps):
             model_time = timestep.expand(1).to(latents.dtype) / 1000

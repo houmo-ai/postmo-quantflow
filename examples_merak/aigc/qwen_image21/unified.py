@@ -6,6 +6,7 @@ from pathlib import Path
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-id", choices=("qwen-image-2.1", "qwen-image-2.1-turbo"), default="qwen-image-2.1")
     parser.add_argument("--artifact-dir", required=True)
     parser.add_argument("--model-dir", help="Build a new artifact from this Diffusers checkpoint first")
     parser.add_argument(
@@ -17,7 +18,8 @@ def main(argv=None):
     parser.add_argument("--image", action="append", default=[], help="Reference image fitted to the published capacity")
     parser.add_argument("--height", type=int, help="Output height, a multiple of 32; defaults to package metadata")
     parser.add_argument("--width", type=int, help="Output width, a multiple of 32; defaults to package metadata")
-    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--steps", type=int, help="Sampling steps when the checkpoint has no fixed sigma grid")
+    parser.add_argument("--sigmas", type=float, nargs="+", help="Override the checkpoint sampling grid")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--negative-prompt", help="CFG negative prompt; an empty string is allowed")
     parser.add_argument(
@@ -39,7 +41,7 @@ def main(argv=None):
     artifact_dir = str(Path(args.artifact_dir).expanduser().resolve())
     if args.model_dir:
         build = build_model(
-            model_id="qwen-image-2.1",
+            model_id=args.model_id,
             model_dir=args.model_dir,
             output_dir=artifact_dir,
             device=args.device,
@@ -47,16 +49,16 @@ def main(argv=None):
         )
         artifact_dir = build.output_dir
     inputs = dict(
-        prompt=args.prompt, images=args.image, steps=args.steps, seed=args.seed, guidance_scale=args.guidance_scale
+        prompt=args.prompt, images=args.image, seed=args.seed, guidance_scale=args.guidance_scale
     )
     if args.negative_prompt is not None:
         inputs["negative_prompt"] = args.negative_prompt
-    for name in ("height", "width"):
+    for name in ("height", "width", "steps", "sigmas"):
         if getattr(args, name) is not None:
             inputs[name] = getattr(args, name)
     result = inference_model(
         artifact_dir=artifact_dir,
-        expected_model_id="qwen-image-2.1",
+        expected_model_id=args.model_id,
         device=args.device,
         inputs=inputs,
     )

@@ -1,5 +1,8 @@
 """Declare the complete image generation/editing pipeline."""
 
+from copy import deepcopy
+from dataclasses import replace
+
 from xhmodel_merak.model_catalog.contracts import (
     AdapterSpec,
     ArtifactFormatSpec,
@@ -29,80 +32,103 @@ def register(catalog):
             ),
             provider=PROVIDER_ID,
         )
+    recipe = ModelRecipe(
+        model_id="qwen-image-2.1",
+        display_name="Qwen-Image-2.1",
+        family=PROVIDER_ID,
+        export_name="qwen_image21",
+        task="image-generation",
+        modalities=("text", "image"),
+        variants=(
+            VariantRecipe("full", "configs_merak/workflows/xh2a/other_models/qwen_image21/qwen_image21_1mp_w16.yaml"),
+        ),
+        default_precision=ResolvedPrecision(weight="w16", activation="a16"),
+        supported_precisions=(("w16", "a16"),),
+        quant_methods=(),
+        deployment_precision={"image": "w16a16_sefp"},
+        components=COMPONENTS,
+        golden_components=(),
+        deployment_precision_bindings=(
+            DeploymentPrecisionBinding(
+                components=COMPONENTS,
+                config_path="export.model.quant_scheme",
+                choices=("w16a16_sefp", "w8a16_sefp", "w8a8_sefp"),
+            ),
+        ),
+        build_adapter="qwen_image21_build",
+        inference_adapter="qwen_image21_inference",
+        artifact_format="qwen_image21",
+        default_profile="1mp-c4352",
+        artifact_name_template="hmquant_xh2_qwen_image21_{deployment_precision}_1mp_c4352",
+        profiles=("1mp-c4352",),
+        config_resolver="xhmodel_merak.model_integrations.qwen_image21.source:resolve_config",
+        dependencies=runtime_dependencies(
+            common=(
+                *IMAGE,
+                "huggingface-hub==1.33.0",
+                "diffusers==0.41.0",
+            )
+        ),
+        worker_capabilities=(
+            "diffusers.models.transformers.transformer_qwenimage21:QwenImage21Rope",
+            "diffusers.models.transformers.transformer_qwenimage21:QwenImage21Transformer2DModel",
+            "diffusers.models.autoencoders.autoencoder_kl_qwenimage21:AutoencoderKLQwenImage21",
+        ),
+        input_schema={
+            "type": "object",
+            "required": ["prompt"],
+            "additionalProperties": False,
+            "properties": {
+                "prompt": {"type": "string", "minLength": 1},
+                "images": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1},
+                    "default": [],
+                    "description": "Local RGBA/RGB references fitted to the published capacities.",
+                },
+                "height": {"type": "integer", "minimum": 32, "multipleOf": 32},
+                "width": {"type": "integer", "minimum": 32, "multipleOf": 32},
+                "steps": {"type": "integer", "minimum": 1, "default": 20},
+                "sigmas": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+                    "description": "Explicit decreasing sampling grid; overrides checkpoint sampling defaults.",
+                },
+                "seed": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1, "default": 42},
+                "negative_prompt": {"type": "string"},
+                "guidance_scale": {"type": "number", "minimum": 1, "default": 1.0},
+            },
+        },
+        output_schema={
+            "type": "object",
+            "required": ["image", "width", "height"],
+            "properties": {
+                "image": {"type": "array", "description": "H x W x 4 uint8 RGBA"},
+                "width": {"type": "integer"},
+                "height": {"type": "integer"},
+            },
+        },
+    )
+    catalog.register_recipe(recipe, provider=PROVIDER_ID)
+    turbo_inputs = deepcopy(recipe.input_schema)
+    turbo_inputs["properties"]["steps"]["default"] = 8
+    turbo_inputs["properties"]["steps"]["description"] = (
+        "Checkpoint sample_sigmas determine the eight steps unless explicit sigmas are provided."
+    )
     catalog.register_recipe(
-        ModelRecipe(
-            model_id="qwen-image-2.1",
-            display_name="Qwen-Image-2.1",
-            family=PROVIDER_ID,
-            export_name="qwen_image21",
-            task="image-generation",
-            modalities=("text", "image"),
+        replace(
+            recipe,
+            model_id="qwen-image-2.1-turbo",
+            display_name="Qwen-Image-2.1-Turbo",
+            export_name="qwen_image21_turbo",
             variants=(
                 VariantRecipe(
-                    "full", "configs_merak/workflows/xh2a/other_models/qwen_image21/qwen_image21_1mp_w16.yaml"
+                    "full", "configs_merak/workflows/xh2a/other_models/qwen_image21/qwen_image21_turbo_1mp_w16.yaml"
                 ),
             ),
-            default_precision=ResolvedPrecision(weight="w16", activation="a16"),
-            supported_precisions=(("w16", "a16"),),
-            quant_methods=(),
-            deployment_precision={"image": "w16a16_sefp"},
-            components=COMPONENTS,
-            golden_components=(),
-            deployment_precision_bindings=(
-                DeploymentPrecisionBinding(
-                    components=COMPONENTS,
-                    config_path="export.model.quant_scheme",
-                    choices=("w16a16_sefp", "w8a16_sefp", "w8a8_sefp"),
-                ),
-            ),
-            build_adapter="qwen_image21_build",
-            inference_adapter="qwen_image21_inference",
-            artifact_format="qwen_image21",
-            default_profile="1mp-c4352",
-            artifact_name_template="hmquant_xh2_qwen_image21_{deployment_precision}_1mp_c4352",
-            profiles=("1mp-c4352",),
-            config_resolver="xhmodel_merak.model_integrations.qwen_image21.source:resolve_config",
-            dependencies=runtime_dependencies(
-                common=(
-                    *IMAGE,
-                    "huggingface-hub==1.33.0",
-                    "diffusers==0.41.0",
-                )
-            ),
-            worker_capabilities=(
-                "diffusers.models.transformers.transformer_qwenimage21:QwenImage21Rope",
-                "diffusers.models.transformers.transformer_qwenimage21:QwenImage21Transformer2DModel",
-                "diffusers.models.autoencoders.autoencoder_kl_qwenimage21:AutoencoderKLQwenImage21",
-            ),
-            input_schema={
-                "type": "object",
-                "required": ["prompt"],
-                "additionalProperties": False,
-                "properties": {
-                    "prompt": {"type": "string", "minLength": 1},
-                    "images": {
-                        "type": "array",
-                        "items": {"type": "string", "minLength": 1},
-                        "default": [],
-                        "description": "Local RGBA/RGB references fitted to the published capacities.",
-                    },
-                    "height": {"type": "integer", "minimum": 32, "multipleOf": 32},
-                    "width": {"type": "integer", "minimum": 32, "multipleOf": 32},
-                    "steps": {"type": "integer", "minimum": 1, "default": 20},
-                    "seed": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1, "default": 42},
-                    "negative_prompt": {"type": "string"},
-                    "guidance_scale": {"type": "number", "minimum": 1, "default": 1.0},
-                },
-            },
-            output_schema={
-                "type": "object",
-                "required": ["image", "width", "height"],
-                "properties": {
-                    "image": {"type": "array", "description": "H x W x 4 uint8 RGBA"},
-                    "width": {"type": "integer"},
-                    "height": {"type": "integer"},
-                },
-            },
+            artifact_name_template="hmquant_xh2_qwen_image21_turbo_{deployment_precision}_1mp_c4352",
+            input_schema=turbo_inputs,
         ),
         provider=PROVIDER_ID,
     )

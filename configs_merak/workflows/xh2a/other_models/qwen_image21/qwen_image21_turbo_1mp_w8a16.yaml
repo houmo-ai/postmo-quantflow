@@ -1,0 +1,18 @@
+quant: null
+export:
+  model_id: qwen-image-2.1-turbo
+  model:
+    type: XHQwenImage21Model
+    quant_scheme:
+      target_device: XH2a
+      quant_type: w8a16_sefp
+  target_device: XH2a
+  output_size: [1024, 1024]
+  reference_size: [1024, 1024]
+  canvas_size: [1536, 1536]
+  target_capacity: 4352
+  reference_capacity: 4352
+  visual_patch_capacity: 4352
+  prompt_budget: 512
+  max_references: 1
+  max_position: 32768

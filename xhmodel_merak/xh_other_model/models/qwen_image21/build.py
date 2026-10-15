@@ -9,6 +9,8 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 
+from .sampling import BASE_MODEL_ID, MODEL_IDS, read_source_sampling
+
 
 def deployment_quant_type(config):
     """Resolve the public model QuantScheme and the older workflow export field."""
@@ -36,6 +38,8 @@ def validate_build_config(config):
         raise ValueError("Qwen-Image-2.1 requires XH2a W16A16, W8A16 or W8A8 SEFP")
     if "feature_capacity" in config or "prefix_capacity" in config:
         raise ValueError("text capacities are derived from the tokenizer; configure prompt_budget/max_references")
+    if config.get("model_id", BASE_MODEL_ID) not in MODEL_IDS:
+        raise ValueError("unsupported Qwen-Image model_id")
     return validate_capacity_config(config)
 
 
@@ -117,6 +121,8 @@ def _build_bundle(model_dir, output_dir, config, *, device):
     source_config = json.loads((source_dir / "transformer/config.json").read_text())
     if source_config.get("_class_name") != "QwenImage21Transformer2DModel":
         raise ValueError("source must be a Qwen-Image-2.1 checkpoint")
+    model_id = config.get("model_id", BASE_MODEL_ID)
+    read_source_sampling(source_dir, model_id=model_id)
     root.mkdir(parents=True, exist_ok=False)
     height, width = config["output_size"]
     ref_height, ref_width = config["reference_size"]
@@ -127,6 +133,7 @@ def _build_bundle(model_dir, output_dir, config, *, device):
     meta = dict(
         schema_version=3,
         kind="qwen_image21",
+        model_id=model_id,
         target_device="XH2a",
         quant_type=quant_type,
         attention="flash_attention",
@@ -151,6 +158,8 @@ def _build_bundle(model_dir, output_dir, config, *, device):
         ("scheduler_config", "scheduler/scheduler_config.json"),
     ):
         resource(name, relative)
+    if (source_dir / "model_index.json").is_file():
+        resource("pipeline_config", "model_index.json")
     processor_dir = root / "hf_config/processor"
     processor_dir.mkdir()
     for source in sorted((source_dir / "processor").iterdir()):

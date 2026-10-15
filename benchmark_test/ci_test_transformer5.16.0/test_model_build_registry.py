@@ -5,6 +5,7 @@ import sys
 
 import pytest
 import yaml
+from _unified_cases import MODELS
 
 from xhmodel_merak._requirements import validate_worker_requirements
 from xhmodel_merak.errors import ModelError
@@ -12,8 +13,6 @@ from xhmodel_merak.model_build import build_model, describe_model, list_models
 from xhmodel_merak.model_catalog import list_recipes, resolve_workflow_config
 from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_format_spec
 
-
-from _unified_cases import MODELS
 
 EXPECTED_VARIANTS = {model: list(variants) for model, (_, variants) in MODELS.items()}
 
@@ -190,7 +189,7 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
                 "static_profiles": [],
             }
         elif not model.startswith(("macaron", "qwen", "ornith")) or model in {
-            "qwen3-next-80b-a3b", "qwen-image-2.1"
+            "qwen3-next-80b-a3b", "qwen-image-2.1", "qwen-image-2.1-turbo"
         }:
             assert description["vision"] is None
         else:

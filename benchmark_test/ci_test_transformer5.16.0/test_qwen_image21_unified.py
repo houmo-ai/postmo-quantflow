@@ -24,20 +24,21 @@ from xhmodel_merak.model_catalog import get_recipe
 from xhmodel_merak.model_inference.inputs import validate_inputs
 
 
-MODEL_ID = "qwen-image-2.1"
+MODEL_IDS = ("qwen-image-2.1", "qwen-image-2.1-turbo")
 DIFFUSERS = "diffusers==0.41.0"
 
 
 @pytest.mark.parametrize("module", [unified, generate_image], ids=["model", "public"])
 @pytest.mark.parametrize("editing", [False, True], ids=["generate", "edit_cfg"])
-def test_image_cli_forwards_inputs_and_preserves_rgba(module, editing, monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("model_id", MODEL_IDS)
+def test_image_cli_forwards_inputs_and_preserves_rgba(model_id, module, editing, monkeypatch, tmp_path, capsys):
     pixels = np.arange(64 * 32 * 4, dtype=np.uint8).reshape(64, 32, 4)
     signature = inspect.signature(model_inference.inference_model)
     calls = []
 
     def run(**kwargs):
         signature.bind(**kwargs)
-        validate_inputs(get_recipe(MODEL_ID), kwargs["inputs"])
+        validate_inputs(get_recipe(model_id), kwargs["inputs"])
         calls.append(kwargs)
         return SimpleNamespace(image=pixels, width=32, height=64, seed=9, latency_s=0.125)
 
@@ -51,12 +52,14 @@ def test_image_cli_forwards_inputs_and_preserves_rgba(module, editing, monkeypat
         argv += ["--image", "ref.png", "--height", "64", "--width", "32",
                  "--negative-prompt", "", "--guidance-scale", "2"]
         expected.update(images=["ref.png"], height=64, width=32, negative_prompt="", guidance_scale=2.0)
+    if module is unified:
+        argv += ["--model-id", model_id]
     module.main(argv)
     assert len(calls) == 1 and calls[0]["inputs"] == expected
     assert calls[0]["device"] == "cpu"
     assert calls[0]["artifact_dir"] == (str(Path("package").resolve()) if module is unified else "package")
     if module is unified:
-        assert calls[0]["expected_model_id"] == MODEL_ID
+        assert calls[0]["expected_model_id"] == model_id
     with Image.open(destination) as saved:
         assert saved.mode == "RGBA" and saved.size == (32, 64)
         np.testing.assert_array_equal(saved, pixels)
@@ -64,7 +67,8 @@ def test_image_cli_forwards_inputs_and_preserves_rgba(module, editing, monkeypat
 
 
 @pytest.mark.parametrize("precision", [None, "w16a16_sefp", "w8a16_sefp", "w8a8_sefp"])
-def test_model_cli_builds_requested_precision_then_uses_returned_path(precision, monkeypatch, tmp_path):
+@pytest.mark.parametrize("model_id", MODEL_IDS)
+def test_model_cli_builds_requested_precision_then_uses_returned_path(model_id, precision, monkeypatch, tmp_path):
     build_signature = inspect.signature(model_build.build_model)
     inference_signature = inspect.signature(model_inference.inference_model)
     calls = []
@@ -77,7 +81,7 @@ def test_model_cli_builds_requested_precision_then_uses_returned_path(precision,
 
     def infer(**kwargs):
         inference_signature.bind(**kwargs)
-        validate_inputs(get_recipe(MODEL_ID), kwargs["inputs"])
+        validate_inputs(get_recipe(model_id), kwargs["inputs"])
         calls.append(("inference", kwargs))
         return SimpleNamespace(image=np.zeros((32, 32, 4), dtype=np.uint8), width=32, height=32,
                                seed=42, latency_s=0.1)
@@ -88,9 +92,10 @@ def test_model_cli_builds_requested_precision_then_uses_returned_path(precision,
             "--output", str(tmp_path / "out.png"), "--device", "cuda:0"]
     if precision is not None:
         argv += ["--quant-type", precision]
+    argv += ["--model-id", model_id]
     unified.main(argv)
     assert [phase for phase, _ in calls] == ["build", "inference"]
-    assert calls[0][1]["model_id"] == MODEL_ID
+    assert calls[0][1]["model_id"] == model_id
     assert calls[0][1]["deployment_precision"] == {"image": precision or "w16a16_sefp"}
     assert calls[1][1]["artifact_dir"] == str(published)
 
@@ -109,12 +114,13 @@ def test_cli_rejects_unusable_options_before_execution(module, extra, tmp_path):
     assert not (tmp_path / "out.png").exists()
 
 
-def test_public_dependency_cli_exports_pinned_versions_and_phase_hashes(tmp_path, capsys):
+@pytest.mark.parametrize("model_id", MODEL_IDS)
+def test_public_dependency_cli_exports_pinned_versions_and_phase_hashes(model_id, tmp_path, capsys):
     root = tmp_path / "environment"
-    dependencies.main(["--model-id", MODEL_ID, "--variant", "full", "--output-dir", str(root)])
+    dependencies.main(["--model-id", model_id, "--variant", "full", "--output-dir", str(root)])
     printed = json.loads(capsys.readouterr().out)
     assert printed == json.loads((root / "environment.json").read_text())
-    expected = describe_model(MODEL_ID, full=True)["dependencies"]["profiles"]["full"]
+    expected = describe_model(model_id, full=True)["dependencies"]["profiles"]["full"]
     for phase in ("build", "inference", "checkpoint_build"):
         spec = printed[phase]
         assert spec["pip"] == expected[phase]["pip"]
@@ -127,30 +133,32 @@ def test_public_dependency_cli_exports_pinned_versions_and_phase_hashes(tmp_path
     assert printed["validation"]["clean_install"] is False
     before = (root / "environment.json").read_bytes()
     with pytest.raises(FileExistsError):
-        dependencies.main(["--model-id", MODEL_ID, "--output-dir", str(root)])
+        dependencies.main(["--model-id", model_id, "--output-dir", str(root)])
     assert (root / "environment.json").read_bytes() == before
 
 
-def test_installed_dependencies_provide_registered_qwen_capabilities():
+@pytest.mark.parametrize("model_id", MODEL_IDS)
+def test_installed_dependencies_provide_registered_qwen_capabilities(model_id):
     from xhmodel_merak._requirements import validate_worker_capabilities, validate_worker_requirements
 
-    recipe = get_recipe(MODEL_ID)
-    validate_worker_requirements((DIFFUSERS, "huggingface-hub==1.33.0"), model=MODEL_ID, operation="build")
-    validate_worker_capabilities(recipe.worker_capabilities, model=MODEL_ID, operation="build")
+    recipe = get_recipe(model_id)
+    validate_worker_requirements((DIFFUSERS, "huggingface-hub==1.33.0"), model=model_id, operation="build")
+    validate_worker_capabilities(recipe.worker_capabilities, model=model_id, operation="build")
 
 
 @pytest.mark.parametrize("phase", ["build", "inference"])
-def test_ci_preparation_reads_only_selected_packages_from_recipe(phase, capsys):
+@pytest.mark.parametrize("model_id", MODEL_IDS)
+def test_ci_preparation_reads_only_selected_packages_from_recipe(model_id, phase, capsys):
     import prepare_dependencies
 
-    prepare_dependencies.main(["--model-id", MODEL_ID, "--phase", phase,
+    prepare_dependencies.main(["--model-id", model_id, "--phase", phase,
                                "--packages", "diffusers", "huggingface_hub"])
     result = json.loads(capsys.readouterr().out)
     assert set(result["requirements"]) == {DIFFUSERS, "huggingface-hub==1.33.0"}
     assert result["command"][:4] == [sys.executable, "-m", "pip", "install"]
     assert set(result["command"][4:]) == set(result["requirements"])
     with pytest.raises(ValueError, match="not declared"):
-        prepare_dependencies.select_requirements(MODEL_ID, phase, ["undeclared-package"])
+        prepare_dependencies.select_requirements(model_id, phase, ["undeclared-package"])
 
 
 def test_model_help_does_not_import_worker_packages():
