@@ -66,7 +66,7 @@ def test_rejects_incompatible_checkpoint_profile(packed_checkpoint, field, value
         Glm53Checkpoint(checkpoint)
 
 
-@pytest.mark.parametrize("value", [float("nan"), 0.0, -0.01])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 def test_rejects_invalid_packed_scales(packed_checkpoint, value):
     from safetensors.torch import load_file, save_file
 
@@ -80,6 +80,29 @@ def test_rejects_invalid_packed_scales(packed_checkpoint, value):
     temporary.replace(checkpoint / "model.safetensors")
     with pytest.raises(ValueError, match="Invalid GPTQ scales"):
         Glm53Checkpoint(checkpoint).load_layer(0)
+
+
+@pytest.mark.parametrize("factor", [-1.0, 0.0])
+def test_packed_loading_preserves_signed_and_zero_scales(packed_checkpoint, factor):
+    from safetensors.torch import load_file, save_file
+
+    _, checkpoint, reference, names = packed_checkpoint
+    tensors = load_file(checkpoint / "model.safetensors")
+    for name in names:
+        tensors[name + ".scales"] = tensors[name + ".scales"] * factor
+    temporary = checkpoint / "signed.safetensors"
+    save_file(tensors, temporary)
+    temporary.replace(checkpoint / "model.safetensors")
+    reader = Glm53Checkpoint(checkpoint)
+    loaded = [reader.load_layer(i) for i in range(2)]
+    for name in names:
+        index, relative = name.removeprefix("model.language_model.layers.").split(".", 1)
+        packed = loaded[int(index)].get_submodule(relative).packed_weight
+        torch.testing.assert_close(packed.qweight, tensors[name + ".qweight"], rtol=0, atol=0)
+        torch.testing.assert_close(packed.scales, tensors[name + ".scales"], rtol=0, atol=0)
+        torch.testing.assert_close(
+            packed.dequantize(dtype=torch.float16), reference.get_submodule(name).weight * factor,
+        )
 
 
 def test_public_recipe_and_quant_parameter_validation(tmp_path):

@@ -122,7 +122,9 @@ class Glm53Checkpoint:
             expected = getattr(quantized, name)
             if value.shape != expected.shape or value.dtype != expected.dtype:
                 raise ValueError(f"Invalid packed GPTQ tensor {prefix}.{name}: {value.shape}, {value.dtype}")
-            if name == "scales" and (not torch.isfinite(value).all() or (value <= 0).any()):
+            # Preserve signed/zero checkpoint scales; the SDK folds signs when
+            # converting packed weights into the target quantization format.
+            if name == "scales" and not torch.isfinite(value).all():
                 raise ValueError(f"Invalid GPTQ scales: {prefix}.{name}")
             quantized._buffers[name] = value
         if linear.bias is not None:
