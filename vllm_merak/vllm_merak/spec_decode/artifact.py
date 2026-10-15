@@ -22,6 +22,7 @@ _QWEN_DFLASH_PAGED_ABI = "qwen_dflash_paged_v2"
 _QWEN_DFLASH_PAGED_SHARED_ABI = "qwen_dflash_paged_shared_v3"
 _QWEN_DFLASH2_ABI = "qwen_dflash2_v1"
 _QWEN_DFLASH2_PAGED_SHARED_ABI = "qwen_dflash2_paged_shared_v1"
+_QWEN_DFLASH2_HYBRID_ABI = "qwen_dflash2_hybrid_v1"
 _GEMMA4_DENSE_MTP_ABI = "gemma4_mtp_dense_shared_kv_v1"
 _GEMMA4_PAGED_MTP_ABI = "gemma4_mtp_readonly_page_attention_v1"
 _GEMMA4_PAGED_CAUSAL_MTP_ABI = "gemma4_mtp_readonly_page_attention_v2"
@@ -81,6 +82,7 @@ class HMONNXSpecDecodeArtifact:
     @property
     def is_qwen_dflash(self) -> bool:
         return self.draft_abi in {
+            _QWEN_DFLASH2_HYBRID_ABI,
             _QWEN_DFLASH_ABI,
             _QWEN_DFLASH_PAGED_ABI,
             _QWEN_DFLASH_PAGED_SHARED_ABI,
@@ -91,9 +93,14 @@ class HMONNXSpecDecodeArtifact:
     @property
     def is_qwen_dflash2(self) -> bool:
         return self.draft_abi in {
+            _QWEN_DFLASH2_HYBRID_ABI,
             _QWEN_DFLASH2_ABI,
             _QWEN_DFLASH2_PAGED_SHARED_ABI,
         }
+
+    @property
+    def uses_hybrid_dflash_cache(self) -> bool:
+        return self.draft_abi == _QWEN_DFLASH2_HYBRID_ABI
 
     @property
     def is_qwen_hybrid_spec_decode(self) -> bool:
@@ -214,6 +221,10 @@ def _normalize_mode(meta: Mapping[str, Any], spec: Mapping[str, Any]) -> SpecDec
         model_config.get("spec_decode_mode"),
     )
     mode = str(raw_mode or "").strip().lower()
+    if mode == "dflash2":
+        if _mapping(spec.get("draft")).get("abi") != _QWEN_DFLASH2_HYBRID_ABI:
+            raise ValueError("DFlash2 mode requires the hybrid draft cache ABI")
+        return "dflash"
     if mode not in {"mtp", "dflash"}:
         raise ValueError(
             f"HMONNX spec_decode.mode must be 'mtp' or 'dflash', got {raw_mode!r}"
@@ -317,6 +328,7 @@ def _validate_graph_set(
         raise ValueError("HMONNX speculative decoding requires a draft decode graph")
     if mode == "dflash":
         if draft_abi not in {
+            _QWEN_DFLASH2_HYBRID_ABI,
             _QWEN_DFLASH_ABI,
             _QWEN_DFLASH_PAGED_ABI,
             _QWEN_DFLASH_PAGED_SHARED_ABI,
@@ -338,6 +350,7 @@ def _validate_graph_set(
             )
         return
     if draft_abi in {
+        _QWEN_DFLASH2_HYBRID_ABI,
         _QWEN_DFLASH_ABI,
         _QWEN_DFLASH_PAGED_ABI,
         _QWEN_DFLASH_PAGED_SHARED_ABI,
@@ -566,7 +579,7 @@ def load_hmonnx_spec_decode_artifact(
     if selector_scheme is not None and not isinstance(selector_scheme, str):
         raise ValueError("spec_decode.draft.selector_scheme must be a string")
 
-    if draft_abi in {_QWEN_DFLASH2_ABI, _QWEN_DFLASH2_PAGED_SHARED_ABI}:
+    if draft_abi in {_QWEN_DFLASH2_ABI, _QWEN_DFLASH2_PAGED_SHARED_ABI, _QWEN_DFLASH2_HYBRID_ABI}:
         required_dflash2_fields = {
             "selector_top_k": dflash_selector_top_k,
             "selector_rank": dflash_selector_rank,
@@ -613,6 +626,7 @@ def load_hmonnx_spec_decode_artifact(
 
     if contract_version >= 2:
         if draft_abi in {
+            _QWEN_DFLASH2_HYBRID_ABI,
             _QWEN_MTP_ABI,
             _QWEN_DFLASH_ABI,
             _QWEN_DFLASH2_ABI,
@@ -622,6 +636,7 @@ def load_hmonnx_spec_decode_artifact(
                 "spec_decode.draft.cache_mutation='in_place'"
             )
         if draft_abi in {
+            _QWEN_DFLASH2_HYBRID_ABI,
             _QWEN_MTP_ABI,
             _QWEN_MTP_PAGED_ABI,
             _QWEN_DFLASH_ABI,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from contextlib import nullcontext
 from copy import copy
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, Optional, cast
@@ -1265,9 +1266,12 @@ class MerakForCausalLM(nn.Module):
         )
         try:
             for module in modules:
-                module.commit_cache_write_transaction(
-                    accepted_steps=accepted_steps,
-                )
+                cache_device = module._get_context().paged_kv_cache.device
+                device_context = torch.cuda.device(cache_device) if cache_device.type == "cuda" else nullcontext()
+                with device_context:
+                    module.commit_cache_write_transaction(
+                        accepted_steps=accepted_steps,
+                    )
         finally:
             self._page_attention_verify_transaction_modules = ()
             self._page_attention_verify_transaction_request_id = None

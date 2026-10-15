@@ -10,6 +10,37 @@
 非零温度验收使用的是 probabilistic selector walk。省略该字段会让浮点和
 量化结果不可比较。
 
+## 当前产物与历史验收的区别
+
+最新五数据集精度、接收率及 2048 边界复测见 [7.6 节](#76-2026-10-14-五数据集精度与接收率复测)。
+除第 7.6 节外，第 1–10 节保留 2026-08 的部署命令和验收记录，不能用其中的
+`medium` 配置或旧产物结果代替最新复测。当前导出和加载端使用
+`qwen_dflash2_hybrid_v1`，不能把旧 `qwen_dflash2_paged_shared_v1` 的断言直接
+用于新产物。新产物的 `spec_decode.mode` 为 `dflash2`，Merak 内部复用 DFlash
+调度路径；draft context 使用 HybridCache，decode 使用不推进已提交长度的
+临时 CacheTensor 视图。绝对 RoPE 位置和紧凑 KV 写入位置分别传入
+`past_seq_length`、`cache_position`，不能混用。
+
+- 使用本仓库 `vllm_merak`，保持它与 `xhmodel_merak`、xhquant 的版本一致。
+- 当前共享 W5 head 配置由 target 拥有载荷，draft 继承；不能沿用第 5 节的
+  `spec_draft_head_weight_bits=4` 覆盖新产物。按实际 metadata 核对位宽。
+- draft 滑窗为 2048；prefill chunk 256、block 8 时，物理 cache 容量为 2320。
+  draft 使用 dense attention 与逐 query mask，target 仍可使用 FlashAttention。
+- HybridCache 的 context 更新保留已提交长度；decode 临时写入不能推进该长度，
+  请求释放时必须同时清空数据和长度。不能对滑窗 context 强开普通 cache 输出复用。
+- 双卡 auto-offload 的 target 保留拥有独立存储的事务输出，不使用单 stage 的
+  borrowed-output 优化；拒绝采样后的 PageAttention 提交须切换至各层 cache 所在设备，
+  避免在另一张卡的 CUDA 上下文中调用 Triton 写 cache。
+- 本地 DFlash2 模型卡的官方评测配置为五套均 `xhigh`、temperature 1.0、
+  top-p 0.95、top-k 20、K=7、max new tokens 4096。第 7 节中部分任务的
+  `medium` 和更长输出预算属于历史本地评测配置，不是官方思考强度。
+- 分析 2048 边界时必须记录实际 prompt token 数、每轮开始时的上下文长度、
+  proposed/accepted draft 数、输出与结束原因。请求级接收率直方图不能还原
+  同一请求跨窗前后的变化。接收率与答案正确率、代码 pass@1 分别报告。
+
+缓存细节见 [DFlash2 cache 契约](../../docs/modeling/structures/cache.md#dflash2滑窗上下文与临时查询-kv)，
+导出选项见 [Qwen3.5/3.8 示例](../../examples_merak/llm/qwen3_5/readme.md)。
+
 ## 1. 已验证范围和固定口径
 
 ### 1.1 模型
@@ -772,6 +803,114 @@ vllm_float_vs_merak_mtbench_full80_mnt16384_re-medium_paired.json
 | MBPP | `3a1cee0491994c0418507dcc6a5c11e31a22d152ac05e06f231e5aef72aa5835` | `4ed3f9246013dab50561bd799c267790420514ec38da867c2c597bbdfbed3d16` | `6e9bc04a1e1796d609597dd5ab8534002dfd906272ef1d6650b3220c778da60c` |
 | MT-bench | `91087c1a791239f4258138e32f027006cc1517c163bdfa48d35493c4cc3cc09e` | `b633b5a995062f98adf352ee30197d8a28b0e90bedeeb72a6602b1acf3e4c5e4` | `8dd952a6393b37dbe5e8af2332f4480657a0af906a5a4e36db55581794f3673f` |
 
+### 7.6 2026-10-14 五数据集精度与接收率复测
+
+本轮使用当前 HybridCache、共享 W5 head 产物，对比原生 vLLM BF16 与 HMONNX
+量化 DFlash2；两侧各完成 2320 个请求。五套均启用 thinking、使用 `xhigh`，
+与第 7.5 节部分任务为 `medium` 的旧验收分开报告。本轮为纯文本评测，不覆盖
+视觉精度，也不替代历史 GPQA-Diamond、RealWorldQA、MathVision 诊断。
+
+#### 评测配置与对齐
+
+| 项目 | 本轮配置 |
+| --- | --- |
+| 浮点模型 | `/data01/datasets/Qwen3.8-27B` + `/data01/datasets/Qwen3.8-27B-DFlash2`，BF16 weights/KV |
+| HMONNX 产物 | `work_dirs/qwen3_8_27b_dflash2_head_w5_unified_256k_fa_hybrid_20260930`，target W4、共享 W5 head，ABI `qwen_dflash2_hybrid_v1` |
+| reasoning | 全部 `enable_thinking=true`、`reasoning_effort=xhigh` |
+| sampling | temperature=1.0、top-p=0.95、top-k=20、min-p=0、presence/frequency penalty=0、repetition penalty=1 |
+| speculative | K=7、`draft_sample_method=probabilistic`、`rejection_sample_method=standard` |
+| 请求顺序与 seed | `random.Random(42).shuffle`，逐题 `seed=benchmark_index` |
+| 最大输出 | GSM8K 4096；MATH-500/HumanEval 32768；MBPP/MT-Bench 16384 |
+| 浮点 runtime | `max_model_len=65536`、`max_num_batched_tokens=256`，eager；关闭 prefix cache、async scheduling 及 Merak 插件 |
+| 浮点部署 | 本机 GPU 0–3 各一个服务、各 8 并发；18 服务器 GPU 0–3 一个 TP4 服务、4 并发，共 36 请求槽位 |
+| HMONNX 部署 | 本机前 6 卡各两个服务；18 服务器三组双卡各一个服务，共 15 个服务，每服务串行 |
+
+输出预算沿用本地 HMONNX 质量复测设置，不是模型卡五套统一 4096 的原样复现。
+数据集逐套运行，当前数据集全部结束后才启动下一套。原生浮点源码为
+`9c8e90eb2637a863ca14e47fd436b10ed7ba6536`，Torch 为 `2.11.0+cu129`，
+Transformers overlay 为 `5.16.1`。
+
+浮点逐题重放 HMONNX 已记录的 `prompt_token_ids`，核对请求、seed、source record
+及实际返回的 prompt IDs；后处理使用修正后 HMONNX 判分器的冻结副本。
+本机与 18 服务器的 19 个 target/draft safetensors 文件 SHA256 全部一致。
+审计核对了本机 2092 条、18 服务器 228 条结果与各服务原始缓存一致；
+实际 Scheduler 峰值并发达到 `8/8/8/8/4`。
+
+MBPP 使用 sanitized test 全部 257 题，prompt 显式提供各题要求的函数签名，
+量化侧对应已完成的 `mbpp-signature` 重测。旧版缺失接口约束的 prompt 结果
+不进入本表，不能把它与本轮浮点结果混比。
+
+#### 精度与总体接收率
+
+| 数据集 | N | BF16 精度 | HMONNX 精度 | BF16 接收率 | HMONNX 接收率 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| GSM8K | 1319 | 1255/1319（95.15%） | 1257/1319（95.30%） | 45.87% | 53.81% |
+| MATH-500 | 500 | 493/500（98.60%） | 491/500（98.20%） | 40.48% | 46.87% |
+| HumanEval | 164 | 158/164（96.34%） | 154/164（93.90%） | 36.56% | 42.36% |
+| MBPP signature-specific | 257 | 185/257（71.98%） | 183/257（71.21%） | 34.03% | 40.19% |
+| MT-Bench first-turn | 80 | 9.3625/10 | 9.1750/10 | 32.12% | 37.59% |
+
+GSM8K/MATH-500 使用冻结的 `math_verify` 判分；HumanEval/MBPP 是每题一次生成，
+经相同代码提取后执行数据集单测的通过率（pass@1），不是多采样 pass@k。
+421 个 HumanEval/MBPP 参考实现均通过同一判分执行环境的预检。
+MT-Bench 是本会话助手按正确性、指令遵循、完整性、清晰度与相关性，逐条阅读
+最终回答后给出的 1–10 主观分，包含全部 80 个首轮回答；不是客观正确率，
+也不是官方外部裁判或双轮 MT-Bench 分数。每条评分保存理由及对应输入、输出 hash。
+
+总体接收率为各请求 `steps[:-1]` 的 `sum(accepted) / sum(drafted)`，排除每个
+请求最后一轮，避免停止位置截断污染统计；不是逐题接收率的算术平均，
+也不是含 anchor 的平均接收长度。此表没有另外排除跨 2048 的 proposal block，
+跨边界 block 的剔除仅用于下方分段统计。
+
+HMONNX 的总体接收率在五套中均高于 BF16，但客观精度有升有降；两侧 target
+采样轨迹不同，不能由接收率推出精度优劣。单次采样结果也不足以判断精度差异
+的统计显著性。两侧 runtime 及并发部署不同，本轮不据此比较吞吐或延迟。
+
+#### 截断和未闭合 reasoning
+
+| 数据集 | BF16 length | HMONNX length | BF16 无 `</think>` | HMONNX 无 `</think>` |
+| --- | ---: | ---: | ---: | ---: |
+| GSM8K | 34 | 31 | 33 | 29 |
+| MATH-500 | 2 | 3 | 2 | 3 |
+| HumanEval | 3 | 8 | 3 | 8 |
+| MBPP signature-specific | 9 | 18 | 9 | 18 |
+| MT-Bench first-turn | 2 | 3 | 0 | 0 |
+
+2320 条齐全表示请求无遗漏，不表示输出全部完整。所有截断样本保留在分母中，
+不闭合 reasoning 的客观题按错误计；已经进入 final 的截断输出仍按实际内容判分。
+因此 `length` 和“无最终回答”不能等同，也不通过补跑后覆盖原始结果来抬高精度。
+
+#### 2048 上下文边界
+
+为避免把短题与长题混在一起，只选择两个后端都完整覆盖
+`[1536, 2560)` 的共同题目；比较同题的 `[1536, 2048)` 和 `[2048, 2560)`。
+位置使用每轮开始时的实际 `context_before=prompt_tokens+generated_before`，
+不是仅生成 token 数，也不是滑窗紧凑 cache 写入位置；剔除最后一轮及跨分界线的
+proposal block 后，分别汇总 accepted/drafted。
+
+| 数据集 | 共同题数 | BF16 2048 前→后 | HMONNX 2048 前→后 |
+| --- | ---: | ---: | ---: |
+| GSM8K | 35 | 36.02% → 35.17% | 42.61% → 42.23% |
+| MATH-500 | 97 | 36.43% → 37.85% | 44.28% → 44.62% |
+| HumanEval | 47 | 34.25% → 36.69% | 41.57% → 41.17% |
+| MBPP signature-specific | 57 | 33.16% → 32.93% | 39.20% → 38.97% |
+| MT-Bench first-turn | 16 | 29.08% → 31.31% | 35.46% → 38.53% |
+
+本批同题边界统计未复现超过 2048 后普遍骤降；它不证明所有长上下文都无回归，
+也不能代替编译器实际运行路径的验证。按 `generated_before` 划分“已生成不足/超过
+2048 token”的结果另外保存在 `common_cohort_generated_2048`，不能与本表上下文
+位置口径混用。
+
+#### 结果归档
+
+本地证据路径如下，`work_dirs` 不随 Git 提交；转交评测结果时应另附对应归档：
+
+- [最新逐数据集对比](../../work_dirs/dflash2_float_compare_20261014/comparison_index.json)：精确分子/分母、精度差异题号、共同题号及两种 2048 位置统计。
+- [浮点配置](../../work_dirs/dflash2_float_compare_20261014/manifest.json)及同目录 `results/<dataset>/`：逐题输出、token IDs、结束原因和 acceptance steps。
+- [完整性审计](../../work_dirs/dflash2_float_compare_20261014/final_integrity_audit.json)：2320 条原始结果一致性、模型 hash、判分器 hash 和实际并发检查。
+- [浮点 MT-Bench 评分](../../work_dirs/dflash2_float_compare_20261014/mt_bench_assistant_judging_evidence.json)与[量化评分](../../work_dirs/dflash2_context_full_20261013/mt_bench_assistant_judging_evidence.json)：全部理由及绑定输出的 hash。
+- [量化原始配置](../../work_dirs/dflash2_context_full_20261013/manifest.json)及[MBPP 签名重测配置](../../work_dirs/dflash2_context_full_20261013/manifest.mbpp_signature.json)：量化参考输出保存在同目录 `results/`。
+
 ## 8. Rejection sampling 正确性
 
 设 target 经 temperature/top-p/top-k 处理后的分布为 p，DFlash2 selector 的提案
@@ -891,7 +1030,7 @@ PY
 简单归类为随机乱码，但它是**输出控制异常**：一旦触及 token 上限、没有 `</think>` 或
 没有给出最终代码，就算局部推理合理，该请求也仍是不完整结果，不能用于质量结论。
 
-正式 HumanEval 因此使用 `reasoning_effort=medium`、
+2026-08 历史验收的 HumanEval 因此使用 `reasoning_effort=medium`、
 `max_new_tokens=32768/max_model_len=65536`。164 题中 BF16 和 W4A8 都是 164/164
 自然 `stop`；completion token 中位数分别为 967 和 991，最大值分别为 10092 和 7083。
 这说明旧 `xhigh` 长输出不是必须的模型计算流程，也不是把统一上限从 4096 提高后就应该

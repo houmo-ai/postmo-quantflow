@@ -161,7 +161,7 @@ class QwenHybridCacheContract:
         if spec_decode is not None:
             spec = _mapping(spec_decode, field="spec_decode")
             mode = spec.get("mode")
-            if mode in {"mtp", "dflash"}:
+            if mode in {"mtp", "dflash", "dflash2"}:
                 num_draft_tokens = _non_negative_int(
                     spec.get("num_draft_tokens"),
                     field="spec_decode.num_draft_tokens",

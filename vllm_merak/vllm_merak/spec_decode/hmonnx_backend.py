@@ -76,6 +76,7 @@ def _dflash2_attention_mask(
     sliding_window: int,
     dtype: torch.dtype,
     device: torch.device,
+    fill_value: float = -10000.0,
 ) -> torch.Tensor:
     """Build DFlash2's symmetric, non-causal sliding-window mask."""
 
@@ -96,7 +97,7 @@ def _dflash2_attention_mask(
         & (query_positions - key_positions < sliding_window)
         & (key_positions - query_positions < sliding_window)
     )
-    mask = torch.full(mask_shape, -10000.0, dtype=dtype, device=device)
+    mask = torch.full(mask_shape, fill_value, dtype=dtype, device=device)
     return mask.masked_fill(visible, 0)
 
 
@@ -387,6 +388,7 @@ class HMONNXDraftRuntimeBackend:
         )
         self._enable_private_context_decode_cuda_graph = (
             not artifact.is_gemma4
+            and not getattr(artifact, "uses_hybrid_dflash_cache", False)
             and artifact.mode == "dflash"
             and env_flag_enabled(MERAK_SPEC_DRAFT_CONTEXT_CUDA_GRAPH)
         )
@@ -442,6 +444,9 @@ class HMONNXDraftRuntimeBackend:
             if session is None:
                 continue
             interpreter = getattr(session, "interpreter", None)
+            if getattr(interpreter, "_pipe", None) is not None:
+                logger.info("Keeping owned transactional outputs for multi-stage target %s", graph_name)
+                continue
             if not callable(getattr(interpreter, "set_borrowed_output_indices", None)):
                 # Eager sessions return ordinary ephemeral tensors and do not
                 # perform the CUDA Graph replay clone this optimization avoids.
@@ -806,6 +811,7 @@ class HMONNXDraftRuntimeBackend:
             if (
                 self.artifact.mode == "dflash"
                 and not self._uses_private_dflash_page_cache()
+                and not getattr(self.artifact, "uses_hybrid_dflash_cache", False)
                 and graph_name
                 in {
                     "context",
@@ -870,10 +876,11 @@ class HMONNXDraftRuntimeBackend:
                     f"graphs: source={source_name}, graph={graph_name}"
                 )
 
-        from xhquant.core import CacheTensor
+        from xhquant.core import CacheTensor, HybridCacheTensor
 
+        cache_type = HybridCacheTensor if getattr(self.artifact, "uses_hybrid_dflash_cache", False) else CacheTensor
         values = {
-            name: CacheTensor(torch.zeros(shape, dtype=dtype, device=self.device))
+            name: cache_type(torch.zeros(shape, dtype=dtype, device=self.device))
             for name, (shape, dtype) in schema.items()
         }
         self._private_cache = _PrivateCacheState(
@@ -1667,7 +1674,15 @@ class HMONNXDraftRuntimeBackend:
                 f"missing={sorted(set(expected) - set(feed))}, "
                 f"unexpected={sorted(set(feed) - set(expected))}"
             )
-        raw_outputs = session.run(dict(feed))
+        runtime_feed = dict(feed)
+        if graph_name == "decode" and getattr(self.artifact, "uses_hybrid_dflash_cache", False):
+            from xhquant.core import CacheTensor, HybridCacheTensor
+
+            runtime_feed = {
+                name: CacheTensor(value.data) if isinstance(value, HybridCacheTensor) else value
+                for name, value in runtime_feed.items()
+            }
+        raw_outputs = session.run(runtime_feed)
         self._assert_private_cache_pointers()
         return _output_map(session, raw_outputs)
 
@@ -1730,6 +1745,11 @@ class HMONNXDraftRuntimeBackend:
         for name in session.get_input_names():
             if name in cache_values:
                 feed[name] = cache_values[name]
+            elif name == "cache_position" and getattr(self.artifact, "uses_hybrid_dflash_cache", False):
+                retained_lengths = {value.cache_valid_len for value in cache_values.values()}
+                if len(retained_lengths) != 1:
+                    raise RuntimeError("DFlash2 hybrid caches disagree on committed length")
+                feed[name] = self._scalar(session, name, retained_lengths.pop(), self.device)
             elif name in {"past_seq_length", "valid_length"}:
                 feed[name] = self._scalar(
                     session,
@@ -2034,6 +2054,8 @@ class HMONNXDraftRuntimeBackend:
                     physical_length=capacity,
                 )
             outputs = self._run(graph_name, feed)
+            if getattr(self.artifact, "uses_hybrid_dflash_cache", False):
+                continue
             if self._uses_private_dflash_page_cache():
                 if not self._uses_graph_dflash_page_cache_writes():
                     self._write_dflash_page_context(
@@ -2294,11 +2316,12 @@ class HMONNXDraftRuntimeBackend:
                     raise RuntimeError("DFlash2 artifact has no sliding_window")
                 mask = _dflash2_attention_mask(
                     mask_shape,
-                    past_length=past_length,
+                    past_length=(int(feed["cache_position"].item()) if "cache_position" in feed else past_length),
                     current_length=block_length,
                     sliding_window=sliding_window,
                     dtype=mask_info.dtype,
                     device=self.device,
+                    fill_value=-65504.0 if "cache_position" in feed else -10000.0,
                 )
             else:
                 mask = torch.full(
@@ -2933,7 +2956,7 @@ class HMONNXDraftRuntimeBackend:
         if cache is None or cache.owner_req_id != req_id:
             return
         for value in cache.values.values():
-            value.data.zero_()
+            value.reset()
         # Paged speculative ABIs deliberately keep ``values`` empty: their
         # graph modules share a stable external cache owner instead of dense
         # tensor inputs.  Reset that owner before releasing the serial request
