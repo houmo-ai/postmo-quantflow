@@ -393,7 +393,6 @@ def test_dsa_streaming_selects_original_tokens(hf_model):
                 t["pool_new_count"],
                 t["pool_write_start"],
                 t["query_validity"],
-                t["pool_valid_length"],
                 t["tail_indices"],
                 t["dsa_attention_mask"],
                 *state,
@@ -427,9 +426,13 @@ def record_pool_selection(chosen):
     def hook(module, args, result):
         from xhquant.ops.xh.sparse_attention_select_kv import sparse_attention_select_kv_scores
 
-        query, pool, payload, total, weights, lengths = args
-        scores = sparse_attention_select_kv_scores(query, pool, total, weights, module.score_scale, lengths)
-        indices = torch.argsort(scores, dim=-1, descending=True, stable=True)[..., : module.candidate_topk]
+        query, pool, payload, total, weights, active = args
+        rows = torch.arange(query.shape[2], device=query.device)[None]
+        lengths = torch.where(rows < active, (total + rows + 1) // module.compression_ratio, 0)
+        scores = sparse_attention_select_kv_scores(
+            query, pool, total, weights, module.score_scale, active, module.compression_ratio
+        )
+        indices = torch.topk(scores, module.candidate_topk, dim=-1, sorted=True).indices
         token_ids = (indices[..., None] * 4 + torch.arange(4, device=indices.device)).flatten(-2)
         keep = torch.arange(module.candidate_topk * 4, device=indices.device) < lengths[..., None] * 4
         expected = payload[0, 0][token_ids] * keep[..., None]
@@ -458,12 +461,11 @@ def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_sco
             t["pool_new_count"],
             t["pool_write_start"],
             t["query_validity"],
-            t["pool_valid_length"],
             t["tail_indices"],
             t["dsa_attention_mask"],
             *spec.initial_caches()[-4:],
         )
-        valid = torch.arange(spec.pool_capacity) < t["pool_valid_length"].unsqueeze(-1)
+        valid = torch.arange(spec.pool_capacity) < (torch.arange(1, 17) // 4)[None, :, None]
         # Scale a real indexer's learned head weights to exercise scores
         # below the former -32768 sentinel, including near the FP16 limit.
         scale = minimum_score / chosen["scores"][valid].min().item()
@@ -476,7 +478,6 @@ def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_sco
             t["pool_new_count"],
             t["pool_write_start"],
             t["query_validity"],
-            t["pool_valid_length"],
             t["tail_indices"],
             t["dsa_attention_mask"],
             *spec.initial_caches()[-4:],
@@ -521,13 +522,12 @@ def test_dsa_tied_scores_select_valid_pools(hf_model):
             t["pool_new_count"],
             t["pool_write_start"],
             t["query_validity"],
-            t["pool_valid_length"],
             t["tail_indices"],
             t["dsa_attention_mask"],
             *spec.initial_caches()[-4:],
         )[0]
         selected = chosen["indices"]
-        valid = selected < t["pool_valid_length"].unsqueeze(-1)
+        valid = selected < (torch.arange(1, 17) // 4)[None, :, None]
         assert torch.equal(valid.sum(-1), torch.minimum(torch.arange(1, 17) // 4, torch.tensor(2))[None])
         assert bool((selected[..., 0] != selected[..., 1]).all())
         raw = (selected[..., None] * 4 + torch.arange(4)).flatten(-2)
@@ -640,10 +640,12 @@ def test_256k_cache_capacity_and_final_chunk_controls():
         (1, 1, 65536, 8),
     )
     controls = build_transition(spec, 262141, 3, 256)
-    assert controls["pool_valid_length"].shape == (1, 256)
-    assert controls["pool_valid_length"].dtype == torch.int32
-    assert controls["pool_valid_length"][0, :3].tolist() == [65535, 65535, 65536]
-    assert not controls["pool_valid_length"][0, 3:].any()
+    assert "pool_valid_length" not in controls
+    assert controls["past_seq_length"].tolist() == [262141]
+    assert controls["current_input_length"].tolist() == [3]
+    mask = controls["dsa_attention_mask"][0, :, 0]
+    assert (mask[:3, :2048] == 0).sum(-1).tolist() == [2048, 2048, 2048]
+    assert not (mask[3:] == 0).any()
     assert controls["pool_new_count"].item() == 1
     assert controls["pool_write_start"].item() == 65535
     assert controls["query_validity"].sum().item() == 3
@@ -770,9 +772,12 @@ def test_w8_export_reload_and_generation(tmp_path, monkeypatch, mlp_type):
             select = [node for node in graph.node if node.op_type == "SparseAttentionSelectKV"]
             assert len(select) == 1
             attrs = {a.name: onnx.helper.get_attribute_value(a) for a in select[0].attribute}
-            assert attrs["score_mode"] == b"vp" and attrs["pool_size"] == 4
+            assert "score_mode" not in attrs and attrs["pool_size"] == 4
+            assert attrs["q_bit"] == attrs["k_bit"] == 16
             assert len(select[0].input) == 6 and len(select[0].output) == 1
-            assert "pool_valid_length" == select[0].input[5]
+            assert "valid_length" == select[0].input[3]
+            assert "current_length" == select[0].input[5]
+            assert attrs["compression_ratio"] == 4
             mask_input = next(value for value in graph.input if value.name == "dsa_attention_mask")
             assert [dim.dim_value for dim in mask_input.type.tensor_type.shape.dim] == [
                 1,

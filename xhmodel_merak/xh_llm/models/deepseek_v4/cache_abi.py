@@ -153,10 +153,6 @@ class DeepSeekV4CacheABI:
                 query_length,
                 swa_length,
             ),
-            "csa_candidate_lengths": (
-                self.batch_size,
-                query_length,
-            ),
             "csa_attention_mask": (
                 self.batch_size,
                 1,

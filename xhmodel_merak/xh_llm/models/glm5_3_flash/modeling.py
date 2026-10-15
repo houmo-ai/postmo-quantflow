@@ -220,6 +220,7 @@ class StaticDSA(nn.Module):
             spec.selected_pools,
             source.indexer.softmax_scale,
             spec.pool_size,
+            compression_ratio=spec.pool_size,
         )
         self.mask_add = xhnn.MaskedAdd(saturate=True)
         self.pool_size = spec.pool_size
@@ -233,7 +234,6 @@ class StaticDSA(nn.Module):
         new_count,
         write_start,
         query_valid,
-        pool_valid,
         tail_indices,
         attention_mask,
         latent_cache,
@@ -253,9 +253,9 @@ class StaticDSA(nn.Module):
             iq.transpose(1, 2),
             full_pool,
             full_latent,
-            write_start + new_count,
+            past_length,
             head_weight.to(iq.dtype).transpose(1, 2).unsqueeze(-1),
-            pool_valid,
+            current_length,
         )
         # Gather rows on axis 2 directly from the unchanged four-dimensional
         # cache. Only the selected rows are reshaped into query slots.
@@ -321,13 +321,13 @@ class StaticDecoder(nn.Module):
         )
 
     def forward(self, streams, controls, caches):
-        past, length, _, offset, count, start, valid, pool_valid, tail, attention_mask = controls
+        past, length, _, offset, count, start, valid, tail, attention_mask = controls
         post, comb, x = self.attn_hc(streams)
         x = self.input_norm(x)
         if self.kind == LINEAR:
             result = self.attention(x, length, valid, *caches)
         else:
-            result = self.attention(x, past, length, offset, count, start, valid, pool_valid, tail, attention_mask, *caches)
+            result = self.attention(x, past, length, offset, count, start, valid, tail, attention_mask, *caches)
         streams = post.unsqueeze(-1) * result[0].unsqueeze(2) + comb.transpose(-1, -2) @ streams
         post, comb, x = self.ffn_hc(streams)
         streams = post.unsqueeze(-1) * self.mlp(self.ffn_norm(x)).unsqueeze(2) + comb.transpose(-1, -2) @ streams
@@ -363,7 +363,6 @@ class StaticGlm53ForCausalLM(nn.Module):
         pool_new_count,
         pool_write_start,
         query_validity,
-        pool_valid_length,
         tail_indices,
         dsa_attention_mask,
         caches,
@@ -379,7 +378,6 @@ class StaticGlm53ForCausalLM(nn.Module):
             pool_new_count,
             pool_write_start,
             query_validity,
-            pool_valid_length,
             tail_indices,
             dsa_attention_mask,
         )

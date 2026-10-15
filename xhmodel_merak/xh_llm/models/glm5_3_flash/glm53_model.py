@@ -159,7 +159,7 @@ class XHGlm53Model(TextLLMModel):
         meta_info.glm53_cache_spec = asdict(self.cache_spec)
         meta_info.glm53_state_abi_version = 3
         meta_info.glm53_export_mode = "streamed_ffn"
-        meta_info.glm53_dsa_selection = "vp_pool"
+        meta_info.glm53_dsa_selection = "te_pool"
         meta_info.supported_modalities = ["text"]
         if getattr(self, "_vision_metadata", None) is not None:
             meta_info.glm53_vision = self._vision_metadata

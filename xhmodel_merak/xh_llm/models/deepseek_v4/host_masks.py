@@ -25,7 +25,6 @@ class DeepSeekV4AttentionMasks(NamedTuple):
     """Shared Host inputs consumed by the fixed prefill/decode graphs."""
 
     swa_attention_mask: Tensor
-    csa_candidate_lengths: Tensor
     csa_attention_mask: Tensor
     hca_attention_mask: Tensor
     csa_compressor_validity: Tensor
@@ -110,8 +109,8 @@ def build_deepseek_v4_attention_masks(
     """Build all position-dependent inputs outside the exported model graph.
 
     Additive attention masks use ``0`` for a visible token and ``-65504`` for
-    a hidden token. ``csa_candidate_lengths`` contains the causal compressed
-    prefix length per query as int32, with zero for padded queries.
+    a hidden token. Causal candidate counts are used only to build the mask;
+    SelectKV derives its own counts from raw history and current length.
     """
 
     input_sequence_length = int(input_sequence_length)
@@ -158,7 +157,6 @@ def build_deepseek_v4_attention_masks(
     absolute_query_end = past_length + query + 1
     csa_count = torch.div(absolute_query_end, spec.csa_ratio, rounding_mode="floor")
     csa_count = torch.clamp(csa_count, max=spec.csa_capacity)
-    csa_lengths = torch.where(query_valid, csa_count, 0).to(dtype=torch.int32)
 
     topk_position = torch.arange(spec.index_topk, device=device, dtype=torch.int64)
     selected_count = torch.clamp(csa_count, max=spec.index_topk)
@@ -193,7 +191,6 @@ def build_deepseek_v4_attention_masks(
 
     return DeepSeekV4AttentionMasks(
         _additive_mask(batched(swa_valid).unsqueeze(1), dtype=dtype),
-        batched(csa_lengths),
         _additive_mask(batched(csa_attention_valid).unsqueeze(1), dtype=dtype),
         _additive_mask(batched(hca_attention_valid).unsqueeze(1), dtype=dtype),
         *csa_transition,

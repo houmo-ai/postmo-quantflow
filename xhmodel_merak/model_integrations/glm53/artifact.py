@@ -140,7 +140,8 @@ def audit_glm53_hmonnx(root, metadata):
             elif node.op_type == "SparseAttentionSelectKV":
                 expected_k = min(config["index_topk"] // 4, metadata["glm53_cache_spec"]["max_context_length"] // 4)
                 if (
-                    attrs.get("score_mode") != b"vp"
+                    attrs.get("q_bit") not in (8, 16)
+                    or attrs.get("k_bit") not in (8, 16)
                     or attrs.get("pool_size") != 4
                     or attrs.get("candidate_topk") != expected_k
                     or len(node.input) != 6
@@ -162,7 +163,7 @@ def audit_glm53_hmonnx(root, metadata):
             raise ValueError(f"{stage}: missing KDA scan operators: {scan_count}")
         if sinkhorn_count != expected_sinkhorn:
             raise ValueError(f"{stage}: missing mHC Sinkhorn operators: {sinkhorn_count} != {expected_sinkhorn}")
-        if (select_count or metadata.get("glm53_dsa_selection") == "vp_pool") and select_count != kinds.count(
+        if (select_count or metadata.get("glm53_dsa_selection") == "te_pool") and select_count != kinds.count(
             "deepseek_sparse_attention"
         ):
             raise ValueError(f"{stage}: missing pooled DSA SelectKV operators: {select_count}")

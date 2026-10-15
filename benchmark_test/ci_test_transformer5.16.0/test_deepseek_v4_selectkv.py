@@ -25,14 +25,11 @@ def test_host_candidate_lengths_and_selected_mask(past, current, fixed):
     masks = build_deepseek_v4_attention_masks(
         spec, input_sequence_length=fixed, past_length=past, current_length=current
     )
-    lengths = masks.csa_candidate_lengths
     expected = [(past + i + 1) // 4 if i < current else 0 for i in range(fixed)]
-    assert lengths.dtype == torch.int32 and lengths.shape == (1, fixed)
-    assert lengths[0].tolist() == expected
     selected_mask = masks.csa_attention_mask[0, 0, :, :512]
     assert (selected_mask == 0).sum(-1).tolist() == [min(n, 512) for n in expected]
     abi = DeepSeekV4CacheABI()
-    assert abi.attention_mask_shapes("decode" if fixed == 1 else "prefill")["csa_candidate_lengths"] == (1, fixed)
+    assert "csa_candidate_lengths" not in abi.attention_mask_shapes("decode" if fixed == 1 else "prefill")
 
 
 @pytest.mark.parametrize("version", [None, 1, 3])
@@ -59,10 +56,10 @@ def test_preprocessor_and_export_input_order():
     model.layer_types = (CSA,)
     model.cache_abi = runtime.abi
     names = model.get_export_cfg()["input_names"]
-    position = names.index("csa_candidate_lengths")
-    assert position == 8
-    assert inputs[position].dtype == torch.int32
-    assert inputs[position].tolist() == [[1, 1, 1, 0, 0, 0, 0, 0]]
+    assert "csa_candidate_lengths" not in names
+    assert names[8] == "csa_attention_mask"
+    assert inputs[2].tolist() == [3]  # Raw history, before this chunk.
+    assert inputs[3].tolist() == [3]  # Active rows, excluding padding.
 
 
 def _attention_case(fixed, past, current, device):
@@ -70,6 +67,7 @@ def _attention_case(fixed, past, current, device):
     spec = DeepSeekV4StaticCacheSpec(
         max_context_length=64,
         prefill_chunk_length=8,
+        decode_sequence_length=6 if fixed == 6 else 1,
         sliding_window=16,
         latent_head_dim=128,
         index_head_dim=128,
@@ -115,7 +113,6 @@ def _attention_case(fixed, past, current, device):
         torch.randn(1, fixed, 128, device=device, dtype=torch.float16),
         torch.tensor([past], dtype=torch.int32, device=device),
         torch.tensor([current], dtype=torch.int32, device=device),
-        masks.csa_candidate_lengths,
         masks.csa_attention_mask,
         torch.zeros(1, 1, spec.swa_physical_length, 128, device=device, dtype=torch.float16),
         torch.randn(1, 1, 16, 128, device=device, dtype=torch.float16),
@@ -134,7 +131,7 @@ def _attention_case(fixed, past, current, device):
     return model, args
 
 
-@pytest.mark.parametrize("fixed,past,current", [(8, 0, 7), (8, 3, 8), (1, 7, 1), (1, 8, 1)])
+@pytest.mark.parametrize("fixed,past,current", [(8, 0, 7), (8, 3, 8), (1, 7, 1), (1, 8, 1), (6, 3, 6), (6, 3, 4)])
 def test_complete_csa_uses_one_fused_selection(fixed, past, current):
     model, args = _attention_case(fixed, past, current, "cpu")
     output = model(*args)
@@ -153,15 +150,18 @@ def test_complete_csa_uses_one_fused_selection(fixed, past, current):
         model(*args)
     finally:
         handle.remove()
-    (q, keys, payload, total, weights, lengths), selected = captured[0]
+    (q, keys, payload, total, weights, active), selected = captured[0]
+    lengths = torch.tensor([[(past + i + 1) // 4 if i < current else 0 for i in range(fixed)]])
     scores = (torch.relu(q @ keys.transpose(-1, -2)) * weights).sum(1) * (2 * 128) ** -0.5
     scores = scores.masked_fill(torch.arange(16).view(1, 1, -1) >= lengths.unsqueeze(-1), -torch.inf)
-    indices = scores.argsort(dim=-1, descending=True, stable=True)[..., :4]
+    indices = scores.topk(4, dim=-1, sorted=True).indices
     expected = payload[0, 0][indices]
     keep = torch.arange(4).view(1, 1, -1, 1) < lengths.clamp_max(4).unsqueeze(-1).unsqueeze(-1)
     expected = torch.where(keep, expected, 0)
     torch.testing.assert_close(selected, expected, rtol=0, atol=0)
-    assert total.item() == (past + current) // 4
+    assert total.item() == past
+    assert active.item() == current
+    assert model.indexer.select_kv.compression_ratio == 4
 
 
 class _CSAExport(torch.nn.Module):
@@ -176,7 +176,6 @@ class _CSAExport(torch.nn.Module):
         hidden,
         past,
         current,
-        lengths,
         mask,
         swa_cache,
         main_cache,
@@ -199,7 +198,6 @@ class _CSAExport(torch.nn.Module):
             hidden,
             past,
             current,
-            lengths,
             mask,
             swa_cache,
             main_cache,
@@ -230,7 +228,7 @@ class _CSAExport(torch.nn.Module):
         )
 
 
-@pytest.mark.parametrize("fixed,past,current", [(8, 3, 7), (1, 7, 1)])
+@pytest.mark.parametrize("fixed,past,current", [(8, 3, 7), (1, 7, 1), (6, 3, 6), (6, 3, 4)])
 @pytest.mark.parametrize("quant_type", ["w8a8h1_sefp", "w8a16h1_sefp"])
 def test_csa_hmonnx_export_and_runtime(tmp_path, fixed, past, current, quant_type):
     from xhquant.api import (
@@ -246,16 +244,16 @@ def test_csa_hmonnx_export_and_runtime(tmp_path, fixed, past, current, quant_typ
     assert torch.cuda.is_available(), "CSA HMONNX regression requires a GPU"
     model, args = _attention_case(fixed, past, current, "cuda:0")
     args = list(args)
-    args[5] = HybridCacheTensor(args[5])
-    args[5].cache_valid_len = past
-    args[6:8] = [CacheTensor(cache) for cache in args[6:8]]
-    initial_caches = [cache.data.clone() for cache in args[5:8]]
+    args[4] = HybridCacheTensor(args[4])
+    args[4].cache_valid_len = past
+    args[5:7] = [CacheTensor(cache) for cache in args[5:7]]
+    initial_caches = [cache.data.clone() for cache in args[4:7]]
     graph = to_quant_graph(to_frontend_graph(_CSAExport(model), "TorchFX", args), "XH2a", {"quant_type": quant_type})
     ptq_quantize(graph, [args], PrecisionMode.ALIGNED, ["cuda:0"], infer_shape=False)
     expected = [value.dequantize().clone() for value in graph(*args)]
-    for cache, initial in zip(args[5:8], initial_caches, strict=True):
+    for cache, initial in zip(args[4:7], initial_caches, strict=True):
         cache.data.copy_(initial)
-    args[5].cache_valid_len = past
+    args[4].cache_valid_len = past
     path = tmp_path / "csa.onnx"
     to_export_hmonnx_from_quanted_graph(graph, args, str(path))
     exported = onnx.load(path)
@@ -265,14 +263,16 @@ def test_csa_hmonnx_export_and_runtime(tmp_path, fixed, past, current, quant_typ
     attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in nodes[0].attribute}
     assert attrs["candidate_topk"] == 4 and attrs.get("pool_size", 1) == 1
     assert not any(node.op_type == "TopK" for node in exported.graph.node)
-    length_input = exported.graph.input[3]
-    assert length_input.type.tensor_type.elem_type == onnx.TensorProto.INT32
-    assert [dim.dim_value for dim in length_input.type.tensor_type.shape.dim] == [1, fixed]
+    assert attrs["compression_ratio"] == 4
+    assert nodes[0].input[3] == "past" and nodes[0].input[5] == "current"
+    for length_input in exported.graph.input[1:3]:
+        assert length_input.type.tensor_type.elem_type == onnx.TensorProto.INT32
+        assert [dim.dim_value for dim in length_input.type.tensor_type.shape.dim] == [1]
     session = HMONNXInference(str(path))
     session.to("cuda:0")
-    for cache, initial in zip(args[5:8], initial_caches, strict=True):
+    for cache, initial in zip(args[4:7], initial_caches, strict=True):
         cache.data.copy_(initial)
-    args[5].cache_valid_len = past
+    args[4].cache_valid_len = past
     actual = session(*args)
     if isinstance(actual, dict):
         actual = tuple(actual.values())

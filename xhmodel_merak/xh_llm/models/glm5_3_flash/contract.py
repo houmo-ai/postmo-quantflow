@@ -17,7 +17,6 @@ CONTROL_NAMES = (
     "pool_new_count",
     "pool_write_start",
     "query_validity",
-    "pool_valid_length",
     "tail_indices",
     "dsa_attention_mask",
 )
@@ -43,27 +42,31 @@ def validate_state_graph(graph, spec, stage):
     shape = [dim.dim_value for dim in mask.type.tensor_type.shape.dim]
     if shape != [1, query_length, 1, spec.selected_pools * 4 + 3]:
         raise ValueError(f"{stage}: invalid GLM state ABI 3 attention mask shape: {shape}")
-    lengths = inputs.get("pool_valid_length")
-    if lengths is None or lengths.type.tensor_type.elem_type != onnx.TensorProto.INT32:
-        raise ValueError(f"{stage}: GLM state ABI 3 requires int32 pool_valid_length")
-    if [dim.dim_value for dim in lengths.type.tensor_type.shape.dim] != [1, query_length]:
-        raise ValueError(f"{stage}: invalid GLM state ABI 3 pool_valid_length shape")
+    for name in ("valid_length", "current_length"):
+        length = inputs.get(name)
+        if length is None or length.type.tensor_type.elem_type != onnx.TensorProto.INT32:
+            raise ValueError(f"{stage}: GLM SelectKV requires int32 {name}")
+        if [dim.dim_value for dim in length.type.tensor_type.shape.dim] != [1]:
+            raise ValueError(f"{stage}: invalid GLM SelectKV {name} shape")
     selections = [node for node in graph.node if node.op_type == "SparseAttentionSelectKV"]
     if len(selections) != expected:
         raise ValueError(
-            f"{stage}: GLM state ABI 3 requires VP SelectKV for all {expected} DSA layers; "
+            f"{stage}: GLM state ABI 3 requires TE SelectKV for all {expected} DSA layers; "
             "re-export legacy TopK selection graphs"
         )
     for node in selections:
         attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
         if (
-            attrs.get("score_mode") != b"vp"
+            attrs.get("q_bit") not in (8, 16)
+            or attrs.get("k_bit") not in (8, 16)
             or attrs.get("pool_size") != 4
             or len(node.input) != 6
             or len(node.output) != 1
-            or node.input[5] != "pool_valid_length"
+            or attrs.get("compression_ratio") != spec.pool_size
+            or node.input[3] != "valid_length"
+            or node.input[5] != "current_length"
         ):
-            raise ValueError(f"{stage}: invalid GLM state ABI 3 VP SelectKV ports; re-export the older graph")
+            raise ValueError(f"{stage}: invalid GLM state ABI 3 TE SelectKV ports; re-export the older graph")
 
 
 @dataclass(frozen=True)
@@ -232,7 +235,6 @@ def build_transition(spec, past_length, current_length, input_length, *, device=
         scalar((past_length % r + current_length) // r),
         scalar(past_length // r),
         real[None].to(dtype),
-        pool_valid,
         tail[None],
         attention_mask[None, :, None, :],
     )

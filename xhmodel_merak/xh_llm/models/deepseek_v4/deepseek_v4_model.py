@@ -508,7 +508,6 @@ class XHDeepSeekV4Model(SharedHeadMixin, TextLLMModel):
             "csa_write_start",
             "hca_write_start",
             "swa_attention_mask",
-            "csa_candidate_lengths",
             "csa_attention_mask",
             "hca_attention_mask",
             "csa_compressor_validity",

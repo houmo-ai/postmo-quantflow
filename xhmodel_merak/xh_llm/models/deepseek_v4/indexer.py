@@ -139,6 +139,7 @@ class StaticCSAIndexer(nn.Module):
             candidate_topk=topk,
             score_scale=(self.num_heads * self.head_dim) ** -0.5,
             pool_size=1,
+            compression_ratio=self.ratio,
         )
         self.key_cache_writer = FixedCapacityCacheWriter()
 
@@ -198,7 +199,7 @@ class StaticCSAIndexer(nn.Module):
         compressor_new_count: Tensor,
         compressor_offset: Tensor,
         compressor_phase_indices: Tensor,
-        candidate_lengths: Tensor,
+        past_length: Tensor,
         kv_state: Tensor,
         score_state: Tensor,
         query_cos: Tensor,
@@ -229,12 +230,6 @@ class StaticCSAIndexer(nn.Module):
                 raise ValueError(f"q_residual must have shape {expected_q}")
             if tuple(key_cache.shape) != expected_cache:
                 raise ValueError(f"key_cache must have shape {expected_cache}")
-            expected_lengths = (
-                hidden_states.shape[0],
-                self.input_sequence_length,
-            )
-            if tuple(candidate_lengths.shape) != expected_lengths:
-                raise ValueError(f"candidate_lengths must have shape {expected_lengths}")
 
         compressed = self.compressor(
             hidden_states,
@@ -279,9 +274,9 @@ class StaticCSAIndexer(nn.Module):
             query.transpose(1, 2),
             updated_key_cache.unsqueeze(1),
             payload_cache.unsqueeze(1),
-            write_start + compressed.new_count,
+            past_length,
             index_weights.transpose(1, 2).unsqueeze(-1),
-            candidate_lengths,
+            current_length,
         )
         return StaticCSAIndexerOutput(
             selected_kv,

@@ -240,7 +240,7 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
         "a16_w16_chunk_scans": 0,
     }
     assert report["vision_components"] == 3
-    assert meta["glm53_dsa_selection"] == "vp_pool"
+    assert meta["glm53_dsa_selection"] == "te_pool"
     assert meta["glm53_state_abi_version"] == 3
     # A saved constant projection silently left at W16 used to escape the
     # Linear/MoE-only audit. Corrupt its real graph attribute, then restore it.

@@ -61,25 +61,31 @@ Host 在调用前备份该状态，失败时回滚，成功后用于后续 prefi
 ChunkScan 的 `matmul_input_bit=16` 配置内部 TE MatMul 为 A16/W16；
 默认 8 保留其他调用者的旧语义。`GDRBlockTriInverse` 仍按 VP 实现，不增加 bit 属性。
 
-`SparseAttentionSelectKV` 沿用 VP 的 Mul → feature ReduceSum → ReLU LUT →
-head Mul/ReduceSum → scale → stable TopK → Gather，仅返回 selected latent。
-默认 `pool_size=1` 保持旧 decode 契约；GLM 使用 `pool_size=4`：选中
+`SparseAttentionSelectKV` 使用 TE QK MatMul → ReLU LUT →
+head Mul/ReduceSum → scale → XH2_VP TopK → Gather，仅返回 selected latent。
+`pool_size=1` 直接选压缩 latent；GLM 使用 `pool_size=4`：选中
 pool p 后，依次取原始 latent 的 `4p、4p+1、4p+2、4p+3` 行。
 压缩 index key 只参与选择，attention 仍消费原始 latent。
+内部 Q/K 的 SEFP 位宽由 `q_bit`、`k_bit` 指定（8 或 16，默认均为 16），
+共享指数分组为 64，累加为 FP24；不再使用 `score_mode` 属性。
+这些属性不改变外部 Q/K 的 FP16 接口，也不会恢复上游 A8 量化已经丢失的精度。
 
 | 输入 | GLM 的布局和单位 |
 | --- | --- |
 | query | `[1,H,Tq,Dindex]` |
 | index_key_cache | `[1,1,Npool,Dindex]`，完整 pool 的压缩 index key |
 | payload_cache | `[1,1,Ntoken,Dlatent]`，原始 token latent |
-| valid_length | int32 scalar，已写入的完整 pool 数 |
+| valid_length | int32 scalar，本次输入之前的原始 token 数 |
 | head_weights | `[1,H,Tq,1]`，可选 |
-| query_valid_length | int32 `[1,Tq]`，每个 query 可见的完整 pool 数 |
+| current_length | 可选 int32 scalar，本次有效 query 数；省略时为 Tq |
 | selected_kv（唯一输出） | `[1,Tq,Kpool*4,Dlatent]` |
 
-第六个输入限制每个 query 的候选前缀。无效候选在 TopK 前设为 `-inf`，
-stable TopK 使有效候选排在前面；不足 Kpool 时，剩余输出槽位置零。
-因此第 t 个 query 的有效 latent 数为 `min(query_valid_length[t],Kpool)*4`，
+属性 `compression_ratio` 表示每个候选对应的原始 token 数，GLM 为 4；
+它与 payload 展开属性 `pool_size` 独立。算子内部计算
+`L[t] = floor((valid_length+t+1)/compression_ratio)`，padding query 的 L 为零。
+无效候选在 TopK 前设为 `-inf`，有效分数先截到 dtype 有限下界，
+使用固定非稳定 `XH2_VP` TopK；不足 Kpool 的输出槽位置零。
+因此第 t 个 query 的有效 latent 数为 `min(L[t],Kpool)*4`，
 Host 根据该有效前缀和最多三个尾部 token 的有效性，预先生成
 `dsa_attention_mask`，形状为 `[1,Tq,1,Kpool*4+3]`，有效位置为 `0`，
 无效位置为 FP16 有限值 `-65504`，广播到各个 attention head。
@@ -94,9 +100,10 @@ DSA 的 latent/pool KV cache 从图入口、`KVcache(axis=2)` 写回到 SelectKV
 KDA recurrent state 保持 `[1,H,Dk,Dv]`；卷积状态和四个 token 的压缩边界状态
 属于辅助状态，沿用各自的三维布局。
 
-Host control 由旧的 `[1,Tq,Npool]` 浮点 `pool_validity` 改为 `[1,Tq]`
-int32 `pool_valid_length`；ABI 3 将 `tail_validity` 替换为 Host 准备的四维
-`dsa_attention_mask`。旧开发图必须重新导出，加载端拒绝旧的 state ABI。
+Host 不再传入 `pool_valid_length`；prefill 传入有效 query 数以排除 padding，
+decode/verify 在所有行有效时可省略。`dsa_attention_mask` 仍由 Host 生成。
+DeepSeek 同样移除 `csa_candidate_lengths`，但 `pool_size=1`，直接选压缩行。
+旧长度接口的开发图必须重新导出。
 原 `hmfp_pool` 双输出分支已移除。部署前同时更新 ModelZoo 和 xhquanttool。
 数值、原始 token 展开和续接验证见
 [当前 GLM 静态图测试](../../../benchmark_test/ci_test_transformer5.16.0/test_glm53_static.py)。
