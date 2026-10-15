@@ -72,6 +72,40 @@ with `with restore_model_initialization_state():`, or use a separate worker. The
 Module/session fixtures and collection must not load checkpoints in the shared
 pytest process: the function-scoped guard does not bracket those operations.
 
+## Sol-H3 self-contained graph integration
+
+The single public `sol-h3/full` case builds the shared all-mode package on
+local temporary storage. Native H3 and Qwen modules use the installed
+Diffusers/Transformers packages; bridge, AV attention/FFN/AdaLN and codecs use
+constructed PyTorch components. Existing deployment graph forward methods,
+SDK quantization/export, package relocation, source-checkpoint deletion and
+five-mode video/audio inference execute for real. Component checkpoint loading
+and structural source adaptation are the explicit fixture injection boundary.
+Its build dependency profile omits OpenImageIO and the author-loader SciPy pin;
+the local Torch checkpoint loaders do not use them. Production requirements and
+validation of all remaining fixture dependencies stay intact.
+
+Return-to-T2VA checks compare exact generated pixels and PCM before lossy video
+encoding; every generated video is still decoded and checked.
+
+No `UNIFIED_CI_SOL_H3_SOURCE`, `SOL_H3_LTX_SOURCE`, author checkout, downloaded
+source or release weights are required. CI can actively reject imports of
+`runtime.stage2_ops`, `ltx_core` and `ltx_pipelines`; missing packages are not
+hidden with `importorskip`. Native H3 full/LoRA fixtures remain independent.
+
+Independent small-tensor references cover temporal/spatial offset order,
+time roles, prompt projections, endpoint slots and Euler updates. Remaining
+component exports check model-specific DeepStack/cache handoff, fixed AdaLN
+roles, text-refiner scaling and masked codec boundaries. The public case owns
+package relocation and source-checkpoint deletion. Generic SDK convolution/VP
+routing, RMSNorm precision and Conv3d lowering belong to SDK tests;
+GPTQ/AutoRound calibration belongs to its producer tests. Author-source-only
+LTX/codec equivalence tests were removed
+from the automatic suite, rather than silently skipped. These tests verify
+ModelZoo graph/build/runtime contracts; they do not certify author checkpoint
+builders, full-size model quality or native LTX-2.5 numerical equivalence.
+Normal production builds retain their original author-source loaders.
+
 ## Coverage policy
 
 The selector separates global safety policy from test ownership:

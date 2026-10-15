@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test_unified_model_sol_h3-unified-sol-h3",
+      "patterns": [
+        "xhmodel_merak/model_integrations/sol_h3/**",
+        "xhmodel_merak/xh_other_model/models/sol_h3/**",
+        "configs_merak/workflows/xh2a/other_models/sol_h3/sol_h3_*.yaml",
+        "benchmark_test/ci_test_transformer5.16.0/_sol_h3_small_fixture.py",
+        "examples_merak/aigc/sol_h3/**",
+        "benchmark_test/ci_test_transformer5.16.0/_sol_h3_tiny_components.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_reference_vae.py"
+      ]
+    },
+    {
+      "id": "test_unified_model_sol_h3-unified-common",
+      "patterns": [
+        "xhmodel_merak/model_build/**",
+        "xhmodel_merak/model_inference/**",
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_artifact/**",
+        "xhmodel_merak/_requirements.py",
+        "xhmodel_merak/_environment.py",
+        "xhmodel_merak/model_integrations/autoregressive/**",
+        "xhmodel_merak/xh_llm/workflows/**",
+        "xhmodel_merak/workflows/**",
+        "xhmodel_merak/model_integrations/__init__.py",
+        "xhmodel_merak/model_integrations/_shared.py",
+        "xhmodel_merak/model_integrations/_dependencies.py"
+      ]
+    },
+    {
+      "id": "test_unified_model_sol_h3-fixtures",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_unified_cases.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_e2e_worker.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/__init__.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/sol_h3.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_preparation.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_runner.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_small_model.py"
+      ]
+    }
+  ]
+}

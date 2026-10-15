@@ -20,6 +20,7 @@
 | Qwen-Image-2.1 的特征边界、共享调制、前缀 KV 与浮点诊断 | [接入记录（进行中）](structures/qwen-image21.md) |
 | Qwen-Image-2.1-Turbo 的 8 步采样、模型身份与部署验证 | [Turbo 接入记录](structures/qwen-image21-turbo.md) |
 | FLUX 3 Image Klein 的核心图、三精度、动态多参考、扩写及交付验收 | [FLUX 适配交付总览](structures/flux3-image-klein.md#adaptation-overview) |
+| Sol-H3 的 4+3 步、AdaLN 索引、长序列 FP16 累加与 SEFP8 | [Sol-H3 接入记录](structures/sol-h3.md) |
 | M50、YH、XH3 如何选择已有路径或扩展 | [目标设备索引](targets/README.md) |
 
 算子页拥有图表达和数值语义，结构页描述组合关系与状态，目标页只记录设备差异和证据入口。

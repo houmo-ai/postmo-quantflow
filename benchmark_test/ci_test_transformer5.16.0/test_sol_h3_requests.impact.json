@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "sol-h3-five-mode-request-reference-slots-and-media-timing",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/sol_h3/request.py",
+        "xhmodel_merak/xh_other_model/models/sol_h3/runtime.py",
+        "configs_merak/workflows/xh2a/other_models/sol_h3/*.yaml",
+        "xhmodel_merak/xh_other_model/models/sol_h3/host.py",
+        "xhmodel_merak/xh_other_model/models/sol_h3/conditioning.py"
+      ]
+    }
+  ]
+}

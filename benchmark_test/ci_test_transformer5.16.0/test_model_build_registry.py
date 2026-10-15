@@ -328,6 +328,7 @@ def test_registry_covers_each_public_artifact_kind():
         "flux3_klein",
         "minicpm_v_4_7",
         "minicpm_o_4_5",
+        "sol_h3",
     }
     assert {recipe.task for recipe in recipes} >= {
         "text-generation",

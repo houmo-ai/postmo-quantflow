@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "sol-h3-reference-audio",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/sol_h3/reference_audio.py",
+        "xhmodel_merak/xh_other_model/models/sol_h3/h3_vae_wrappers.py",
+        "xhmodel_merak/xh_other_model/models/sol_h3/export.py",
+        "xhmodel_merak/xh_other_model/models/sol_h3/graph_audit.py",
+        "xhmodel_merak/xh_other_model/models/sol_h3/feature_graph.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/audio_vae_encoder_wrapper.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/audio_vae_decoder_wrapper.py",
+        "xhmodel_merak/xh_other_model/models/sol_h3/conv_graph.py"
+      ]
+    }
+  ]
+}

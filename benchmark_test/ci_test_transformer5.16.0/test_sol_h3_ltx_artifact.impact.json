@@ -1,0 +1,1 @@
+{"version":1,"rules":[{"id":"sol-h3-reference-artifact-contract","patterns":["xhmodel_merak/xh_other_model/models/sol_h3/artifacts.py","xhmodel_merak/xh_other_model/models/sol_h3/build.py","xhmodel_merak/model_integrations/sol_h3/artifact.py","benchmark_test/ci_test_transformer5.16.0/test_sol_h3_ltx_artifact.py"]}]}

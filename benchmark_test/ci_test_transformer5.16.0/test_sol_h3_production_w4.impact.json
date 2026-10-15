@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "sol-h3-production-checkpoint-contract",
+    "patterns": [
+      "xhmodel_merak/model_catalog/contracts.py",
+      "xhmodel_merak/model_build/checkpoint.py",
+      "xhmodel_merak/model_integrations/sol_h3/**",
+      "xhmodel_merak/xh_other_model/models/sol_h3/workflow.py",
+      "xhmodel_merak/xh_other_model/models/sol_h3/build.py",
+      "configs_merak/workflows/xh2a/other_models/sol_h3/*_w4.yaml",
+      "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_unified_api.py",
+      "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_production_w4.py"
+    ]
+  }]
+}
