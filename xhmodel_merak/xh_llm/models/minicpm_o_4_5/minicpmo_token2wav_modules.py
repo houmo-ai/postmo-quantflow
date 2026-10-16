@@ -116,9 +116,57 @@ class FlowFrontendWrapper(torch.nn.Module):
 class FlowStreamingFrontendWrapper(torch.nn.Module):
     """Use ``last_chunk`` to share one Conformer graph for normal and final chunks."""
 
-    def __init__(self, flow_module: torch.nn.Module) -> None:
+    def __init__(self, flow_module: torch.nn.Module, *, cache_tail_length: int) -> None:
         super().__init__()
         self.flow = flow_module
+        self.cache_tail_length = cache_tail_length
+
+    @staticmethod
+    def _updated_attention_cache(
+        present: torch.Tensor,
+        past_length: torch.Tensor,
+        current_length: torch.Tensor,
+        prompt_length: torch.Tensor,
+        tail_length: int,
+        capacity: int,
+        is_base_cache: bool = False,
+    ) -> torch.Tensor:
+        positions = torch.arange(capacity, device=present.device)
+        past = past_length.to(torch.int64)
+        current = current_length.to(torch.int64)
+        prompt = prompt_length.to(torch.int64)
+        total = past + current
+        truncated = total > capacity
+        # On truncation, keep the prompt-length prefix and tail (100 full-rate mel frames by default).
+        valid = torch.where(truncated, prompt + tail_length, total)
+        position = positions - (capacity - valid)
+        # Base Conformer takes the True branch; Up Conformer takes the else branch.
+        if is_base_cache:
+            # Host truncates the duplicated half-rate cache before packing its
+            # leading half; double the offsets and wrap across the two copies.
+            tail_index = total - 2 * tail_length + position - 2 * prompt
+            tail_index = torch.where(tail_index < 0, tail_index + total, tail_index)
+            logical_index = torch.where(
+                truncated & (position >= 2 * prompt),
+                tail_index,
+                position,
+            )
+        else:
+            logical_index = torch.where(
+                truncated & (position >= prompt),
+                total - tail_length + position - prompt,
+                position,
+            )
+        source_index = torch.where(
+            logical_index < past,
+            capacity - past + logical_index,
+            capacity + logical_index - past,
+        )
+        valid_positions = positions >= capacity - valid
+        source_index = torch.where(valid_positions, source_index, torch.zeros_like(source_index))
+        index = source_index.reshape(1, 1, 1, capacity, 1).expand(*present.shape[:3], capacity, present.shape[4])
+        selected = torch.gather(present, 3, index)
+        return torch.where(valid_positions.reshape(1, 1, 1, capacity, 1), selected, torch.zeros_like(selected))
 
     def forward(
         self,
@@ -129,6 +177,7 @@ class FlowStreamingFrontendWrapper(torch.nn.Module):
         past_conformer_cnn_cache: torch.Tensor,
         past_conformer_att_cache: torch.Tensor,
         conformer_cache_valid_length: torch.Tensor,
+        prompt_cache_valid_length: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
         spks = self.flow.spk_embed_affine_layer(_normalize_embedding(embedding))
         token_mask = torch.arange(tokens.shape[1], device=tokens.device).unsqueeze(0) < token_valid_length.reshape(1, 1)
@@ -143,6 +192,29 @@ class FlowStreamingFrontendWrapper(torch.nn.Module):
             conformer_cache_valid_length,
             last_chunk,
         )
+        capacity = past_conformer_att_cache.shape[3]
+        current_capacity = present_att.shape[3] - capacity
+        base_layers = len(encoder.encoders)
+        base_present = self._updated_attention_cache(
+            present_att[:base_layers, :, :, : (capacity + current_capacity) // 2],
+            conformer_cache_valid_length // 2,
+            current_mel_valid_length // 2,
+            prompt_cache_valid_length // 2,
+            self.cache_tail_length // 2,
+            capacity // 2,
+            # The published Host path truncates the duplicated half-rate
+            # cache, then packs its leading half; preserve that behavior.
+            is_base_cache=True,
+        )
+        up_present = self._updated_attention_cache(
+            present_att[base_layers:],
+            conformer_cache_valid_length,
+            current_mel_valid_length,
+            prompt_cache_valid_length,
+            self.cache_tail_length,
+            capacity,
+        )
+        present_att = torch.cat((base_present.repeat(1, 1, 1, 2, 1), up_present), dim=0)
         mu = self.flow.encoder_proj(hidden).transpose(1, 2).contiguous()
         return (
             mu,
@@ -336,9 +408,47 @@ class FlowDecoderWrapper(torch.nn.Module):
 class FlowEstimatorStepWrapper(torch.nn.Module):
     """Export one cached official DiT estimator step with explicit cache tensors."""
 
-    def __init__(self, estimator: torch.nn.Module) -> None:
+    def __init__(self, estimator: torch.nn.Module, *, stream_cache_tail_length: int = 0) -> None:
         super().__init__()
         self.estimator = estimator
+        self.stream_cache_tail_length = stream_cache_tail_length
+
+    @staticmethod
+    def _updated_stream_cache(
+        current: torch.Tensor,
+        past: torch.Tensor,
+        past_length: torch.Tensor,
+        current_length: torch.Tensor,
+        prompt_length: torch.Tensor,
+        tail_length: int,
+    ) -> torch.Tensor:
+        """Keep the official current-first prompt/tail cache in fixed storage."""
+        capacity = past.shape[3]
+        current_capacity = current.shape[3]
+        positions = torch.arange(capacity, device=past.device)
+        total = past_length.to(torch.int64) + current_length.to(torch.int64)
+        prompt = prompt_length.to(torch.int64)
+        truncated = total > capacity
+        valid = torch.where(truncated, prompt + tail_length, total)
+        position = positions - (capacity - valid)
+        compact_index = torch.where(
+            position < prompt,
+            position,
+            total - tail_length + position - prompt,
+        )
+        logical_index = torch.where(truncated, compact_index, position)
+        source_index = torch.where(
+            logical_index < current_length.to(torch.int64),
+            logical_index,
+            current_capacity + capacity - past_length.to(torch.int64)
+            + logical_index - current_length.to(torch.int64),
+        )
+        valid_positions = positions >= capacity - valid
+        source_index = torch.where(valid_positions, source_index, torch.zeros_like(source_index))
+        source = torch.cat((current, past), dim=3)
+        index = source_index.reshape(1, 1, 1, capacity, 1).expand(*source.shape[:3], capacity, source.shape[4])
+        selected = torch.gather(source, 3, index)
+        return torch.where(valid_positions.reshape(1, 1, 1, capacity, 1), selected, torch.zeros_like(selected))
 
     def _functional_blocks_forward_chunk(
         self,
@@ -385,7 +495,8 @@ class FlowEstimatorStepWrapper(torch.nn.Module):
             new_cnn.append(cnn_value)
             new_att.append(att_value)
         output = self.estimator.final_layer(hidden, t_embed).transpose(1, 2)
-        return output, torch.stack(new_cnn, dim=0), torch.stack(new_att, dim=0)
+        current_att = torch.stack(new_att, dim=0)[:, :, :, :current_capacity, :]
+        return output, torch.stack(new_cnn, dim=0), current_att
 
     @staticmethod
     def _functional_causal_conv_block(
@@ -456,6 +567,7 @@ class FlowEstimatorStepWrapper(torch.nn.Module):
         past_estimator_att_cache: torch.Tensor,
         past_cache_valid_length: torch.Tensor | None = None,
         current_frame_valid_length: torch.Tensor | None = None,
+        prompt_cache_valid_length: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, ...]:
         if past_cache_valid_length is None:
             past_cache_valid_length = torch.tensor(
@@ -481,6 +593,15 @@ class FlowEstimatorStepWrapper(torch.nn.Module):
             past_cache_valid_length,
             current_frame_valid_length,
         )
+        if self.stream_cache_tail_length:
+            present_att = self._updated_stream_cache(
+                present_att,
+                past_estimator_att_cache,
+                past_cache_valid_length,
+                current_frame_valid_length,
+                prompt_cache_valid_length,
+                self.stream_cache_tail_length,
+            )
         return derivative, present_cnn, present_att
 
 

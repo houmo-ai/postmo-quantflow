@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from xhmodel_merak.exec_backends import CacheTensor
+
 from ...hmonnx.hmonnx_model import HMONNXBaseModel, HMONNXModel
 from .minicpmo_token2wav_modules import deterministic_hift_source
 from .runtime_token2wav_adapters import (
@@ -45,6 +47,25 @@ from .runtime_token2wav_streaming import (
 )
 
 
+class _FlowCacheHMONNXModel(HMONNXModel):
+    """Share graph weights, but capture each resident cache owner separately."""
+
+    def _create_hmonnx_session(self, enable_golden: bool, enable_auto_offload: bool) -> None:
+        if self.enable_cuda_graph and not self._is_inference_v2_env_enabled():
+            raise RuntimeError("Flow cache CUDA Graph requires ENABLE_HMINFERENCE_V2=1")
+        super()._create_hmonnx_session(enable_golden, enable_auto_offload)
+
+    def forward(self, *args):
+        if self.enable_cuda_graph:
+            owner = next(value for value in args if isinstance(value, CacheTensor))
+            self.hmonnx_session.interpreter.set_capture_cache_key(owner.data_ptr())
+        return super().forward(*args)
+
+    def clear_cuda_graph(self) -> None:
+        if self.enable_cuda_graph:
+            self.hmonnx_session.interpreter.clear(clear_disabled_reason=True)
+
+
 class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
     """Shared graph lifecycle around MiniCPM's Token2Wav state machine.
 
@@ -68,8 +89,11 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
     ) -> None:
         super().__init__(device_map=device_map)
 
-        def graph(path: Path) -> HMONNXModel:
-            return HMONNXModel(
+        def graph(
+            path: Path, *, resident_cache: bool = False, enable_cuda_graph: bool = enable_cuda_graph
+        ) -> HMONNXModel:
+            model = _FlowCacheHMONNXModel if resident_cache else HMONNXModel
+            return model(
                 str(path),
                 enable_golden=enable_golden,
                 enable_cuda_graph=enable_cuda_graph,
@@ -126,6 +150,10 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         self.streaming_enabled = export_mode in {"session", "stream"}
         if self.streaming_enabled:
             self._load_streaming_roles(root, components, graph)
+            for session in (self.flow_frontend_session, self.estimator_step_session):
+                enable_inplace = getattr(session.hmonnx_session, "enable_inplace_cache_updates", None)
+                if callable(enable_inplace):
+                    enable_inplace()
         self._regenerate_noise()
 
     def _create_hift_noise(self, harmonic_count: int, source_length: int) -> tuple[Tensor, Tensor]:
@@ -157,19 +185,22 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         self,
         root: Path,
         components: Mapping[str, Mapping[str, object]],
-        graph: Callable[[Path], HMONNXModel],
+        graph: Callable[..., HMONNXModel],
     ) -> None:
         frontend = components["token2wav_flow_frontend"]["stream_contract"]
         decoder = components["token2wav_flow_decoder"]["stream_contract"]
         hift = components["token2wav_hift"]["stream_contract"]
+        # The SDK's Reciprocal implementation is not CUDA Graph capture-safe.
         self.flow_frontend_session = graph(
-            root / str(components["token2wav_flow_frontend"]["graphs"]["stream_flow_frontend"])
+            root / str(components["token2wav_flow_frontend"]["graphs"]["stream_flow_frontend"]),
+            enable_cuda_graph=False,
         )
         self.prompt_frontend_session = graph(
             root / str(components["token2wav_flow_frontend"]["graphs"]["stream_flow_prompt_frontend"])
         )
         self.estimator_step_session = graph(
-            root / str(components["token2wav_flow_decoder"]["graphs"]["stream_flow_estimator_step"])
+            root / str(components["token2wav_flow_decoder"]["graphs"]["stream_flow_estimator_step"]),
+            resident_cache=True,
         )
         self.prompt_estimator_step_session = graph(
             root / str(components["token2wav_flow_decoder"]["graphs"]["stream_flow_prompt_estimator_step"])
@@ -195,7 +226,14 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         self.speech_window = torch.from_numpy(np.hamming(self.speech_cache_length * 2)).float()
         self._base_flow_cache = None
 
+    def _clear_stream_cuda_graphs(self) -> None:
+        # Reset/rebind can replace owners: captures must not retain their storage.
+        for model in self._models.values():
+            if isinstance(model, _FlowCacheHMONNXModel):
+                model.clear_cuda_graph()
+
     def _set_device(self, device: torch.device):
+        self._clear_stream_cuda_graphs()
         super()._set_device(device)
         self._noise_device = device
         self.rand_noise = self.rand_noise.to(device)
@@ -213,7 +251,9 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
                 name: value.to(device) for name, value in self._stream_state.flow_cache.items()
             }
             self._stream_state.estimator_cnn_banks = self._stream_state.estimator_cnn_banks.to(device)
-            self._stream_state.estimator_att_banks = self._stream_state.estimator_att_banks.to(device)
+            self._stream_state.estimator_att_banks = [
+                owner.to(device) for owner in self._stream_state.estimator_att_banks
+            ]
             self._stream_state.hift_cache = {
                 name: value.to(device) for name, value in self._stream_state.hift_cache.items()
             }
@@ -254,22 +294,18 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
             torch.tensor([int(final)], dtype=torch.int32, device=tokens.device),
             embedding.to(torch.float16),
             cnn_cache.to(torch.float16),
-            pack_conformer_attention_cache(
-                att_cache,
-                valid_length=real_valid,
-                capacity=conformer_capacity,
-                base_layer_count=self.base_conformer_layers,
-            ).to(torch.float16),
+            att_cache,
             torch.tensor(
                 [real_valid],
                 dtype=torch.int32,
                 device=tokens.device,
             ),
+            torch.tensor([self._stream_state.prompt_mel_length], dtype=torch.int32, device=tokens.device),
         )
         values = _values(session(*inputs))
         if len(values) != 5:
             raise RuntimeError(f"Token2Wav stream Flow frontend returned {len(values)} tensors, expected 5")
-        mu, spks, present_cnn, present_att, present_valid_length = values
+        mu, spks, present_cnn, _, present_valid_length = values
         self._stream_state.flow_cache["conformer_cnn_cache"] = present_cnn.to(cnn_cache.dtype)
         prompt_mel_length = int(self._stream_state.prompt_mel_length)
         current_mel_length = (
@@ -288,21 +324,11 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
                 "Token2Wav Conformer valid-length mismatch: "
                 f"graph={graph_present_length}, expected={expected_present_length}"
             )
-        compact_present_att = compact_conformer_attention_cache(
-            present_att.to(att_cache.dtype),
-            past_valid_length=real_valid,
-            current_valid_length=current_mel_length,
-            input_capacity=conformer_capacity,
-            base_layer_count=self.base_conformer_layers,
+        self._stream_state.flow_valid_lengths["conformer_att_cache"] = (
+            expected_present_length
+            if expected_present_length <= conformer_capacity
+            else prompt_mel_length + self.stream_tail_frames
         )
-        compact_present_att = _truncate_streaming_cache(
-            compact_present_att,
-            prompt_length=prompt_mel_length,
-            tail=self.stream_tail_frames,
-            capacity=conformer_capacity,
-        )
-        self._stream_state.flow_cache["conformer_att_cache"] = compact_present_att
-        self._stream_state.flow_valid_lengths["conformer_att_cache"] = int(compact_present_att.shape[3])
         output_mel_capacity = int(meta["output_mel_capacities"]["final" if final else "normal"])
         if current_mel_length > output_mel_capacity:
             raise RuntimeError(f"Token2Wav mel length {current_mel_length} exceeds role capacity {output_mel_capacity}")
@@ -320,11 +346,8 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
             cfg_rate=self.cfg_rate,
             estimator_cnn_banks=self._stream_state.estimator_cnn_banks,
             estimator_att_banks=self._stream_state.estimator_att_banks,
-            estimator_att_capacity=int(
-                getattr(self, "stream_estimator_meta", {})
-                .get("estimator_step_cache_shapes", {})
-                .get("input_att", (0, 0, 0, 150, 0))[3]
-            ),
+            past_att_valid_length=offset,
+            prompt_cache_valid_length=prompt_mel_length,
             frame_capacity=int(
                 getattr(self, "stream_estimator_meta", {})
                 .get("estimator_step_cache_shapes", {})
@@ -337,21 +360,13 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
             .get("estimator_step_cache_shapes", {})
             .get("input_att", (0, 0, 0, 150, 0))[3]
         )
-        present_banks = self._stream_state.estimator_att_banks
-        truncated_banks = _truncate_streaming_cache(
-            present_banks,
-            prompt_length=prompt_mel_length,
-            tail=self.stream_tail_frames,
-            capacity=estimator_capacity,
-        )
-        self._stream_state.estimator_att_banks = truncated_banks
-        self._stream_state.flow_valid_lengths["estimator_att_cache"] = int(truncated_banks.shape[4])
+        present_length = offset + current_mel_length
+        if present_length > estimator_capacity:
+            present_length = prompt_mel_length + self.stream_tail_frames
+        self._stream_state.flow_valid_lengths["estimator_att_cache"] = present_length
         estimator_cnn = self._stream_state.flow_cache["estimator_cnn_cache"].clone()
         estimator_cnn[: self.n_timesteps] = self._stream_state.estimator_cnn_banks
         self._stream_state.flow_cache["estimator_cnn_cache"] = estimator_cnn
-        total_cache_banks = int(self._stream_state.flow_cache["estimator_att_cache"].shape[0])
-        unused_banks = truncated_banks.new_zeros((total_cache_banks - self.n_timesteps, *truncated_banks.shape[1:]))
-        self._stream_state.flow_cache["estimator_att_cache"] = torch.cat((truncated_banks, unused_banks), dim=0)
         self._stream_state._check_lengths()
         self.report.record_stream_flow(final)
         return mel
@@ -438,7 +453,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
         mel = self._run_flow_role(tokens, embedding, last_chunk)
         if self._stream_state is None:
             raise RuntimeError("Token2Wav streaming cache is not initialized")
-        return mel, {name: value.detach().clone() for name, value in self._stream_state.flow_cache.items()}
+        return mel, self._stream_state.flow_cache
 
     def stream_hift(
         self,
@@ -459,7 +474,22 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
                 return
             raise RuntimeError("immutable Token2Wav stream base cache was never initialized")
         if state is not None:
+            self._clear_stream_cuda_graphs()
             state.reset(base_cache)
+            self._bind_conformer_cache()
+
+    def _bind_conformer_cache(self) -> None:
+        state = self._stream_state
+        base = state.flow_cache["conformer_att_cache"]
+        capacity = int(self.stream_flow_meta["frontend_cache_shapes"]["conformer_att_cache"][3])
+        state.flow_cache["conformer_att_cache"] = CacheTensor(
+            pack_conformer_attention_cache(
+                base.to(torch.float16),
+                valid_length=state.flow_valid_lengths["conformer_att_cache"],
+                capacity=capacity,
+                base_layer_count=self.base_conformer_layers,
+            )
+        )
 
     def reset_state(self) -> None:
         self.reset_stream_cache()
@@ -605,6 +635,9 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
             raise RuntimeError("prompt mel length must be non-negative")
         if regenerate_noise:
             self._regenerate_noise()
+        self._clear_stream_cuda_graphs()
+        if self._stream_state is not None:
+            self._stream_state.close()
         self._base_flow_cache = {name: value.detach().clone() for name, value in base_cache.items()}
         att_capacity = self._stream_att_capacity()
         self._stream_state = StreamState.from_base_cache(
@@ -614,6 +647,7 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
             append_capacity=getattr(self, "append_capacity", 56),
             host_timestep_cache_banks=getattr(self, "host_timestep_cache_banks", 10),
         )
+        self._bind_conformer_cache()
         stream_hift_meta = getattr(self, "stream_hift_meta", None)
         if isinstance(stream_hift_meta, Mapping):
             cache_dtype = next(iter(self._base_flow_cache.values())).dtype
@@ -742,6 +776,9 @@ class MiniCPMO45Token2WavHMONNXRuntime(HMONNXBaseModel):
 
     def release_state(self) -> None:
         """Drop model-specific tensors; graph release is centralized."""
+        self._clear_stream_cuda_graphs()
+        if self._stream_state is not None:
+            self._stream_state.close()
         self._base_flow_cache = None
         self._stream_state = None
         for name in (

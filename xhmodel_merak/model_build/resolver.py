@@ -74,7 +74,8 @@ def resolve_build_plan(
 
     speculative_request = _coerce_speculative(model, speculative)
     lora_request = _coerce_lora(model, lora)
-    variant = _select_variant(recipe, speculative_request, lora_request)
+    resolved_profile = _resolve_profile(recipe, profile)
+    variant = _select_variant(recipe, speculative_request, lora_request, resolved_profile)
     resolved_low_memory = _resolve_low_memory(model, variant, low_memory)
     _validate_sources(model, variant, source_refs)
     _validate_resources(recipe, resource_refs)
@@ -106,7 +107,6 @@ def resolve_build_plan(
     )
 
     selected_components = _resolve_components(model, recipe, variant, components)
-    resolved_profile = _resolve_profile(recipe, profile)
     _validate_vision(model, recipe, vision)
     _validate_attention(recipe, attention)
 
@@ -202,7 +202,9 @@ def resolve_build_plan(
         worker_capabilities.extend(dict(recipe.quant_capabilities).get(resolved_method, ()))
 
     field_sources = {
-        "variant": "user_explicit" if speculative_request or lora_request else "recipe_default",
+        "variant": "user_explicit" if speculative_request or lora_request or (
+            profile is not None and recipe.get_variant(resolved_profile) is not None
+        ) else "recipe_default",
         "precision": precision_source,
         "deployment_precision": "user_explicit" if deployment_precision is not None else "recipe_default",
         "quant_method": method_source,
@@ -324,9 +326,11 @@ def _select_variant(
     recipe: ModelRecipe,
     speculative: SpeculativeRequest | None,
     lora: LoRARequest | None,
+    profile: str | None = None,
 ) -> VariantRecipe:
     variant_name = (f"lora_{speculative.mode}" if speculative and lora else
-                    "lora" if lora else speculative.mode if speculative else recipe.default_variant.name)
+                    "lora" if lora else speculative.mode if speculative else
+                    profile if recipe.get_variant(profile) is not None else recipe.default_variant.name)
     variant = recipe.get_variant(variant_name)
     if variant is None:
         allowed_variants = [item.name for item in recipe.variants]

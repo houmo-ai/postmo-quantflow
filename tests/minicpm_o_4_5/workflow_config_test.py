@@ -214,7 +214,6 @@ def test_token2wav_streaming_derived_values_are_consistent() -> None:
     att_axis = 3
     est_axis = 4
     cache_capacity = frontend["cache_shapes"]["conformer_att_cache"][att_axis]
-    append_capacity = decoder["append_capacity"]
     recent_mel_frames = decoder["prompt_cache_policy"]["recent_mel_frames"]
 
     # Graph cache = full prompt + most recent 100 generated mel frames.
@@ -235,11 +234,9 @@ def test_token2wav_streaming_derived_values_are_consistent() -> None:
     assert frontend["cache_alignment"] == "right"
     assert frontend["base_conformer_layers"] == 6
 
-    # The estimator graph returns current-capacity frames followed by the
-    # fixed-capacity past cache; Host compacts both padding regions afterwards.
+    # The estimator graph updates its fixed attention cache and returns only a sentinel.
     estimator = decoder["estimator_step_cache_shapes"]
     assert estimator["input_att"][3] == cache_capacity
-    assert estimator["output_att"][3] == cache_capacity + append_capacity
     assert estimator["frame_capacity"] == frontend["output_mel_capacities"]["final"]
 
 

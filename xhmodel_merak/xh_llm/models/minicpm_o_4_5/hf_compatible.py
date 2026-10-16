@@ -157,6 +157,23 @@ def ensure_tts_sampling_config(config):
     return config
 
 
+def patch_tied_weights_keys_compat() -> None:
+    from transformers import PreTrainedModel
+
+    if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+
+        def _get_tied_keys(self):
+            return self.__dict__.get(
+                "_xh_all_tied_weights_keys",
+                {key: key for key in (getattr(self, "_tied_weights_keys", None) or ())},
+            )
+
+        def _set_tied_keys(self, value):
+            self.__dict__["_xh_all_tied_weights_keys"] = value
+
+        PreTrainedModel.all_tied_weights_keys = property(_get_tied_keys, _set_tied_keys)
+
+
 class _HMONNXVisionResampler(nn.Module):
     def forward(self, hidden_states, _target_sizes):
         return hidden_states
@@ -243,6 +260,24 @@ def reuse_initialized_tts(host_model, tokenizer, create_duplex):
         return create_duplex()
     finally:
         host_model.init_tts = original_init_tts
+
+
+def bind_duplex_hmonnx_decoder(duplex):
+    @torch.no_grad()
+    def feed(self, embeds, return_logits=False):
+        past_length = self.get_cache_length()
+        position_ids = torch.arange(past_length, past_length + embeds.size(0), device=embeds.device).unsqueeze(0)
+        output = self.m(
+            inputs_embeds=embeds.unsqueeze(0), position_ids=position_ids,
+            past_key_values=self.cache, return_dict=True, output_hidden_states=True,
+        )
+        self.cache = output.past_key_values
+        if return_logits:
+            # The HMONNX graph already includes lm_head; keep hidden states for TTS.
+            return output.logits[:, -1], output.hidden_states[-1]
+
+    duplex.decoder.feed = MethodType(feed, duplex.decoder)
+    return duplex
 
 
 def bind_duplex_fused_tts_semantic_inputs(duplex):
@@ -378,11 +413,11 @@ def create_llm_wraped_cls(cls):
 
         @property
         def prefill(self) -> bool:
-            return self._prefill
+            return self._xh_prefill
 
         @prefill.setter
         def prefill(self, value: bool) -> None:
-            self._prefill = value
+            self._xh_prefill = value
 
         def get_output_embeddings(self):
             """
@@ -423,7 +458,7 @@ def create_llm_wraped_cls(cls):
                 # 3 - Otherwise (past_length >= input_ids.shape[1]), let's assume input_ids only has unprocessed tokens.
 
             # if ∈putsembeds∈putsembedsinputs_embeds are passed, we only want to use them in the 1st generation step
-            if inputs_embeds is not None and cache_position[0] == 0:
+            if inputs_embeds is not None and self.prefill:
                 model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
 
                 if attention_mask is not None and position_ids is None:
@@ -502,7 +537,7 @@ def create_llm_wraped_cls(cls):
                 seq_length = inputs_embeds.shape[-2]
             else:
                 raise ValueError("You must specify either input_ids or inputs_embeds")
-            if self._prefill:
+            if self.prefill:
                 self._llm_model.set_input_sequence_length(seq_length)
             else:
                 self._llm_model.set_input_sequence_length(1)
@@ -1672,6 +1707,8 @@ class MiniCPMO_HFCompatible:  # noqa: N801
 
         if llm_model is not None:
             minicpm_llm = hf_model.llm
+            if hasattr(minicpm_llm.config, "rope_parameters"):
+                minicpm_llm.config.rope_theta = minicpm_llm.config.rope_parameters["rope_theta"]
             _llm_cls = create_llm_wraped_cls(type(minicpm_llm))
             minicpm_llm.__class__ = _llm_cls
             minicpm_llm._modules.pop("_llm_model", None)
@@ -1753,6 +1790,9 @@ class MiniCPMO_HFCompatible:  # noqa: N801
 
         if tts_llama_model is not None:
             minicpo_tts_model = hf_model.tts
+            config = minicpo_tts_model.model.config
+            if hasattr(config, "rope_parameters"):
+                config.rope_theta = config.rope_parameters["rope_theta"]
             _tts_cls = create_tts_model_wraped_cls(type(minicpo_tts_model))
             minicpo_tts_model.__class__ = _tts_cls
             minicpo_tts_model._tts_llama_model = tts_llama_model

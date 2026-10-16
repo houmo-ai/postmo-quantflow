@@ -320,6 +320,10 @@ class MiniCPMO45Workflow(BaseLLMWorkflow):
                 component.setdefault("calibration_samples", min(5, int(quant_cfg.get("nsamples", 5))))
             if name == "token2wav_flow_frontend":
                 component["n_timesteps"] = components["token2wav_flow_decoder"]["n_timesteps"]
+                if export_mode in {"session", "stream"}:
+                    component["cache_tail_length"] = int(
+                        components["token2wav_flow_decoder"]["streaming"]["prompt_cache_policy"]["recent_mel_frames"]
+                    )
             component_model_dir = model_dir
             component_kwargs: dict[str, Any] = {}
             if name == "llm":

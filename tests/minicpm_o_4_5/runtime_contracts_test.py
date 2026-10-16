@@ -362,7 +362,7 @@ def test_tts_multi_token_continuation_uses_prefill_not_decode() -> None:
     assert calls == ["prefill"]
 
 
-def test_host_attachment_supplies_vision_wrap_config(monkeypatch) -> None:
+def test_host_attachment_preserves_vision_wrap_config(monkeypatch) -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime as runtime_module
 
     captured: dict[str, object] = {}
@@ -372,7 +372,7 @@ def test_host_attachment_supplies_vision_wrap_config(monkeypatch) -> None:
         lambda host, **kwargs: captured.update(kwargs) or host,
     )
     runtime = object.__new__(runtime_module.MiniCPMO45HMONNXRuntime)
-    runtime.vision = SimpleNamespace()
+    runtime.vision = SimpleNamespace(wrap_cfg=SimpleNamespace(image_slice_max_size=(1, 1600)))
     runtime.audio = SimpleNamespace()
     runtime.llm = SimpleNamespace()
     runtime.tts = SimpleNamespace(install_host_embeddings=lambda _tts: None)
@@ -383,7 +383,7 @@ def test_host_attachment_supplies_vision_wrap_config(monkeypatch) -> None:
 
     runtime.attach_host(host)
 
-    assert runtime.vision.wrap_cfg.image_slice_max_size == [40, 40]
+    assert runtime.vision.wrap_cfg.image_slice_max_size == (1, 1600)
 
 
 def test_host_attachment_bypasses_native_resampler_for_post_resampler_graph(monkeypatch) -> None:

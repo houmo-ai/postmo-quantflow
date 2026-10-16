@@ -42,7 +42,6 @@ def test_fixed_conformer_frontend_matches_official_dynamic_cache(
         FlowStreamingFrontendWrapper,
     )
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_token2wav import (
-        compact_conformer_attention_cache,
         pack_conformer_attention_cache,
     )
 
@@ -65,7 +64,7 @@ def test_fixed_conformer_frontend_matches_official_dynamic_cache(
         )
         official_mu = official_flow.encoder_proj(official_hidden).transpose(1, 2).contiguous()
 
-        fixed = FlowStreamingFrontendWrapper(official_flow)(
+        fixed = FlowStreamingFrontendWrapper(official_flow, cache_tail_length=100)(
             padded_tokens,
             torch.tensor([token_valid_length], dtype=torch.int32),
             torch.tensor([int(last_chunk)], dtype=torch.int32),
@@ -78,14 +77,14 @@ def test_fixed_conformer_frontend_matches_official_dynamic_cache(
                 base_layer_count=6,
             ),
             torch.tensor([past_valid], dtype=torch.int32),
+            torch.tensor([past_valid], dtype=torch.int32),
         )
 
     current_valid = token_valid_length * 2 if last_chunk else (token_valid_length - 3) * 2
-    fixed_att = compact_conformer_attention_cache(
-        fixed[3],
-        past_valid_length=past_valid,
-        current_valid_length=current_valid,
-        input_capacity=capacity,
+    expected_att = pack_conformer_attention_cache(
+        official_att,
+        valid_length=past_valid + current_valid,
+        capacity=capacity,
         base_layer_count=6,
     )
 
@@ -94,7 +93,7 @@ def test_fixed_conformer_frontend_matches_official_dynamic_cache(
     assert torch.allclose(fixed[1], official_spks, atol=1e-6, rtol=1e-6)
     if not last_chunk:
         assert torch.allclose(fixed[2], official_cnn, atol=2e-5, rtol=2e-5)
-    assert torch.allclose(fixed_att, official_att, atol=3e-5, rtol=3e-5)
+    assert torch.allclose(fixed[3], expected_att, atol=3e-5, rtol=3e-5)
 
 
 def test_fixed_conformer_frontend_matches_official_across_cache_truncation(official_flow) -> None:
@@ -103,7 +102,6 @@ def test_fixed_conformer_frontend_matches_official_across_cache_truncation(offic
     )
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_token2wav import (
         _truncate_streaming_cache,
-        compact_conformer_attention_cache,
         pack_conformer_attention_cache,
     )
 
@@ -115,7 +113,9 @@ def test_fixed_conformer_frontend_matches_official_across_cache_truncation(offic
     official_cnn = torch.randn(1, 512, 6) * 0.01
     fixed_cnn = official_cnn.clone()
     official_att = _conformer_cache(prompt_length)
-    fixed_att = official_att.clone()
+    fixed_att = pack_conformer_attention_cache(
+        official_att, valid_length=prompt_length, capacity=capacity, base_layer_count=6
+    )
     valid_length = prompt_length
     observed_lengths: list[int] = []
 
@@ -130,32 +130,20 @@ def test_fixed_conformer_frontend_matches_official_across_cache_truncation(offic
                 att_cache=official_att,
             )
             official_mu = official_flow.encoder_proj(official_hidden).transpose(1, 2).contiguous()
-            fixed = FlowStreamingFrontendWrapper(official_flow)(
+            fixed = FlowStreamingFrontendWrapper(official_flow, cache_tail_length=100)(
                 tokens,
                 torch.tensor([tokens.shape[1]], dtype=torch.int32),
                 torch.tensor([0], dtype=torch.int32),
                 embedding,
                 fixed_cnn,
-                pack_conformer_attention_cache(
-                    fixed_att,
-                    valid_length=valid_length,
-                    capacity=capacity,
-                    base_layer_count=6,
-                ),
+                fixed_att,
                 torch.tensor([valid_length], dtype=torch.int32),
+                torch.tensor([prompt_length], dtype=torch.int32),
             )
 
         assert int(fixed[4].item()) == valid_length + current_valid
-        fixed_present_att = compact_conformer_attention_cache(
-            fixed[3],
-            past_valid_length=valid_length,
-            current_valid_length=current_valid,
-            input_capacity=capacity,
-            base_layer_count=6,
-        )
         assert torch.allclose(fixed[0][:, :, :current_valid], official_mu, atol=2e-5, rtol=2e-5)
         assert torch.allclose(fixed[2], official_present_cnn, atol=2e-5, rtol=2e-5)
-        assert torch.allclose(fixed_present_att, official_present_att, atol=3e-5, rtol=3e-5)
 
         official_att = _truncate_streaming_cache(
             official_present_att,
@@ -163,17 +151,18 @@ def test_fixed_conformer_frontend_matches_official_across_cache_truncation(offic
             tail=100,
             capacity=capacity,
         )
-        fixed_att = _truncate_streaming_cache(
-            fixed_present_att,
-            prompt_length=prompt_length,
-            tail=100,
+        fixed_att = fixed[3]
+        expected_att = pack_conformer_attention_cache(
+            official_att,
+            valid_length=int(official_att.shape[3]),
             capacity=capacity,
+            base_layer_count=6,
         )
         official_cnn = official_present_cnn
         fixed_cnn = fixed[2]
         valid_length = int(official_att.shape[3])
         observed_lengths.append(valid_length)
-        assert torch.allclose(fixed_att, official_att, atol=3e-5, rtol=3e-5)
+        assert torch.allclose(fixed_att, expected_att, atol=3e-5, rtol=3e-5)
 
     assert observed_lengths == [892, 942, 942, 942]
 
@@ -191,7 +180,6 @@ def test_fixed_estimator_step_matches_official_dynamic_cache(
         FlowEstimatorStepWrapper,
     )
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_token2wav import (
-        compact_estimator_attention_cache,
         pack_streaming_attention_cache,
     )
 
@@ -226,13 +214,6 @@ def test_fixed_estimator_step_matches_official_dynamic_cache(
             torch.tensor([current_valid], dtype=torch.int32),
         )
 
-    fixed_att = compact_estimator_attention_cache(
-        fixed[2],
-        past_valid_length=past_valid,
-        current_valid_length=current_valid,
-        input_capacity=cache_capacity,
-        frame_capacity=frame_capacity,
-    )
     assert torch.allclose(fixed[0][:, :, :current_valid], official[0], atol=3e-5, rtol=3e-5)
     assert torch.allclose(fixed[1], official[1], atol=3e-5, rtol=3e-5)
-    assert torch.allclose(fixed_att, official[2], atol=3e-5, rtol=3e-5)
+    assert torch.allclose(fixed[2][:, :, :, :current_valid], official[2][:, :, :, :current_valid], atol=3e-5, rtol=3e-5)

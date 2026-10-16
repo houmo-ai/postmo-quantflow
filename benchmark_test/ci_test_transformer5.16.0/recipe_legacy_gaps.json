@@ -18,8 +18,6 @@
     "xh_llm/laguna:LagunaForCausalLM",
     "xh_llm/minicpm5/",
     "xh_llm/minicpm5:MiniCPM5MoEForCausalLM",
-    "xh_llm/minicpm_o_4_5/",
-    "xh_llm/minicpm_o_4_5:MiniCPMO45Model",
     "xh_llm/minicpm_v_4_5/",
     "xh_llm/minicpm_v_4_5:MiniCPMV45ForConditionalGeneration",
     "xh_llm/minicpm_v_4_6/",

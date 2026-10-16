@@ -189,7 +189,7 @@ def _session_run(model, tokenizer, case: CasePayload, chunks, max_new_tokens: in
     ref_audio = None
     if case["generate_audio"]:
         model.init_tts(model_dir=str(Path(case["asset_paths"][1]).parent / "token2wav"))
-        ref_audio, _ = librosa.load(case["asset_paths"][1], sr=SAMPLE_RATE, mono=True)
+        ref_audio, _ = librosa.load(case["asset_paths"][1], sr=SAMPLE_RATE, mono=True, res_type="kaiser_best")
         model.init_token2wav_cache(ref_audio)
         _event(state, "init_token2wav_cache")
         model.reset_session(False)
@@ -243,7 +243,9 @@ def _duplex_run(model, case: CasePayload, chunks, state: RunState):
     )
     _event(state, "as_duplex")
     ref_path = case["asset_paths"][1] if case["generate_audio"] else None
-    ref_audio = None if ref_path is None else librosa.load(ref_path, sr=SAMPLE_RATE, mono=True)[0]
+    ref_audio = (
+        None if ref_path is None else librosa.load(ref_path, sr=SAMPLE_RATE, mono=True, res_type="kaiser_best")[0]
+    )
     duplex.prepare(prefix_system_prompt=case["prompt"], ref_audio=ref_audio, prompt_wav_path=ref_path)
     _event(state, "prepare")
     texts: list[str] = []

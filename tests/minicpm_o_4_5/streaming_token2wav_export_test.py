@@ -118,8 +118,8 @@ def test_streaming_frontend_exports_prompt_and_chunk_roles(tmp_path, monkeypatch
 
     converted_roles: list[str] = []
 
-    def fake_convert(module, inputs, names, output_file, target_device, quant_type):
-        del module, inputs, names, target_device, quant_type
+    def fake_convert(module, inputs, names, output_file, target_device, quant_type, finish=None):
+        del module, inputs, names, target_device, quant_type, finish
         converted_roles.append(output_file.stem)
         return output_file
 
@@ -133,6 +133,7 @@ def test_streaming_frontend_exports_prompt_and_chunk_roles(tmp_path, monkeypatch
             "mel_capacity": 8,
             "quant_type": "w16a16_sefp",
             "n_timesteps": 1,
+            "cache_tail_length": 0,
             "streaming": {
                 "prompt_token_capacity": 4,
                 "prompt_mel_capacity": 6,
@@ -161,12 +162,13 @@ def test_streaming_frontend_exports_prompt_and_chunk_roles(tmp_path, monkeypatch
                     "past_conformer_cnn_cache",
                     "past_conformer_att_cache",
                     "conformer_cache_valid_length",
+                    "prompt_cache_valid_length",
                 ],
                 "frontend_output_names": [
                     "mu",
                     "spks",
                     "present_conformer_cnn_cache",
-                    "present_conformer_att_cache",
+                    "conformer_cache_write_done",
                     "present_conformer_cache_valid_length",
                 ],
                 "output_mel_capacities": {"normal": 2, "final": 4},
@@ -256,7 +258,7 @@ def test_frontend_capacity_is_declared_per_role() -> None:
         "mu",
         "spks",
         "present_conformer_cnn_cache",
-        "present_conformer_att_cache",
+        "conformer_cache_write_done",
         "present_conformer_cache_valid_length",
     ]
     assert streaming["output_mel_capacities"] == {"normal": 50, "final": 56}
@@ -314,7 +316,7 @@ def test_final_frontend_masks_padded_tokens_after_biased_encoder_embedding() -> 
             self.encoder_proj = nn.Identity()
 
     torch.manual_seed(5)
-    wrapper = FlowStreamingFrontendWrapper(Flow())
+    wrapper = FlowStreamingFrontendWrapper(Flow(), cache_tail_length=2)
     common = (
         torch.ones(1, 4),
         torch.zeros(1, 4, 6),
@@ -326,12 +328,14 @@ def test_final_frontend_masks_padded_tokens_after_biased_encoder_embedding() -> 
         torch.tensor([2], dtype=torch.int32),
         torch.tensor([1], dtype=torch.int32),
         *common,
+        torch.tensor([0], dtype=torch.int32),
     )
     fixed_capacity = wrapper(
         torch.tensor([[1, 2, 7, 7]], dtype=torch.int64),
         torch.tensor([2], dtype=torch.int32),
         torch.tensor([1], dtype=torch.int32),
         *common,
+        torch.tensor([0], dtype=torch.int32),
     )
 
     assert torch.allclose(fixed_capacity[0][:, :, : reference[0].shape[2]], reference[0])
@@ -378,16 +382,17 @@ def test_estimator_step_cache_outputs_depend_on_past_cache_and_current_input() -
 def test_estimator_step_contract_has_functional_cache_inputs_and_outputs() -> None:
     config = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     streaming = config["export"]["components"]["token2wav_flow_decoder"]["streaming"]
-    assert streaming["estimator_step_input_names"][-4:] == [
+    assert streaming["estimator_step_input_names"][-5:] == [
         "past_estimator_cnn_cache",
         "past_estimator_att_cache",
         "past_cache_valid_length",
         "current_frame_valid_length",
+        "prompt_cache_valid_length",
     ]
     assert streaming["estimator_step_output_names"] == [
         "derivative_cfg",
         "present_estimator_cnn_cache",
-        "present_estimator_att_cache",
+        "estimator_cache_write_done",
     ]
 
 
@@ -438,8 +443,8 @@ def test_flow_stream_roles_use_explicit_cache_contract_and_seven_outputs(tmp_pat
 
     calls: list[tuple[type[nn.Module], tuple[str, ...], tuple[str, ...], tuple[torch.Size, ...]]] = []
 
-    def fake_convert(module, inputs, names, output_file, target_device, quant_type):
-        del target_device, quant_type
+    def fake_convert(module, inputs, names, output_file, target_device, quant_type, finish=None):
+        del target_device, quant_type, finish
         calls.append((type(module), tuple(names[0]), tuple(names[1]), tuple(value.shape for value in inputs)))
         return output_file
 
@@ -476,11 +481,12 @@ def test_flow_stream_roles_use_explicit_cache_contract_and_seven_outputs(tmp_pat
                     "past_estimator_att_cache",
                     "past_cache_valid_length",
                     "current_frame_valid_length",
+                    "prompt_cache_valid_length",
                 ],
                 "estimator_step_output_names": [
                     "derivative_cfg",
                     "present_estimator_cnn_cache",
-                    "present_estimator_att_cache",
+                    "estimator_cache_write_done",
                 ],
                 "estimator_step_cache_shapes": {
                     "input_cnn": [16, 2, 1024, 2],
@@ -506,12 +512,13 @@ def test_flow_stream_roles_use_explicit_cache_contract_and_seven_outputs(tmp_pat
             "past_estimator_att_cache",
             "past_cache_valid_length",
             "current_frame_valid_length",
+            "prompt_cache_valid_length",
         ]
     )
-    assert output_names == ("derivative_cfg", "present_estimator_cnn_cache", "present_estimator_att_cache")
+    assert output_names == ("derivative_cfg", "present_estimator_cnn_cache", "estimator_cache_write_done")
     assert input_shapes[5] == torch.Size((16, 2, 1024, 2))
     assert input_shapes[6] == torch.Size((16, 2, 8, 150, 128))
-    assert input_shapes[7:] == (torch.Size((1,)), torch.Size((1,)))
+    assert input_shapes[7:] == (torch.Size((1,)), torch.Size((1,)), torch.Size((1,)))
 
 
 def test_hift_stream_part1_export_formal_inputs_match_wrapper_order() -> None:

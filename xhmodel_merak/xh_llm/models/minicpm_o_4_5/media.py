@@ -70,4 +70,39 @@ def normalize_minicpmo_video(path: Path, *, include_audio: bool, stack_frames: i
     return contents
 
 
-__all__ = ["normalize_minicpmo_video"]
+def streaming_media_chunks(media: dict[str, Path]) -> list[tuple[Any, list[Any]]]:
+    """Use the official 1035 ms first audio chunk, then one-second units."""
+    import librosa
+    import numpy as np
+    from PIL import Image
+
+    frames = []
+    waveform = None
+    if "video" in media:
+        contents = normalize_minicpmo_video(media["video"], include_audio=True, stack_frames=1)
+        frames = [value for value in contents if isinstance(value, Image.Image)]
+        audio = [value for value in contents if isinstance(value, np.ndarray)]
+        if audio:
+            waveform = np.concatenate(audio)
+    elif "audio" in media:
+        # Keep the librosa 0.9 resampler used by the reference evaluations.
+        waveform = librosa.load(media["audio"], sr=16000, mono=True, res_type="kaiser_best")[0]
+    if "image" in media:
+        with Image.open(media["image"]) as image:
+            frames = [image.convert("RGB")]
+    chunks = []
+    offset = 0
+    index = 0
+    while (waveform is not None and offset < len(waveform)) or index < len(frames):
+        length = 16560 if index == 0 else 16000
+        audio_chunk = None
+        if waveform is not None:
+            audio_chunk = waveform[offset : offset + length]
+            audio_chunk = np.pad(audio_chunk, (0, length - len(audio_chunk)))
+        chunks.append((audio_chunk, frames[index : index + 1]))
+        offset += length
+        index += 1
+    return chunks
+
+
+__all__ = ["normalize_minicpmo_video", "streaming_media_chunks"]

@@ -50,6 +50,7 @@ def _validate_value(recipe: ModelRecipe, name: str, value: Any, schema: Mapping[
     expected = schema.get("type")
     valid = {
         "string": isinstance(value, str),
+        "boolean": isinstance(value, bool),
         "integer": isinstance(value, int) and not isinstance(value, bool),
         "number": isinstance(value, (int, float)) and not isinstance(value, bool),
         "array": isinstance(value, (list, tuple)),

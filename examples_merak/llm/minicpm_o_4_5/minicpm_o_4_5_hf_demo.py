@@ -70,7 +70,7 @@ def main() -> None:
     messages = [{"role": "user", "content": [*contents, args.question]}]
     if args.generate_audio:
         model.init_tts(model_dir=str(token2wav_asset_path(Path(args.model_dir))))
-        ref_audio, _ = librosa.load(args.ref_audio, sr=16000, mono=True)
+        ref_audio, _ = librosa.load(args.ref_audio, sr=16000, mono=True, res_type="kaiser_best")
         messages.insert(0, model.get_sys_prompt(ref_audio=ref_audio, mode="omni", language=args.language))
     output_audio_path = args.output_audio_path or args.output_dir / "output.wav"
     answer = model.chat(

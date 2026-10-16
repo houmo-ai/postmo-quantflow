@@ -17,6 +17,8 @@ KOKORO_SHA256 = "704324aeaac896e830f964f36e7a19002c134440d51c9124e582ca8460f4e13
 KOKORO_ARCHIVE = "kokoro-ci-source-v1.tar.gz"
 MOSS_SHA256 = "1e58b1d08c1bdd93e1ec025b0b29dad8dcc37ce29318132ca5088f97b4946dc5"
 MOSS_ARCHIVE = "moss-ci-source-v1.tar.gz"
+MINICPMO_SHA256 = "60b577fe53f7b0d9247f0877246fee4d4bc54f3abc8ab30c28449a5471c583a3"
+MINICPMO_ARCHIVE = "minicpmo45-ci-source-v1.tar.gz"
 
 
 def extract_verified(archive, destination, expected_sha256):
@@ -49,16 +51,20 @@ def kokoro_source():
 
 
 def verify_moss_source(source):
+    _verify_release_files(source, "moss", "MOSS")
+
+
+def _verify_release_files(source, family, label):
     source = Path(source)
-    manifest = json.loads((Path(__file__).parent / "fixtures/moss/release.json").read_text())
+    manifest = json.loads((Path(__file__).parent / "fixtures" / family / "release.json").read_text())
     for name, expected in manifest["files"].items():
         path = source / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size != expected["size"]:
-            raise ValueError(f"Missing or invalid MOSS release asset: {path}")
+            raise ValueError(f"Missing or invalid {label} release asset: {path}")
         with path.open("rb") as stream:
             actual = hashlib.file_digest(stream, "sha256").hexdigest()
         if actual != expected["sha256"]:
-            raise ValueError(f"MOSS release asset SHA-256 mismatch: {path}")
+            raise ValueError(f"{label} release asset SHA-256 mismatch: {path}")
 
 
 def moss_source():
@@ -68,6 +74,18 @@ def moss_source():
         verify_moss_source(source)
         return source
     return _cached_source("moss", MOSS_SHA256, MOSS_ARCHIVE, verify_moss_source)
+
+
+def minicpmo_source():
+    def verify(source):
+        _verify_release_files(source, "minicpmo", "MiniCPM-o-4.5")
+
+    override = os.environ.get("UNIFIED_CI_MINICPMO_SOURCE")
+    if override:
+        source = Path(override).resolve()
+        verify(source)
+        return source
+    return _cached_source("minicpmo", MINICPMO_SHA256, MINICPMO_ARCHIVE, verify)
 
 
 def _cached_source(family, sha256, archive_name, verify):

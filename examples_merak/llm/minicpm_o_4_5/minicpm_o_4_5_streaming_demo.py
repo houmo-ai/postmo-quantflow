@@ -179,7 +179,7 @@ def _build_media(args: argparse.Namespace) -> Media:
     if media.suffix.lower() == ".wav":
         import librosa
 
-        waveform, _ = librosa.load(media, sr=_SAMPLE_RATE, mono=True)
+        waveform, _ = librosa.load(media, sr=_SAMPLE_RATE, mono=True, res_type="kaiser_best")
         chunk_lengths = [
             round(duration * _SAMPLE_RATE / 1000) for duration in resolve_case(args.case).chunk_durations_ms
         ]
@@ -200,7 +200,7 @@ def _build_media(args: argparse.Namespace) -> Media:
         import librosa
 
         prompt_path = Path(args.model_dir) / "assets" / "system_ref_audio.wav"
-        prompt_waveform, _ = librosa.load(prompt_path, sr=_SAMPLE_RATE, mono=True)
+        prompt_waveform, _ = librosa.load(prompt_path, sr=_SAMPLE_RATE, mono=True, res_type="kaiser_best")
         prompt_waveform = np.asarray(prompt_waveform, dtype=np.float32)
         # The full reference prompt is passed through; the exported Token2Wav
         # streaming graphs cover the official system_ref_audio (16.84 s -> 842 mel

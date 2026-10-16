@@ -7,6 +7,100 @@ import json
 from pathlib import Path
 
 
+def prepare_minicpmo(catalog, recipe, root, calibration, monkeypatch, variant):
+    """Keep all eight native components and real GPTQ/export at small shapes."""
+    import shutil
+    import subprocess
+    from dataclasses import replace
+
+    import soundfile as sf
+    import torch
+    from _unified_assets import minicpmo_source
+
+    torch.manual_seed(4891)
+    source = root / "source"
+    shutil.copytree(minicpmo_source(), source)
+    audio, sample_rate = sf.read(source / "assets/system_ref_audio.wav", dtype="float32")
+    sf.write(root / "reference.wav", audio[:sample_rate // 2], sample_rate)
+    sf.write(root / "audio.wav", audio[:sample_rate * 2], sample_rate)
+    shutil.copyfile(source / "assets/fossil.png", root / "image.png")
+    subprocess.run([
+        "ffmpeg", "-loglevel", "error", "-loop", "1", "-i", str(root / "image.png"),
+        "-i", str(root / "audio.wav"), "-t", "0.5" if variant == "offline" else "2",
+        "-c:v", "libx264", "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p", "-threads", "2", "-c:a", "aac", str(root / "video.mp4"),
+    ], check=True)
+    calibration.write_text("".join(json.dumps({"text": "hello world " * 160}) + "\n" for _ in range(2)))
+    overrides = dict(recipe.config_replacements)
+    overrides.update({
+        "quant.nsamples": 2, "quant.seqlen": 256, "quant.offload_to_disk": False,
+        "quant.calibration_jsonl": str(calibration),
+        "export.model.context_max_length": 1024 if variant == "offline" else 2048,
+        "export.model.prefill_chunk_length": 256,
+        "export.components.llm.wrap_cfg.max_sequence_length": 1024 if variant == "offline" else 2048,
+        "export.components.llm.wrap_cfg.input_sequence_length": 256,
+        "export.components.llm.wrap_cfg.image_slice_max_size": [2, 2],
+        "export.components.tts.wrap_cfg.max_sequence_length": 512,
+        "export.components.tts.wrap_cfg.image_slice_max_size": [2, 2],
+        "export.components.vision.image_slice_max_size": [2, 2],
+        "export.components.audio.static_batch_size": 1,
+        "export.components.audio.max_audio_frames": 100,
+        "export.components.token2wav_flow_frontend.token_capacity": 128,
+        "export.components.token2wav_flow_frontend.mel_capacity": 256,
+        "export.components.token2wav_flow_decoder.mel_capacity": 256,
+        "export.components.token2wav_hift.frame_capacity": 256,
+        "export.components.speaker.sequence_length": 64,
+        "export.components.speaker.feats_length": 100,
+    })
+    if variant != "offline":
+        from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import export_token2wav
+
+        original_load = export_token2wav.load_token2wav_modules
+
+        def load_small_token2wav(model_dir):
+            flow, hift = original_load(model_dir)
+            # Upstream nonpersistent buffers hardcode the full-size architecture.
+            # Match their geometry to the real tiny layers, preserving ten CFM steps.
+            flow.decoder.estimator.cnn_cache_buffer = torch.zeros(2, 2, 64, 2)
+            flow.decoder.estimator.att_cache_buffer = torch.zeros(2, 2, 2, 214, 32)
+            flow.decoder.cnn_cache_buffer = torch.zeros(10, 2, 2, 64, 2)
+            flow.decoder.att_cache_buffer = torch.zeros(10, 2, 2, 2, 214, 32)
+            return flow, hift
+
+        monkeypatch.setattr(export_token2wav, "load_token2wav_modules", load_small_token2wav)
+        base_shapes = {
+            "conformer_cnn_cache": [1, 32, 6], "conformer_att_cache": [2, 1, 2, 58, 32],
+            "estimator_cnn_cache": [10, 2, 2, 64, 2], "estimator_att_cache": [10, 2, 2, 2, 58, 32],
+        }
+        cache_shapes = copy.deepcopy(base_shapes)
+        cache_shapes["conformer_att_cache"][3] = 158
+        cache_shapes["estimator_att_cache"][4] = 158
+        overrides.update({
+            "export.components.token2wav_flow_frontend.streaming.prompt_token_capacity": 32,
+            "export.components.token2wav_flow_frontend.streaming.prompt_mel_capacity": 58,
+            "export.components.token2wav_flow_frontend.streaming.base_cache_valid_length": 58,
+            "export.components.token2wav_flow_frontend.streaming.base_conformer_layers": 1,
+            "export.components.token2wav_flow_frontend.streaming.base_cache_shapes": base_shapes,
+            "export.components.token2wav_flow_frontend.streaming.cache_shapes": cache_shapes,
+            "export.components.token2wav_flow_decoder.streaming.base_cache_valid_length": 58,
+            "export.components.token2wav_flow_decoder.streaming.estimator_step_cache_shapes.input_cnn": [2, 2, 64, 2],
+            "export.components.token2wav_flow_decoder.streaming.estimator_step_cache_shapes.input_att": [2, 2, 2, 158, 32],
+            "export.components.token2wav_flow_decoder.streaming.estimator_step_cache_shapes.host_cnn_banks": [10, 2, 2, 64, 2],
+        })
+    monkeypatch.setitem(catalog._recipes, recipe.model_id, replace(
+        recipe, config_replacements=tuple(overrides.items()),
+    ))
+    return {
+        "model_id": recipe.model_id, "model_dir": str(source), "output_dir": str(root / "artifact"),
+        "quant_output_dir": str(root / "quant"), "device": "cuda:0", "profile": variant,
+    }, {
+        "prompt": "Describe briefly.", "video": str(root / "video.mp4"),
+        "max_new_tokens": 2 if variant == "offline" else 16,
+        "generate_audio": True, "reference_audio": str(root / "reference.wav"),
+        **({"language": "en"} if variant == "offline" else {}),
+    }
+
+
 def configure_kokoro_minimal(catalog, recipe, monkeypatch):
     """Reduce only CI profile geometry, keeping build/load validation active.
 

@@ -12,6 +12,7 @@ from torch import Tensor
 
 class Token2WavRuntimeProtocol(Protocol):
     up_rate: int
+    device: torch.device
 
     def flow_inference(self, *args: Tensor | int) -> Tensor: ...
 
@@ -92,7 +93,8 @@ class _HMONNXCampplusAdapter:
             feat = feat[:, : self._sequence_length]
         elif feat.shape[1] < self._sequence_length:
             feat = torch.nn.functional.pad(feat, (0, 0, 0, self._sequence_length - feat.shape[1]))
-        return [torch.as_tensor(session(feat.to(torch.float16))).float().cpu().numpy()]
+        feat = feat.to(device=self._runtime.device, dtype=torch.float16)
+        return [torch.as_tensor(session(feat)).float().cpu().numpy()]
 
 
 class _HMONNXSpeechTokenizerAdapter:

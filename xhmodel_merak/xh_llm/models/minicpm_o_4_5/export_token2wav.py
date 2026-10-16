@@ -321,6 +321,21 @@ def prepare_deterministic_onnx(model: onnx.ModelProto) -> onnx.ModelProto:
     return model
 
 
+def _saturate_hift_constants(graph_path: Path) -> None:
+    model = onnx.load(str(graph_path), load_external_data=False)
+    for initializer in model.graph.initializer:
+        if initializer.data_type != onnx.TensorProto.FLOAT16:
+            continue
+        tensor = onnx.TensorProto()
+        tensor.CopyFrom(initializer)
+        values = numpy_helper.to_array(tensor, base_dir=str(graph_path.parent))
+        if np.isinf(values).any():
+            # Snake reciprocals can exceed FP16; match XH2 finite saturation.
+            limit = np.finfo(np.float16).max
+            initializer.CopyFrom(numpy_helper.from_array(np.clip(values, -limit, limit), initializer.name))
+    onnx.save(model, str(graph_path))
+
+
 def load_token2wav_modules(model_dir: str) -> tuple[nn.Module, nn.Module]:
     import stepaudio2.token2wav as token2wav
     from hyperpyyaml import load_hyperpyyaml
@@ -346,6 +361,7 @@ def _convert(
     target_device: str,
     quant_type: str,
     prepare: Callable[[onnx.ModelProto], onnx.ModelProto] | None = None,
+    finish: Callable[[Path], None] | None = None,
 ) -> Path:
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix="minicpmo45_token2wav_onnx_") as temporary_dir:
@@ -380,7 +396,73 @@ def _convert(
             input_names=list(names[0]),
             output_names=list(names[1]),
         )
+        if finish is not None:
+            finish(output_file)
     return output_file
+
+
+def _add_stream_cache_writer(graph_path: Path, cache_input: str, output_index: int) -> None:
+    """Write a fixed Flow cache in the graph without returning it to Host."""
+    model = onnx.load(str(graph_path), load_external_data=False)
+    graph = model.graph
+    full_cache = graph.output[output_index]
+    output_name = full_cache.name
+    full_name = f"{output_name}_state"
+    for node in graph.node:
+        node.input[:] = [full_name if name == output_name else name for name in node.input]
+        node.output[:] = [full_name if name == output_name else name for name in node.output]
+    for name in (full_name, "flow_cache_written"):
+        value_info = graph.value_info.add()
+        value_info.CopyFrom(full_cache)
+        value_info.name = name
+    capacity = full_cache.type.tensor_type.shape.dim[3].dim_value
+    graph.initializer.extend(
+        (
+            numpy_helper.from_array(np.array([0], dtype=np.int32), "flow_cache_write_start"),
+            numpy_helper.from_array(np.array([capacity], dtype=np.int32), "flow_cache_write_length"),
+            numpy_helper.from_array(np.zeros(5, dtype=np.int64), "flow_cache_slice_start"),
+            numpy_helper.from_array(np.ones(5, dtype=np.int64), "flow_cache_slice_end"),
+            numpy_helper.from_array(np.arange(5, dtype=np.int64), "flow_cache_slice_axes"),
+            numpy_helper.from_array(np.ones(5, dtype=np.int64), "flow_cache_slice_steps"),
+        )
+    )
+    graph.node.extend(
+        (
+            onnx.helper.make_node(
+                "KVcache",
+                [full_name, "flow_cache_write_start", "flow_cache_write_length", cache_input],
+                ["flow_cache_written"],
+                name="flow_cache_write",
+                domain="ai.houmo.xh2a",
+                axis=3,
+                attention_max_length=-1,
+            ),
+            onnx.helper.make_node(
+                "Slice",
+                [
+                    "flow_cache_written", "flow_cache_slice_start", "flow_cache_slice_end",
+                    "flow_cache_slice_axes", "flow_cache_slice_steps",
+                ],
+                [output_name],
+                name="flow_cache_written_first",
+            ),
+        )
+    )
+    full_cache.CopyFrom(
+        onnx.helper.make_tensor_value_info(output_name, onnx.TensorProto.FLOAT16, [1, 1, 1, 1, 1])
+    )
+    if not any(entry.domain == "ai.houmo.xh2a" for entry in model.opset_import):
+        model.opset_import.append(onnx.helper.make_opsetid("ai.houmo.xh2a", 1))
+    onnx.save(model, str(graph_path))
+    onnx.checker.check_model(str(graph_path))
+
+
+def add_stream_estimator_cache_writer(graph_path: Path) -> None:
+    _add_stream_cache_writer(graph_path, "past_estimator_att_cache", -1)
+
+
+def add_stream_frontend_cache_writer(graph_path: Path) -> None:
+    _add_stream_cache_writer(graph_path, "past_conformer_att_cache", 3)
 
 
 def prepare_hift_stream_onnx(model: onnx.ModelProto) -> onnx.ModelProto:
@@ -611,16 +693,21 @@ def export_flow_frontend(
             torch.zeros(cache_shapes["conformer_cnn_cache"], dtype=torch.float32),
             torch.zeros(cache_shapes["conformer_att_cache"], dtype=torch.float32),
             torch.tensor([int(streaming["base_cache_valid_length"])], dtype=torch.int32),
+            torch.tensor([int(streaming["base_cache_valid_length"])], dtype=torch.int32),
         )
         role = "stream_flow_frontend"
         graph_path = component_dir / f"{name_prefix}token2wav_flow_frontend_{role}_{target_device}_{quant_type}.onnx"
         graphs[role] = _convert(
-            FlowStreamingFrontendWrapper(flow),
+            FlowStreamingFrontendWrapper(
+                flow,
+                cache_tail_length=int(config["cache_tail_length"]),
+            ),
             frontend_inputs,
             (frontend_input_names, frontend_output_names),
             graph_path,
             target_device,
             quant_type,
+            finish=add_stream_frontend_cache_writer,
         )
         stream_contract.update(
             {
@@ -706,6 +793,7 @@ def export_flow_decoder(
             torch.zeros(tuple(step_shapes["input_att"])),
             torch.tensor([int(streaming["base_cache_valid_length"])], dtype=torch.int32),
             torch.tensor([int(streaming["append_capacity"])], dtype=torch.int32),
+            torch.tensor([int(streaming["base_cache_valid_length"])], dtype=torch.int32),
         )
         input_names = tuple(streaming["estimator_step_input_names"])
         output_names = tuple(streaming["estimator_step_output_names"])
@@ -714,12 +802,16 @@ def export_flow_decoder(
             / f"{name_prefix}token2wav_flow_decoder_stream_flow_estimator_step_{target_device}_{quant_type}.onnx"
         )
         graphs["stream_flow_estimator_step"] = _convert(
-            FlowEstimatorStepWrapper(flow.decoder.estimator),
+            FlowEstimatorStepWrapper(
+                flow.decoder.estimator,
+                stream_cache_tail_length=int(streaming["prompt_cache_policy"]["recent_mel_frames"]),
+            ),
             stream_inputs,
             (input_names, output_names),
             graph_path,
             target_device,
             quant_type,
+            finish=add_stream_estimator_cache_writer,
         )
         host_timestep_cache_banks = int(streaming["host_timestep_cache_banks"])
         stream_contract = {
@@ -799,6 +891,7 @@ def export_hift(
             target_device,
             quant_type,
             prepare=prepare_deterministic_onnx,
+            finish=_saturate_hift_constants,
         )
     if export_mode in {"session", "stream"}:
         streaming = config["streaming"]
@@ -841,6 +934,7 @@ def export_hift(
             target_device,
             quant_type,
             prepare=prepare_deterministic_onnx,
+            finish=_saturate_hift_constants,
         )
         stream_contract = {
             "frame_capacity": stream_frame_capacity,

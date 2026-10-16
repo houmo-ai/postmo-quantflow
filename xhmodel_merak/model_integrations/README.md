@@ -69,6 +69,8 @@ family 用 `DeploymentPrecisionBinding` 声明组件、实际 `export.model.*.qu
 显式传了 `quant_method` 就检查是否匹配。来源识别不替代张量、位宽和模型身份校验。
 配置比较只接受可证明的等价序列化：例如两边 `rope_parameters.partial_rotary_factor`
 明确一致时，允许量化配置在外层重复写相同值；缺失证据或数值冲突仍拒绝，不猜隐式默认值。
+组合模型的子模型 checkpoint 可由 family 的 `checkpoint_config_projection` 提供同一原生配置
+视图后校验身份与行为；完整 Host 配置与运行资源仍按原始模型打包。
 上游只改了子配置的类型名时，在 family recipe 的 `config_type_aliases` 声明
 `(完整字段路径, 原类型名, 新类型名)`，例如 Qwen 的 `vision_config.model_type`。
 必须用该模型的原生配置类证明两者构造出相同配置，并覆盖错误类型和尺寸变化的拒绝测试。
@@ -188,6 +190,7 @@ python benchmark_test/ci_test_transformer5.16.0/select_tests.py --format report
 它不是能直接展开成 `build_model(**result)` 的参数字典。
 `full=True` 还返回任务、部署精度、组件、输入输出 schema 等完整说明。
 推理输入由 `input_schema` 描述，不与构建参数混用。
+非投机/LoRA 的 profile 与已注册 variant 同名时，选择该 variant；其他 profile 保留其原有档位含义。
 
 加参数时一起改声明、描述、解析校验、配置映射、实际调用和测试。传下去了不等于
 生效了，测试需要检查消费方实际收到的值和行为。unsupported 值明确报错，不能过滤掉

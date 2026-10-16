@@ -119,6 +119,7 @@ class ModelRecipe:
     recipe_version: str = "2"
     required_runtime_files: tuple[str, ...] = ()
     config_resolver: str | None = None
+    checkpoint_config_projection: str | None = None
     deployment_precision_bindings: tuple[DeploymentPrecisionBinding, ...] = ()
     # Reading an existing checkpoint is independent of registered quantizers.
     quant_checkpoint_methods: tuple[str, ...] = ()
@@ -169,6 +170,10 @@ class ModelRecipe:
             _validate_internal_target(self.config_resolver, "recipe config resolver")
             if ":" not in self.config_resolver:
                 raise ValueError("recipe config resolver must name a callable with module:attribute")
+        if self.checkpoint_config_projection is not None:
+            _validate_internal_target(self.checkpoint_config_projection, "checkpoint config projection")
+            if ":" not in self.checkpoint_config_projection:
+                raise ValueError("checkpoint config projection must name a callable with module:attribute")
         bound_components: set[str] = set()
         bound_paths: set[str] = set()
         for binding in self.deployment_precision_bindings:

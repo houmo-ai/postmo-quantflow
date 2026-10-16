@@ -1857,7 +1857,7 @@ def test_quant_checkpoint_allows_only_proven_lm_head_untying(tmp_path, monkeypat
         "weight_map": {"lm_head.qweight": "model-lm-head.safetensors"},
     }))
     monkeypatch.setattr("xhmodel_merak.model_build.checkpoint.get_recipe", lambda *_: SimpleNamespace(
-        source_constraints=(), config_type_aliases=(),
+        source_constraints=(), config_type_aliases=(), checkpoint_config_projection=None,
     ))
     plan = SimpleNamespace(model_id="qwen3.5-4b", model_dir=str(source))
 

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
+import torch
 from torch import Tensor, nn
 
 from ...hmonnx.hmonnx_model import HMONNXBaseModel, HMONNXModel
@@ -12,6 +12,8 @@ from .hf_compatible import (
     MiniCPMOHFCompatible,
     bind_duplex_fused_tts_semantic_inputs,
     bind_duplex_hmonnx_reset,
+    ensure_tts_sampling_config,
+    patch_dynamic_cache_seen_tokens,
     patch_speech_generation_capture,
     reuse_initialized_tts,
 )
@@ -39,6 +41,43 @@ STREAMING_CASES = (
 
 def load_export_metadata(work_dir: str | Path) -> dict[str, Any]:
     return json.loads((Path(work_dir) / "export_meta_info.json").read_text(encoding="utf-8"))
+
+
+def _load_artifact_host(config_dir: Path, device: str = "cpu") -> tuple[nn.Module, Any]:
+    from accelerate import init_empty_weights
+    from transformers import AutoConfig, AutoModel, AutoProcessor, AutoTokenizer, DynamicCache, GenerationConfig
+
+    config = ensure_tts_sampling_config(AutoConfig.from_pretrained(
+        config_dir, trust_remote_code=True, local_files_only=True,
+    ))
+    with init_empty_weights(include_buffers=True):
+        host = AutoModel.from_config(config, trust_remote_code=True, attn_implementation="eager")
+    # These native weights are already in the graphs; retain only the official Host methods.
+    host.llm.model.layers = nn.ModuleList()
+    host.apm.layers = nn.ModuleList()
+    for module, names in (
+        (host.llm.model, ("norm", "rotary_emb")),
+        (host.llm, ("lm_head",)),
+        (host.vpm, ("encoder", "post_layernorm")),
+        (host.vpm.embeddings, ("patch_embedding", "position_embedding")),
+        (host.apm, ("conv2", "layer_norm")),
+        (host.tts, ("projector_spk",)),
+    ):
+        for name in names:
+            setattr(module, name, nn.Identity())
+    # The audio Host reads only dtype/device and positional capacity from these modules.
+    host.apm.conv1 = nn.Module()
+    host.apm.conv1.register_buffer("weight", torch.zeros(1, dtype=torch.float16, device=device))
+    host.apm.embed_positions = nn.Module()
+    host.apm.embed_positions.register_buffer(
+        "weight", torch.zeros(config.audio_config.max_source_positions, 1, dtype=torch.float16, device=device),
+    )
+    tokenizer = AutoTokenizer.from_pretrained(config_dir, trust_remote_code=True, local_files_only=True)
+    processor = AutoProcessor.from_pretrained(config_dir, trust_remote_code=True, local_files_only=True)
+    host.prepare_processor(processor=processor, tokenizer=tokenizer)
+    host.generation_config = GenerationConfig.from_pretrained(config_dir, local_files_only=True)
+    patch_dynamic_cache_seen_tokens(DynamicCache)
+    return host.eval(), tokenizer
 
 
 def require_export_mode(work_dir: str | Path, expected: str, *, operation: str) -> dict[str, Any]:
@@ -121,9 +160,10 @@ class MiniCPMO45HMONNXRuntime:
         enable_auto_offload: bool = False,
         enable_golden: bool = False,
         noise_seed: int | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         root = Path(work_dir)
-        meta = load_export_metadata(root)
+        meta = load_export_metadata(root) if metadata is None else metadata
         self.export_mode = str(meta["export_mode"])
         components = meta["components"]
         graph_options = {
@@ -146,6 +186,21 @@ class MiniCPMO45HMONNXRuntime:
         if host_model is not None:
             self.attach_host(host_model)
 
+    @classmethod
+    def from_artifact(
+        cls, work_dir: str | Path, *, metadata: dict[str, Any], device: str = "cpu", **options: Any,
+    ) -> MiniCPMO45HMONNXRuntime:
+        root = Path(work_dir)
+        host, tokenizer = _load_artifact_host(root / metadata["hf_config"], device)
+        runtime = cls(root, host, metadata=metadata, device_map=device, **options)
+        runtime.tokenizer = tokenizer
+        try:
+            runtime.set_exec_device(device)
+        except Exception:
+            runtime.release()
+            raise
+        return runtime
+
     def attach_host(self, host_model: nn.Module) -> nn.Module:
         native_tts_config = host_model.tts.model.config
         for name in (
@@ -163,7 +218,6 @@ class MiniCPMO45HMONNXRuntime:
         embeddings = host_model.vpm.embeddings
         self.vision.patch_size = embeddings.patch_size
         self.vision.num_patches_per_side = embeddings.num_patches_per_side
-        self.vision.wrap_cfg = SimpleNamespace(image_slice_max_size=[40, 40])
         self.host_model = MiniCPMOHFCompatible.to_hf_compatible(
             host_model,
             vision_model=self.vision,

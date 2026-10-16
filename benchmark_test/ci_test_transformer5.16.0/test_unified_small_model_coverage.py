@@ -125,7 +125,7 @@ def test_helpers_select_only_actual_model_consumers():
         return _selected_cases([f"{SUITE_RELATIVE}/{helper}"])
 
     assert selected("_unified_reporting.py") == set()
-    assert selected("_unified_assets.py") == {case.id for case in CASES if case.fixture in {"kokoro", "moss", "depthsplat"}}
+    assert selected("_unified_assets.py") == {case.id for case in CASES if case.fixture in {"kokoro", "moss", "depthsplat", "minicpmo"}}
     assert selected("_unified_fixtures/deepseek_v4.py") == {case.id for case in CASES if case.fixture == "deepseek_v4"}
     assert selected("fixtures/unified/qwen_dense.json") == {case.id for case in CASES if case.fixture == "qwen_dense"}
     assert selected("fixtures/depthsplat/release.json") == {case.id for case in CASES if case.fixture == "depthsplat"}

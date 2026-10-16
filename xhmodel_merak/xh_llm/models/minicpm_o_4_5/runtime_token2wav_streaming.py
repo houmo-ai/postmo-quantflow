@@ -13,6 +13,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from xhmodel_merak.exec_backends import CacheTensor
+
 from .runtime_token2wav_ops import _values
 
 
@@ -41,7 +43,7 @@ class StreamState:
     hift_valid_lengths: dict[str, int]
     prompt_mel_length: int
     estimator_cnn_banks: Tensor
-    estimator_att_banks: Tensor
+    estimator_att_banks: list[CacheTensor]
     att_cache_capacity: int
     append_capacity: int
     host_timestep_cache_banks: int
@@ -52,11 +54,14 @@ class StreamState:
         base_cache: Mapping[str, Tensor],
         prompt_mel_length: int,
         *,
-        att_cache_capacity: int | None = None,
+        att_cache_capacity: int,
         append_capacity: int = 56,
         host_timestep_cache_banks: int = 10,
     ) -> StreamState:
-        flow_cache = {name: value.detach().clone() for name, value in base_cache.items()}
+        flow_cache = {
+            name: value.detach().clone() for name, value in base_cache.items() if name != "estimator_att_cache"
+        }
+        att_capacity = int(att_cache_capacity)
         return cls(
             flow_cache=flow_cache,
             flow_valid_lengths={name: int(base_cache[name].shape[FLOW_CACHE_AXES[name]]) for name in FLOW_CACHE_AXES},
@@ -68,25 +73,59 @@ class StreamState:
             hift_valid_lengths={"mel": 0, "source": 0, "speech": 0},
             prompt_mel_length=prompt_mel_length,
             estimator_cnn_banks=base_cache["estimator_cnn_cache"][:host_timestep_cache_banks].detach().clone(),
-            estimator_att_banks=base_cache["estimator_att_cache"][:host_timestep_cache_banks].detach().clone(),
-            att_cache_capacity=int(att_cache_capacity) if att_cache_capacity is not None else 0,
+            estimator_att_banks=[
+                CacheTensor(
+                    pack_streaming_attention_cache(
+                        base_cache["estimator_att_cache"][index].to(torch.float16),
+                        valid_length=int(base_cache["estimator_att_cache"].shape[4]),
+                        capacity=att_capacity,
+                        axis=3,
+                    )
+                )
+                for index in range(host_timestep_cache_banks)
+            ],
+            att_cache_capacity=att_capacity,
             append_capacity=int(append_capacity),
             host_timestep_cache_banks=int(host_timestep_cache_banks),
         )
 
     def reset(self, base_cache: Mapping[str, Tensor]) -> None:
         """Restore the prompt cache and zero the existing HiFT tails."""
-        self.flow_cache = {name: value.detach().clone() for name, value in base_cache.items()}
+        self.close()
+        self.flow_cache = {
+            name: value.detach().clone() for name, value in base_cache.items() if name != "estimator_att_cache"
+        }
         self.flow_valid_lengths = {name: int(base_cache[name].shape[FLOW_CACHE_AXES[name]]) for name in FLOW_CACHE_AXES}
         self.hift_cache = {name: torch.zeros_like(value) for name, value in self.hift_cache.items()}
         self.hift_valid_lengths = {"mel": 0, "source": 0, "speech": 0}
         bank_count = self.host_timestep_cache_banks
         self.estimator_cnn_banks = base_cache["estimator_cnn_cache"][:bank_count].detach().clone()
-        self.estimator_att_banks = base_cache["estimator_att_cache"][:bank_count].detach().clone()
+        self.estimator_att_banks = [
+            CacheTensor(
+                pack_streaming_attention_cache(
+                    base_cache["estimator_att_cache"][index].to(torch.float16),
+                    valid_length=int(base_cache["estimator_att_cache"].shape[4]),
+                    capacity=self.att_cache_capacity,
+                    axis=3,
+                )
+            )
+            for index in range(bank_count)
+        ]
+
+    def close(self) -> None:
+        conformer_owner = self.flow_cache["conformer_att_cache"]
+        close = getattr(conformer_owner, "close", None)
+        if callable(close):
+            close()
+        for owner in self.estimator_att_banks:
+            close = getattr(owner, "close", None)
+            if callable(close):
+                close()
 
     def _check_lengths(self) -> None:
         for name, length in self.flow_valid_lengths.items():
-            if length < 0 or length > self.flow_cache[name].shape[FLOW_CACHE_AXES[name]]:
+            capacity = self.att_cache_capacity if name == "estimator_att_cache" else self.flow_cache[name].shape[3]
+            if length < 0 or length > capacity:
                 raise RuntimeError(f"invalid Flow cache valid length for {name}: {length}")
         for name, length in self.hift_valid_lengths.items():
             axis = {"mel": 2, "source": 2, "speech": 1}[name]
@@ -289,8 +328,6 @@ def _token2wav_capacity_guide(required_length: int, capacity: int) -> str:
         "    streaming.cache_shapes.estimator_att_cache[4]: use the same cache capacity\n"
         "    token2wav_flow_decoder.streaming.estimator_step_cache_shapes.input_att[3]: "
         "use the same cache capacity\n"
-        "    token2wav_flow_decoder.streaming.estimator_step_cache_shapes.output_att[3]: "
-        "cache capacity + append_capacity\n"
         "then re-run the export workflow and re-verify with the new artifacts."
     )
 
@@ -298,12 +335,11 @@ def _token2wav_capacity_guide(required_length: int, capacity: int) -> str:
 def _read_present_valid_length(value: Tensor, *, name: str, capacity: int) -> int:
     if value.numel() != 1:
         raise RuntimeError(f"Token2Wav {name} must be a scalar tensor, got shape {tuple(value.shape)}")
-    valid_length = int(value.reshape(()).item())
+    valid_length = int(value.item())
     if valid_length < 0:
         raise RuntimeError(f"Token2Wav {name}={valid_length} must be non-negative")
-    # The graph reports its pre-truncation logical length. The Host immediately
-    # keeps only prompt + recent-tail frames, so the stored valid length must be
-    # bounded to the capacity of that truncated cache.
+    # The graph reports its pre-truncation logical length; the cache writer
+    # retains only prompt + recent-tail frames within the fixed capacity.
     return min(valid_length, capacity)
 
 
@@ -317,11 +353,12 @@ def run_stream_cfm(
     n_timesteps: int,
     cfg_rate: float,
     estimator_cnn_banks: Tensor,
-    estimator_att_banks: Tensor,
+    estimator_att_banks: list[CacheTensor],
+    past_att_valid_length: int,
+    prompt_cache_valid_length: int,
     frame_capacity: int | None = None,
-    estimator_att_capacity: int | None = None,
     on_estimator_call: Callable[[], None] | None = None,
-) -> tuple[Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor, list[CacheTensor]]:
     output_length = mu.shape[2]
     capacity = output_length if frame_capacity is None else frame_capacity
     if output_length > capacity:
@@ -333,11 +370,7 @@ def run_stream_cfm(
         noise = F.pad(noise, padding)
     x = noise
     present_cnn_banks: list[Tensor] = []
-    present_att_banks: list[Tensor] = []
     past_cnn_banks = estimator_cnn_banks.to(mu.dtype)
-    past_att_banks = estimator_att_banks.to(mu.dtype)
-    past_att_valid_length = int(past_att_banks.shape[4])
-    att_capacity = past_att_valid_length if estimator_att_capacity is None else estimator_att_capacity
     t_span = torch.linspace(0, 1, n_timesteps + 1, device=mu.device, dtype=mu.dtype)
     t_span = 1 - torch.cos(t_span * 0.5 * torch.pi)
     t = t_span[0].reshape(1)
@@ -354,29 +387,16 @@ def run_stream_cfm(
                 spks_cfg,
                 cond_cfg,
                 past_cnn_banks[index],
-                pack_streaming_attention_cache(
-                    past_att_banks[index],
-                    valid_length=past_att_valid_length,
-                    capacity=att_capacity,
-                    axis=3,
-                ),
+                estimator_att_banks[index],
                 torch.tensor([past_att_valid_length], dtype=torch.int32, device=mu.device),
                 torch.tensor([output_length], dtype=torch.int32, device=mu.device),
+                torch.tensor([prompt_cache_valid_length], dtype=torch.int32, device=mu.device),
             )
         )
         if len(values) != 3:
             raise RuntimeError(f"streaming estimator step returned {len(values)} tensors, expected 3")
-        derivative, present_cnn, present_att = values
+        derivative, present_cnn, _ = values
         present_cnn_banks.append(present_cnn)
-        present_att_banks.append(
-            compact_estimator_attention_cache(
-                present_att,
-                past_valid_length=past_att_valid_length,
-                current_valid_length=output_length,
-                input_capacity=att_capacity,
-                frame_capacity=capacity,
-            )
-        )
         conditional, unconditional = derivative.chunk(2, dim=0)
         x = x + dt * ((1.0 + cfg_rate) * conditional - cfg_rate * unconditional)
         t = t + dt
@@ -384,4 +404,4 @@ def run_stream_cfm(
             on_estimator_call()
         if index + 1 < n_timesteps:
             dt = t_span[index + 2] - t
-    return x[:, :, :output_length], torch.stack(present_cnn_banks), torch.stack(present_att_banks)
+    return x[:, :, :output_length], torch.stack(present_cnn_banks), estimator_att_banks

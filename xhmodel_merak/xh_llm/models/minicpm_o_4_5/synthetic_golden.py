@@ -204,6 +204,7 @@ def synthetic_golden_inputs(
                 CacheTensor(torch.zeros(tuple(int(value) for value in shapes["input_att"]), dtype=torch.float16)),
                 torch.tensor([int(contract["base_cache_valid_length"])], dtype=torch.int32),
                 torch.tensor([frame_capacity], dtype=torch.int32),
+                torch.tensor([int(contract["base_cache_valid_length"])], dtype=torch.int32),
             )
         capacity = int(component["mel_capacity"])
         return (

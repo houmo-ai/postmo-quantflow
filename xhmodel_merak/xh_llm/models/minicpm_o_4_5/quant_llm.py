@@ -93,6 +93,9 @@ def quantize_minicpm_llm_gptq(
     output_path.mkdir(parents=True, exist_ok=True)
     save_path = output_path / "gptq_llm"
 
+    from .hf_compatible import patch_tied_weights_keys_compat
+
+    patch_tied_weights_keys_compat()
     from gptqmodel.recipes.minicpm_o_4_5 import quantize_minicpm_o_4_5
 
     result = quantize_minicpm_o_4_5(

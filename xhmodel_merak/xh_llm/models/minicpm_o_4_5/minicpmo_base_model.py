@@ -89,25 +89,12 @@ class XHMiniCPMOBaseModel(BaseModel):
         from transformers import AutoConfig
 
         config = AutoConfig.from_pretrained(self.hf_model_dir, trust_remote_code=True)
-        from .hf_compatible import TTS_SAMPLING_DEFAULTS
+        from .hf_compatible import TTS_SAMPLING_DEFAULTS, patch_tied_weights_keys_compat
 
         for key, value in TTS_SAMPLING_DEFAULTS.items():
             if not hasattr(config.tts_config, key):
                 setattr(config.tts_config, key, value)
-        from transformers import PreTrainedModel
-
-        if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
-
-            def _get_tied_keys(self):
-                return self.__dict__.get(
-                    "_xh_all_tied_weights_keys",
-                    {key: key for key in (getattr(self, "_tied_weights_keys", None) or ())},
-                )
-
-            def _set_tied_keys(self, value):
-                self.__dict__["_xh_all_tied_weights_keys"] = value
-
-            PreTrainedModel.all_tied_weights_keys = property(_get_tied_keys, _set_tied_keys)
+        patch_tied_weights_keys_compat()
         hf_model = AutoModel.from_pretrained(
             self.hf_model_dir,
             config=config,

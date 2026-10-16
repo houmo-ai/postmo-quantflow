@@ -63,3 +63,25 @@ numerical execution coverage for the three larger gears.
 
 Successful execution proves integration of the requested variant, not model
 quality, real-size memory use, throughput or clean pip installation.
+
+MiniCPM-o-4.5 uses `../minicpmo/release.json` to pin a small, real-architecture
+source bundle rather than adding checkpoint weights to Git. With seed 4605,
+its official Host has two 128-wide LLM/vision/TTS layers, two 32-wide audio
+encoder layers, four visual queries and eight TTS audio codes. Its Flow keeps
+the original 6561-code vocabulary, Mel-80 and speaker-192 interfaces with one
+Base/Up Conformer layer and two 32-wide DiT layers. HiFT and the two auxiliary
+source ONNX graphs retain their original architecture. Nonconstant norm
+vectors follow the ordinary synthetic fixtures' scalar-folding precautions.
+The source bundle includes original remote code, tokenizer, model image/audio
+assets, provenance and licenses. The worker fixes sampling seed 4891, calibrates
+two 256-token rows, preserves W4 GPTQ and ten CFM steps, and exports all twelve
+offline or fifteen session/stream graphs. Only static capacities are reduced:
+context 1024 offline / 2048 streaming, prefill 256,
+vision 2x2 patches, audio 100 frames, Flow 128 tokens/256 Mel frames and HiFT
+256 frames. Streaming prompt capacity is 32 tokens/58 Mel frames, with 100
+recent-history frames and a 28-token next chunk. Nonpersistent native DiT/CFM
+scratch buffers match the tiny model's actual layers, heads and channels.
+An MP4 combines the bundled image and real audio: half a second offline, two
+seconds for session/stream, with a half-second reference excerpt. Public inference
+checks real Golden tensors for every graph role after deleting the original source and checkpoint.
+Neither sampling nor graph execution is mocked.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import re
 from collections.abc import Mapping
@@ -248,7 +249,12 @@ def verify_quant_model_identity(
             path=str(source_config_path),
         )
 
-    comparison_source = (
+    recipe = get_recipe(plan.model_id)
+    project = None
+    if recipe.checkpoint_config_projection is not None:
+        module, _, name = recipe.checkpoint_config_projection.partition(":")
+        project = getattr(importlib.import_module(module), name)
+    comparison_source = project(source_config, source=True) if project is not None else (
         _canonicalize_legacy_paddleocr_vl_config(source_config)
         if plan.model_id == "paddleocr-vl-1.6"
         else source_config
@@ -262,7 +268,8 @@ def verify_quant_model_identity(
             path=str(source_config_path),
         )
     for checkpoint_config in checkpoint_configs:
-        actual = _model_config_identity(checkpoint_config)
+        comparison_checkpoint = project(checkpoint_config, source=False) if project is not None else checkpoint_config
+        actual = _model_config_identity(comparison_checkpoint)
         mismatches = {
             field: {"expected": expected_value, "actual": actual.get(field)}
             for field, expected_value in expected.items()
@@ -276,7 +283,9 @@ def verify_quant_model_identity(
                 path=str(artifact_path),
                 identity_mismatches=mismatches,
             )
-        constraint_mismatches = source_constraint_mismatches(get_recipe(plan.model_id), checkpoint_config)
+        constraint_mismatches = source_constraint_mismatches(
+            recipe, source_config if project is not None else checkpoint_config
+        )
         if constraint_mismatches:
             raise ModelError(
                 ErrorCode.QUANT_ARTIFACT_MISMATCH,
@@ -286,7 +295,7 @@ def verify_quant_model_identity(
                 source_constraint_mismatches=constraint_mismatches,
             )
         config_mismatches = _behavior_config_mismatches(
-            comparison_source, checkpoint_config, type_aliases=get_recipe(plan.model_id).config_type_aliases
+            comparison_source, comparison_checkpoint, type_aliases=recipe.config_type_aliases
         )
         if _has_separately_quantized_lm_head(artifact_path, checkpoint_config):
             # GPTQModel unties a shared LM head when it saves a separately

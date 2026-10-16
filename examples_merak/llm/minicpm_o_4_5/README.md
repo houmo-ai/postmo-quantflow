@@ -19,8 +19,25 @@
 
 ## 环境
 
-真实导出需要仓库依赖、`transformers==4.57.1`、MiniCPM-o/Token2Wav 依赖、可用 CUDA
-设备，以及 XH2a 导出和 HMONNX 运行环境。
+传统 demo 使用 `transformers==4.57.1`；统一接口使用 recipe 声明的 `transformers==5.16.1`。
+真实导出还需要仓库、MiniCPM-o/Token2Wav 依赖、可用 CUDA 设备，以及 XH2a 导出和 HMONNX 运行环境。
+
+在已有公共依赖的 CI 环境中，从仓库根目录分别准备依赖：
+
+```bash
+python benchmark_test/ci_test_transformer5.16.0/prepare_dependencies.py \
+  --model-id minicpm-o-4.5 --phase inference \
+  --packages pillow librosa moviepy resampy hyperpyyaml torchaudio ninja --install
+python -m pip install --no-deps minicpmo-utils==1.0.6
+```
+
+不要安装 `[tts]`/`[all]`，也不要将 minicpmo-utils 放入上面普通安装的 `--packages`。
+使用支持公共 Pillow 11.3.0 的 MoviePy 2.2.1，以及公共 librosa 0.11.0；
+音频重采样显式使用 `kaiser_best`（resampy 0.4.3）。
+其余依赖仍需由 CI 按 recipe 准备。这只避免安装器降级公共依赖，
+不消除 minicpmo-utils 对 Pillow/librosa/MoviePy 的旧版本约束；`pip check` 仍会报告冲突，
+依赖档案仍为 `blocked_distribution`，不是可直接干净安装的锁文件。
+后续可选项：切换新版 librosa 默认的 `soxr_hq` 重采样，待整体精度验证后再决定。
 
 ## 校准数据
 
@@ -89,7 +106,7 @@ PYTHONPATH=$PWD python \
 该配置的默认目录为 `work_dirs/minicpm_o_4_5_xh2a_w4a8_gptq_quant` 与
 `work_dirs/minicpm_o_4_5_xh2a_w4a8_gptq_export`。
 
-推理仍需原始模型目录中的 processor、tokenizer 和 remote code；Token2Wav 权重已在导出图中，
+传统 demo 仍需原始模型目录中的 processor、tokenizer 和 remote code；Token2Wav 权重已在导出图中，
 不再加载原始 `flow.pt` / `hift.pt`。
 `export.mode` 决定导出的运行模式：
 
@@ -100,6 +117,44 @@ PYTHONPATH=$PWD python \
 默认导出 `offline`，可通过 `--export-mode session` 或 `--export-mode stream` 选择其他模式。
 
 ## HMONNX Demo
+
+统一接口使用 `minicpm-o-4.5`，通过 `profile` 选择 `offline`、`session` 或 `stream`，LLM 为 W4A8、prefill 256、
+context 32k。构建会打包 Host 配置、processor、tokenizer 和 embedding，推理不再需要原始权重目录：
+
+```python
+from xhmodel_merak.model_build import build_model
+from xhmodel_merak.model_inference import inference_model
+
+artifact = build_model(
+    model_id="minicpm-o-4.5", model_dir="<model_dir>",
+    quant_checkpoint="<gptq_llm_dir>", output_dir="work_dirs/minicpm_o_4_5_unified",
+    profile="offline", device="cuda:0",
+)
+result = inference_model(
+    artifact_dir=artifact.output_dir,
+    inputs={"prompt": "请简短描述视频内容。", "video": "<video.mp4>", "max_new_tokens": 128},
+    device="cuda:0",
+)
+print(result.output_text)
+```
+
+`offline` 运行整段多模态问答；`session` 分块输入后生成回答；`stream` 按全双工协议逐块听/说。
+统一入口每次处理一段完整素材，分块过程中复用同一 runtime，返回完整结果及分块记录，不跨调用保留会话。
+例如，构建时选择 `profile="stream"`，推理时传入音频和参考音频：
+
+```python
+result = inference_model(
+    artifact_dir=artifact.output_dir,
+    inputs={
+        "prompt": "请描述听到的内容。", "audio": "<audio.wav>",
+        "generate_audio": True, "reference_audio": "<reference.wav>",
+    },
+    device="cuda:0",
+)
+```
+
+`golden=["llm", "tts", "token2wav_flow_frontend", "token2wav_flow_decoder", "token2wav_hift"]`
+可在推理时采集指定组件的真实 Golden；所选组件需要在该次输入中实际执行。
 
 ```bash
 PYTHONPATH=$PWD python \

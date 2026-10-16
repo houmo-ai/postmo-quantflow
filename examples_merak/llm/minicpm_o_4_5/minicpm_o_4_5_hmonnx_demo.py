@@ -95,7 +95,7 @@ def main() -> None:
     contents = normalize_minicpmo_video(args.video, include_audio=True, stack_frames=1)
     messages = [{"role": "user", "content": [*contents, args.question]}]
     if args.generate_audio:
-        ref_audio, _ = librosa.load(args.ref_audio, sr=16000, mono=True)
+        ref_audio, _ = librosa.load(args.ref_audio, sr=16000, mono=True, res_type="kaiser_best")
         messages.insert(0, host.get_sys_prompt(ref_audio=ref_audio, mode="omni", language=args.language))
     runtime.reset_state()
     output_audio_path = args.output_audio_path or args.output_dir / "output.wav"

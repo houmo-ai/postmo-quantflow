@@ -11,7 +11,7 @@ import torch
 from xhquant.api import DeviceType, QuantScheme, convert_onnx_to_hmonnx, create_quant_config
 
 
-_CAMPPLUS_INPUT = "input"  # (batch, seq, 80) fbank features
+_CAMPPLUS_INPUT = "fbank_features"  # (batch, seq, 80) fbank features
 _CAMPPLUS_OUTPUT = "output"  # (batch, 192) speaker embedding
 
 

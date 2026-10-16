@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import onnx
@@ -64,7 +65,7 @@ def prepare_vision_inputs(
             + torch.bucketize(width_coords, boundaries, right=True)
         ).flatten()
         position_ids[index, patch_mask[index].cpu()] = positions
-    return pixels.to(torch.float16), position_ids, attention_mask, target_sizes, image_counts
+    return pixels.to(torch.float16), position_ids.to(pixels.device), attention_mask, target_sizes, image_counts
 
 
 def run_vision_slices(
@@ -104,6 +105,8 @@ class MiniCPMO45VisionHMONNXRuntime(HMONNXModel):
     ) -> None:
         self.graph = graph
         self.input_shapes = _input_shapes(graph)
+        # Padding depends on total patch capacity, not the slice's aspect ratio.
+        self.wrap_cfg = SimpleNamespace(image_slice_max_size=(1, self.input_shapes[1][-1]))
         self._resampler_pos_embed_cache: Tensor | None = None
         super().__init__(
             str(graph),

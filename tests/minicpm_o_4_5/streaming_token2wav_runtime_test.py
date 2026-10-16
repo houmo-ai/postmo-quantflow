@@ -55,7 +55,7 @@ def _flow_meta() -> dict[str, object]:
                 "mu",
                 "spks",
                 "present_conformer_cnn_cache",
-                "present_conformer_att_cache",
+                "conformer_cache_write_done",
                 "present_conformer_cache_valid_length",
             ],
             "estimator_step_input_names": [
@@ -68,11 +68,12 @@ def _flow_meta() -> dict[str, object]:
                 "past_estimator_att_cache",
                 "past_cache_valid_length",
                 "current_frame_valid_length",
+                "prompt_cache_valid_length",
             ],
             "estimator_step_output_names": [
                 "derivative_cfg",
                 "present_estimator_cnn_cache",
-                "present_estimator_att_cache",
+                "estimator_cache_write_done",
             ],
             "host_timestep_cache_banks": 10,
         },
@@ -125,7 +126,7 @@ def test_streaming_role_loader_requires_decomposed_flow_graphs(tmp_path, monkeyp
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
 
     runtime = object.__new__(runtime_token2wav.MiniCPMO45Token2WavHMONNXRuntime)
-    runtime._load_streaming_roles(tmp_path, _components(), lambda path: str(path))
+    runtime._load_streaming_roles(tmp_path, _components(), lambda path, **_kwargs: str(path))
 
     assert runtime.prompt_frontend_session == str(tmp_path / "flow_prompt_frontend.onnx")
     assert runtime.flow_frontend_session == str(tmp_path / "flow_frontend.onnx")
@@ -149,14 +150,20 @@ def test_stream_cache_reset_restores_base_flow_and_empty_hift_state() -> None:
         for index, (name, shape) in enumerate(
             (
                 ("conformer_cnn_cache", (1, 2, 1)),
-                ("conformer_att_cache", (1, 1, 1, 3, 1)),
+                ("conformer_att_cache", (2, 1, 1, 4, 1)),
                 ("estimator_cnn_cache", (1, 1, 1, 2, 1)),
                 ("estimator_att_cache", (1, 1, 1, 1, 3, 1)),
             )
         )
     }
     runtime._base_flow_cache = {name: value.clone() for name, value in base.items()}
-    runtime._stream_state = runtime_token2wav.StreamState.from_base_cache(base, prompt_mel_length=5)
+    runtime._models = {}
+    runtime._stream_state = runtime_token2wav.StreamState.from_base_cache(
+        base, prompt_mel_length=4, att_cache_capacity=6, host_timestep_cache_banks=1
+    )
+    runtime.stream_flow_meta = {"frontend_cache_shapes": {"conformer_att_cache": [2, 1, 1, 6, 1]}}
+    runtime.base_conformer_layers = 1
+    runtime._bind_conformer_cache()
     runtime._stream_state.flow_cache["conformer_cnn_cache"].add_(10)
     runtime._stream_state.hift_cache["speech"] = torch.ones(1, 4)
     runtime.reset_stream_cache()
@@ -181,20 +188,21 @@ def test_reset_before_prompt_cache_initialization_is_a_noop() -> None:
 
 
 def test_stream_cfm_uses_ten_independent_estimator_cache_banks() -> None:
+    from xhmodel_merak.exec_backends import CacheTensor
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_token2wav import run_stream_cfm
 
     calls: list[torch.Tensor] = []
     cnn = torch.zeros(10, 1, 1, 1, 1)
-    att = torch.zeros(10, 1, 1, 1, 1, 1)
+    att = [CacheTensor(torch.zeros(1, 1, 1, 1, 1)) for _ in range(10)]
 
-    def estimator_step(x_cfg, mu_cfg, t_cfg, spks_cfg, cond_cfg, past_cnn, past_att, _past_valid, current_valid):
-        del mu_cfg, t_cfg, spks_cfg, cond_cfg, current_valid
+    def estimator_step(x_cfg, mu_cfg, t_cfg, spks_cfg, cond_cfg, past_cnn, past_att, _past, current, prompt):
+        del mu_cfg, t_cfg, spks_cfg, cond_cfg, current, prompt
         calls.append(past_cnn.clone())
-        current_cache = past_att.new_ones((*past_att.shape[:3], x_cfg.shape[2], past_att.shape[4]))
+        past_att.data.add_(1)
         return (
             torch.cat((torch.ones_like(x_cfg[:1]), torch.zeros_like(x_cfg[:1]))),
             past_cnn + 1,
-            torch.cat((current_cache, past_att + 1), dim=3),
+            torch.zeros(1),
         )
 
     output, present_cnn, present_att = run_stream_cfm(
@@ -207,17 +215,18 @@ def test_stream_cfm_uses_ten_independent_estimator_cache_banks() -> None:
         cfg_rate=0.7,
         estimator_cnn_banks=cnn,
         estimator_att_banks=att,
+        past_att_valid_length=1,
+        prompt_cache_valid_length=1,
     )
 
     assert len(calls) == 10
     assert [int(value.reshape(()).item()) for value in calls] == [0] * 10
     assert torch.equal(present_cnn[:, 0, 0, 0, 0], torch.ones(10))
-    assert torch.equal(present_att[:, 0, 0, 0, 0, 0], torch.ones(10))
+    assert all(torch.equal(owner.data, torch.ones_like(owner.data)) for owner in present_att)
     assert torch.allclose(output, torch.full_like(output, 1.7))
 
 
-def test_stream_state_keeps_compact_att_caches_and_tracks_graph_capacity_separately() -> None:
-    """Host state stays compact; fixed-capacity padding is only added at graph calls."""
+def test_stream_state_keeps_estimator_att_cache_owners_at_graph_capacity() -> None:
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5 import runtime_token2wav
 
     base = {
@@ -229,8 +238,8 @@ def test_stream_state_keeps_compact_att_caches_and_tracks_graph_capacity_separat
     state = runtime_token2wav.StreamState.from_base_cache(base, 842, att_cache_capacity=942)
 
     assert state.flow_cache["conformer_att_cache"].shape[3] == 842
-    assert state.flow_cache["estimator_att_cache"].shape[4] == 842
-    assert state.estimator_att_banks.shape[4] == 842
+    assert len(state.estimator_att_banks) == 10
+    assert state.estimator_att_banks[0].shape[3] == 942
     assert state.att_cache_capacity == 942
     assert state.flow_valid_lengths == {"conformer_att_cache": 842, "estimator_att_cache": 842}
 
@@ -400,15 +409,15 @@ def test_streaming_attention_cache_rejects_valid_length_over_capacity() -> None:
 
 
 def test_stream_cfm_pads_normal_role_to_estimator_capacity_and_crops_result() -> None:
+    from xhmodel_merak.exec_backends import CacheTensor
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_token2wav import run_stream_cfm
 
     seen: list[torch.Size] = []
 
-    def estimator_step(x_cfg, mu_cfg, t_cfg, spks_cfg, cond_cfg, past_cnn, past_att, _past_valid, _current_valid):
+    def estimator_step(x_cfg, mu_cfg, t_cfg, spks_cfg, cond_cfg, past_cnn, past_att, _past, _current, _prompt):
         del mu_cfg, t_cfg, spks_cfg, cond_cfg
         seen.append(x_cfg.shape)
-        current_cache = past_att.new_zeros((*past_att.shape[:3], x_cfg.shape[2], past_att.shape[4]))
-        return torch.zeros_like(x_cfg), past_cnn, torch.cat((current_cache, past_att), dim=3)
+        return torch.zeros_like(x_cfg), past_cnn, torch.zeros(1)
 
     output, _, _ = run_stream_cfm(
         estimator_step,
@@ -419,7 +428,9 @@ def test_stream_cfm_pads_normal_role_to_estimator_capacity_and_crops_result() ->
         n_timesteps=1,
         cfg_rate=0.7,
         estimator_cnn_banks=torch.zeros(1, 1, 1, 1, 1),
-        estimator_att_banks=torch.zeros(1, 1, 1, 1, 1, 1),
+        estimator_att_banks=[CacheTensor(torch.zeros(1, 1, 1, 1, 1))],
+        past_att_valid_length=1,
+        prompt_cache_valid_length=1,
         frame_capacity=56,
     )
 
@@ -428,14 +439,15 @@ def test_stream_cfm_pads_normal_role_to_estimator_capacity_and_crops_result() ->
 
 
 def test_stream_cfm_pads_attention_cache_to_estimator_input_capacity() -> None:
+    from xhmodel_merak.exec_backends import CacheTensor
     from xhmodel_merak.xh_llm.models.minicpm_o_4_5.runtime_token2wav import run_stream_cfm
 
     seen: list[torch.Size] = []
 
-    def estimator_step(x_cfg, mu_cfg, t_cfg, spks_cfg, cond_cfg, past_cnn, past_att, _past_valid, _current_valid):
+    def estimator_step(x_cfg, mu_cfg, t_cfg, spks_cfg, cond_cfg, past_cnn, past_att, _past, _current, _prompt):
         del mu_cfg, t_cfg, spks_cfg, cond_cfg
         seen.append(past_att.shape)
-        return torch.zeros_like(x_cfg), past_cnn, torch.zeros(1, 1, 1, 206, 1)
+        return torch.zeros_like(x_cfg), past_cnn, torch.zeros(1)
 
     run_stream_cfm(
         estimator_step,
@@ -446,8 +458,9 @@ def test_stream_cfm_pads_attention_cache_to_estimator_input_capacity() -> None:
         n_timesteps=1,
         cfg_rate=0.7,
         estimator_cnn_banks=torch.zeros(1, 1, 1, 1, 1),
-        estimator_att_banks=torch.zeros(1, 1, 1, 1, 50, 1),
-        estimator_att_capacity=150,
+        estimator_att_banks=[CacheTensor(torch.zeros(1, 1, 1, 150, 1))],
+        past_att_valid_length=50,
+        prompt_cache_valid_length=50,
     )
 
     assert seen == [torch.Size((1, 1, 1, 150, 1))]
@@ -557,6 +570,8 @@ def test_stream_routes_final_roles_and_applies_official_overlap_policy() -> None
             }.items()
         },
         prompt_mel_length=5,
+        att_cache_capacity=3,
+        host_timestep_cache_banks=1,
     )
     runtime._stream_state.hift_cache["speech"] = torch.ones((1, 4))
     runtime.pre_lookahead_len = 3
@@ -704,6 +719,7 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
         append_capacity=6,
         host_timestep_cache_banks=1,
     )
+    runtime._bind_conformer_cache()
     runtime._stream_state.hift_cache = {
         "mel": torch.zeros(1, 80, 4),
         "source": torch.zeros(1, 1, 4),
@@ -725,10 +741,9 @@ def test_official_style_stream_calls_hmonnx_flow_and_hift_roles() -> None:
     runtime.flow_frontend_session = flow_frontend
     runtime.stream_estimator_meta = {"estimator_step_cache_shapes": {"input_att": [1, 1, 1, 4, 1], "frame_capacity": 6}}
 
-    def estimator_step(x, mu, t, spks, cond, cnn, att, past_valid, current_valid):
-        del mu, t, spks, cond, past_valid, current_valid
-        current_cache = att.new_zeros((*att.shape[:3], x.shape[2], att.shape[4]))
-        return torch.zeros_like(x), cnn, torch.cat((current_cache, att), dim=3)
+    def estimator_step(x, mu, t, spks, cond, cnn, att, past_valid, current_valid, prompt_valid):
+        del mu, t, spks, cond, att, past_valid, current_valid, prompt_valid
+        return torch.zeros_like(x), cnn, torch.zeros(1)
 
     runtime.estimator_step_session = estimator_step
 
@@ -792,7 +807,7 @@ def test_each_hmonnx_streaming_execution_role_is_required(monkeypatch, component
     components = _components()
     del components[component]["graphs"][role]
     with pytest.raises(KeyError, match=role):
-        runtime._load_streaming_roles(Path("/tmp"), components, lambda path: str(path))
+        runtime._load_streaming_roles(Path("/tmp"), components, lambda path, **_kwargs: str(path))
 
 
 def test_top_level_resets_token2wav_stream_state() -> None:
@@ -875,6 +890,8 @@ def test_stream_uses_metadata_chunk_capacity_instead_of_25() -> None:
             }.items()
         },
         prompt_mel_length=5,
+        att_cache_capacity=3,
+        host_timestep_cache_banks=1,
     )
     runtime.chunk_token_capacity = 9
     captured: list[int] = []
@@ -901,6 +918,8 @@ def test_stream_rejects_oversized_non_final_chunk_without_truncation() -> None:
             }.items()
         },
         5,
+        att_cache_capacity=3,
+        host_timestep_cache_banks=1,
     )
     runtime.chunk_token_capacity = 3
 
@@ -1097,6 +1116,7 @@ def _flow_role_runtime() -> object:
     runtime.report = runtime_token2wav.Token2WavExecutionReport()
     runtime._hift_stft_n_fft = 4
     runtime._hift_stft_hop_length = 2
+    runtime._bind_conformer_cache()
     return runtime
 
 
@@ -1187,9 +1207,8 @@ def test_streaming_flow_role_pads_short_final_chunk_to_token_capacity() -> None:
 
     runtime.flow_frontend_session = flow_session
 
-    def estimator_session(x, _mu, _t, _spks, _cond, cnn, att, _past_valid, _current_valid):
-        current_cache = att.new_zeros((*att.shape[:3], x.shape[2], att.shape[4]))
-        return torch.zeros_like(x), cnn, torch.cat((current_cache, att), dim=3)
+    def estimator_session(x, _mu, _t, _spks, _cond, cnn, _att, _past_valid, _current_valid, _prompt_valid):
+        return torch.zeros_like(x), cnn, torch.zeros(1)
 
     runtime.estimator_step_session = estimator_session
 
@@ -1221,7 +1240,8 @@ def test_token2wav_release_state_clears_model_specific_device_tensors() -> None:
     for name in device_tensor_names:
         setattr(runtime, name, torch.ones(1))
     runtime._base_flow_cache = {"cache": torch.ones(1)}
-    runtime._stream_state = object()
+    runtime._models = {}
+    runtime._stream_state = SimpleNamespace(close=lambda: None)
 
     runtime.release_state()
 
@@ -1252,7 +1272,7 @@ def test_streaming_flow_role_feeds_fp16_activations_to_w8a16_graphs() -> None:
     observed: dict[str, torch.dtype] = {}
 
     def flow_session(*args):
-        tokens, token_valid_length, last_chunk, embedding, cnn, att, _valid = args
+        tokens, token_valid_length, last_chunk, embedding, cnn, att, _valid, _prompt_valid = args
         observed["tokens"] = tokens.dtype
         observed["token_valid_length"] = token_valid_length.dtype
         observed["last_chunk"] = last_chunk.dtype
@@ -1267,13 +1287,12 @@ def test_streaming_flow_role_feeds_fp16_activations_to_w8a16_graphs() -> None:
             torch.tensor([6], dtype=torch.int32),
         )
 
-    def estimator_session(x, _mu, _t, _spks, _cond, cnn, att, past_valid, current_valid):
+    def estimator_session(x, _mu, _t, _spks, _cond, cnn, att, past_valid, current_valid, prompt_valid):
         observed["estimator_cnn"] = cnn.dtype
         observed["estimator_att"] = att.dtype
         observed["estimator_past_valid"] = past_valid.dtype
         observed["estimator_current_valid"] = current_valid.dtype
-        current_cache = att.new_zeros((*att.shape[:3], x.shape[2], att.shape[4]))
-        return torch.zeros_like(x), cnn, torch.cat((current_cache, att), dim=3)
+        return torch.zeros_like(x), cnn, torch.zeros(1)
 
     runtime.flow_frontend_session = flow_session
     runtime.estimator_step_session = estimator_session

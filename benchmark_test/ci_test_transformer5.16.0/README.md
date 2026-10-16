@@ -434,6 +434,29 @@ upstream renderer or manually configured model path. See
 `DEPTHSPLAT_CI_BUNDLE` remains an optional override for a complete extracted
 release archive and cannot bypass the same integrity checks.
 
+MiniCPM-o-4.5 covers the offline/session/stream public profiles with eight real
+components and twelve/fifteen/fifteen runtime graphs. Its pinned source bundle contains randomly initialized
+two-layer 128-wide official LLM/vision/TTS modules, a two-layer 32-wide audio
+encoder, a one-layer Base/Up Conformer and two-layer DiT, the full native HiFT,
+and the original CampPlus/speech-tokenizer ONNX models. The tokenizer and image/
+reference-audio samples come from the upstream model assets. TTS's fixture-only
+audio vocabulary has eight entries; the Flow vocabulary remains 6561. Native
+sampling, the offline 50-token minimum, real W4 GPTQ and ten CFM steps are not bypassed.
+The worker constructs an MP4 from the bundled image and real audio (half a second
+offline, two seconds for session/stream),
+uses a half-second reference excerpt, and checks public audio inference and
+Golden collection for every graph role after relocation and removal of its
+source/quantization directories. Session/stream retain two input chunks, prompt
+setup graphs, one Base/Up Conformer layer, two DiT layers, ten CFM cache banks
+and the 100-frame recent-history policy. The fixture sizes upstream nonpersistent
+scratch buffers to those tiny layers; it does not replace their computations.
+This is integration coverage, not a model-quality or real-time benchmark.
+
+- MiniCPM-o object: `http://10.10.1.53:8082/artifactory/model_zoo2/unified_ci_assets/minicpmo/60b577fe53f7b0d9247f0877246fee4d4bc54f3abc8ab30c28449a5471c583a3/minicpmo45-ci-source-v1.tar.gz`
+- Archive SHA-256: `60b577fe53f7b0d9247f0877246fee4d4bc54f3abc8ab30c28449a5471c583a3` (804,097,599 bytes).
+- Extracted root: `minicpmo45-ci-source-v1`; optional offline override: `UNIFIED_CI_MINICPMO_SOURCE`.
+- `fixtures/minicpmo/release.json` verifies every bundled file, including local overrides, using the same cache/mirror machinery as MOSS.
+
 With the CI environment activated, run:
 
 ```bash

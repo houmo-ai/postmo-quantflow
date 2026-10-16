@@ -55,7 +55,7 @@ def _session_media(video_path: Path, prompt_path: Path) -> dict[str, Any]:
     for index in range(2):
         chunk = audio[index * _SAMPLE_RATE : (index + 1) * _SAMPLE_RATE]
         chunks.append((np.pad(chunk, (0, _SAMPLE_RATE - len(chunk))), []))
-    prompt_waveform, _ = librosa.load(prompt_path, sr=_SAMPLE_RATE, mono=True)
+    prompt_waveform, _ = librosa.load(prompt_path, sr=_SAMPLE_RATE, mono=True, res_type="kaiser_best")
     return {
         "chunks": chunks,
         "prompt_waveform": np.asarray(prompt_waveform, dtype=np.float32),
@@ -119,7 +119,7 @@ def default_real_request(meta: Mapping[str, Any], overrides: Mapping[str, Any]) 
 def build_offline_messages(host: Any, request: Mapping[str, Any]) -> list[dict[str, Any]]:
     import librosa
 
-    ref_audio, _ = librosa.load(request["ref_audio"], sr=_SAMPLE_RATE, mono=True)
+    ref_audio, _ = librosa.load(request["ref_audio"], sr=_SAMPLE_RATE, mono=True, res_type="kaiser_best")
     system_prompt = host.get_sys_prompt(ref_audio=ref_audio, mode="omni", language="zh")
     return [system_prompt, *request["messages"]]
 
@@ -135,7 +135,7 @@ def run_duplex_golden_sample(
     import librosa
     from PIL import Image
 
-    waveform, _ = librosa.load(sample_path, sr=_SAMPLE_RATE, mono=True)
+    waveform, _ = librosa.load(sample_path, sr=_SAMPLE_RATE, mono=True, res_type="kaiser_best")
     waveform = np.asarray(waveform, dtype=np.float32)
     with Image.open(image_path) as image:
         frame = image.convert("RGB")
@@ -242,6 +242,39 @@ def _runtime_sessions(runtime: MiniCPMO45HMONNXRuntime) -> dict[str, Any]:
         if owner is not None:
             sessions[name] = owner
     return sessions
+
+
+def enable_runtime_golden(
+    runtime: MiniCPMO45HMONNXRuntime,
+    root: Path,
+    meta: Mapping[str, Any],
+    components: tuple[str, ...],
+) -> None:
+    """Capture each selected graph's first real call in its component directory."""
+    from xhquant.xhonnxruntime.hmonnx_inference_v2 import DefaultGraphModuleInterpreter
+
+    sessions = {Path(session._hmonnx_path).resolve(): session for session in _runtime_sessions(runtime).values()}
+    for component in components:
+        for role, graph in meta["components"][component]["graphs"].items():
+            session = sessions[(root / graph).resolve()]
+            backend = session.hmonnx_session
+            backend.reset_step()
+            backend.save_golden_dir = str(root / component / role)
+            forward = backend.forward
+
+            def capture_first_step(*args: Any, _forward=forward, _backend=backend) -> Any:
+                # V2 fixes Golden at interpreter construction; reuse the same graph and cache owners.
+                interpreter = _backend.interpreter
+                _backend.interpreter = DefaultGraphModuleInterpreter(
+                    _backend.graph_module, _backend.device, enable_golden=True, owner=_backend,
+                )
+                try:
+                    return _forward(*args)
+                finally:
+                    _backend.interpreter = interpreter
+                    _backend.forward = _forward
+
+            backend.forward = capture_first_step
 
 
 def _enable_runtime_golden(
@@ -404,4 +437,4 @@ def dump_real_golden(
     }
 
 
-__all__ = ["default_real_request", "dump_real_golden"]
+__all__ = ["default_real_request", "dump_real_golden", "enable_runtime_golden"]

@@ -200,7 +200,7 @@ def test_sample_forward_embeds_input_ids_before_hmonnx_forward() -> None:
     embedded = torch.full((1, 2, 8), 3, dtype=torch.float16)
     observed: dict[str, object] = {}
     wrapped = object.__new__(create_llm_wraped_cls(Base))
-    wrapped._prefill = True
+    wrapped.prefill = True
     wrapped._past_seq_length = 0
     wrapped.config = SimpleNamespace(output_hidden_states=False, use_cache=True)
     wrapped.embed_tokens = lambda input_ids: observed.update(input_ids=input_ids) or embedded

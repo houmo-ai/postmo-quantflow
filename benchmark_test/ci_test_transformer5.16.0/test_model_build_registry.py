@@ -49,7 +49,6 @@ def test_default_description_only_lists_editable_build_arguments(model_id):
         "components",
         "vision",
         "attention",
-        "profile",
         "max_pe_length",
     }
     assert all("required" in item or "default" in item for item in parameters.values())
@@ -255,7 +254,13 @@ def test_text_output_schema_matches_typed_inference_result_fields():
             "vision-language-generation",
         }:
             continue
-        assert description["output_schema"]["required"] == ["output_text", "output_tokens"]
+        schema = description["output_schema"]
+        if model == "minicpm-o-4.5":
+            assert [item["required"] for item in schema["oneOf"]] == [
+                ["output_text", "output_tokens"], ["waveform", "sample_rate", "stats"],
+            ]
+        else:
+            assert schema["required"] == ["output_text", "output_tokens"]
 
 
 def test_all_public_workflow_configs_exist_and_match_registered_quantization():
@@ -272,7 +277,8 @@ def test_all_public_workflow_configs_exist_and_match_registered_quantization():
                 data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
                 quant = data.get("quant")
                 if recipe.quant_methods:
-                    assert quant["method"] in recipe.quant_methods, config_path
+                    method = quant["method"] if "method" in quant else {"gptqmodel": "gptq"}[quant["algorithm"]]
+                    assert method in recipe.quant_methods, config_path
                 else:
                     assert quant is None, config_path
                 if recipe.artifact_format == "autoregressive":
@@ -308,6 +314,7 @@ def test_registry_covers_each_public_artifact_kind():
         "glm53",
         "qwen_image21",
         "minicpm_v_4_7",
+        "minicpm_o_4_5",
     }
     assert {recipe.task for recipe in recipes} >= {
         "text-generation",
