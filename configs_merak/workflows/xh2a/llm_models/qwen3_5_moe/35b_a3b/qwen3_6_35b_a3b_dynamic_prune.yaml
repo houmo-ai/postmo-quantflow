@@ -20,7 +20,7 @@ export:
         MoeBlock:
           quant_type: w4a8h0_ssfp
     model_type: Qwen3_5MoeForConditionalGeneration_dynamic_prune
-    model_name: qwen3_6_35b_a3b_dynamic_prune_acep_topp85
+    model_name: qwen3_6_35b_a3b_dynamic_prune_safe_topp85
     dynamic_prune_threshold: 0.85
     dynamic_prune_s_scalar_path: null
     max_pe_length: 262144
@@ -36,10 +36,24 @@ export:
         ops: {}
     dynamic_prune:
       mode: decode
-      # ACEP Top-P cumulative proxy-probability coverage.
+      algorithm: safe
+      # Generate from weights + WikiText train unless explicit artifacts/cache are supplied.
+      ace_priors_path: null
+      exfold_artifact_path: null
+      max_projection_loss: 1.0
+      even_fold_policy: nearest_mass
+      # SAFE cumulative proxy-probability coverage.
       threshold: 0.85
       s_scalar_path: null
       auto_s_scalar: true
+      calibration:
+        dataset: Salesforce/wikitext
+        subset: wikitext-2-raw-v1
+        split: train
+        text_path: null
+        nsamples: 128
+        sequence_length: 2048
+        batch_size: 1
       s_scalar_output: null
       s_scalar_compute_device: auto
       s_scalar_eps: 1.0e-8

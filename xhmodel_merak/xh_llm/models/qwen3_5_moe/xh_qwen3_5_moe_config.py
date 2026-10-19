@@ -10,5 +10,11 @@ class XHQwen3_5MoeModelConfig(XHQwen3_5ModelConfig):  # noqa: N801
     def __init__(self, *, dynamic_prune=None, **kwargs):
         super().__init__(**kwargs)
         self.dynamic_prune = normalize_dynamic_prune(dynamic_prune)
+        if (
+            self.dynamic_prune["mode"] == "decode"
+            and self.dynamic_prune.get("algorithm") == "safe"
+            and self.chip_arch != "XH2a"
+        ):
+            raise ValueError("SAFE packed routing currently supports XH2a only")
         if self.dynamic_prune["mode"] == "decode" and self.spec_decode_mode is not None:
             raise ValueError("Decode ACEP currently supports ordinary decode, not MTP/DFlash verification")

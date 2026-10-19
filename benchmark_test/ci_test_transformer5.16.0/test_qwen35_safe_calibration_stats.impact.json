@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-safe-calibration-statistics",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/safe_calibration_stats.py"
+      ]
+    }
+  ]
+}

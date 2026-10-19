@@ -1,4 +1,4 @@
-"""Decode-only ACEP wiring and weight-derived expert scores for Qwen MoE."""
+"""Decode-only ACEP/SAFE wiring and expert routing artifacts for Qwen MoE."""
 
 import hashlib
 import json
@@ -26,6 +26,12 @@ def normalize_dynamic_prune(config):
         "s_scalar_compute_device",
         "s_scalar_eps",
         "overwrite_s_scalar",
+        "algorithm",
+        "calibration",
+        "ace_priors_path",
+        "exfold_artifact_path",
+        "max_projection_loss",
+        "even_fold_policy",
     }
     if unknown := set(config) - allowed:
         raise ValueError(f"Unknown dynamic_prune options: {sorted(unknown)}")
@@ -40,6 +46,32 @@ def normalize_dynamic_prune(config):
     if not 0 < eps < float("inf"):
         raise ValueError("dynamic_prune.s_scalar_eps must be positive and finite")
     config["s_scalar_eps"] = eps
+    config.setdefault("algorithm", "acep")
+    if config["algorithm"] not in ("acep", "safe"):
+        raise ValueError("dynamic_prune.algorithm must be acep or safe")
+    safe_only = ("ace_priors_path", "exfold_artifact_path", "even_fold_policy", "max_projection_loss", "calibration")
+    if config["algorithm"] != "safe":
+        # Switching the default SAFE YAML to ACEP carries its fixed policy and
+        # calibration block along. Those defaults belong to SAFE and are dropped;
+        # an explicit artifact path is still a conflicting override.
+        if config.get("ace_priors_path") or config.get("exfold_artifact_path"):
+            raise ValueError("SAFE options require algorithm=safe")
+        for key in safe_only:
+            config.pop(key, None)
+    if config["algorithm"] == "safe":
+        if "calibration" in config:
+            from .safe_calibration import normalize_calibration
+
+            config["calibration"] = normalize_calibration(config["calibration"])
+        config.setdefault("even_fold_policy", "nearest_mass")
+        if config["even_fold_policy"] != "nearest_mass":
+            raise ValueError("SAFE even_fold_policy is fixed at nearest_mass")
+        limit = float(config.get("max_projection_loss", 1.0))
+        if limit != 1.0:
+            raise ValueError("SAFE max_projection_loss is fixed at 1.0")
+        config["max_projection_loss"] = limit
+        if eps != 1e-8:
+            raise ValueError("SAFE requires s_scalar_eps=1e-8 for its denominator safety floor")
     return config
 
 
@@ -102,6 +134,10 @@ def prepare_scalars(language_model, config, model_dir, work_dir):
     if not counts:
         raise ValueError("No body MoE layers found for decode ACEP")
     source = _source_fingerprint(model_dir)
+    if config.get("algorithm") == "safe":
+        from .safe_prune import prepare_safe_scalars
+
+        return prepare_safe_scalars(counts, config, source, work_dir)
     eps = config.get("s_scalar_eps", 1e-8)
     explicit = config.get("s_scalar_path")
     path = Path(explicit or config.get("s_scalar_output") or Path(work_dir) / "moe_acep_s_scalar.pt")

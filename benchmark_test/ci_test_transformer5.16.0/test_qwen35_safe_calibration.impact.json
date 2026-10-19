@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-native-safe-calibration",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/safe_calibration.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/safe_calibration_stats.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/safe_prune.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/dynamic_prune.py"
+      ]
+    }
+  ]
+}

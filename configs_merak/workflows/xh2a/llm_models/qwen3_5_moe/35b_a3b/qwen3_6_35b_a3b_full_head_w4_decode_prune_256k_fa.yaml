@@ -20,7 +20,7 @@ export:
       ops: {}
     only_first_block: false
     model_type: Qwen3_5MoeForConditionalGeneration
-    model_name: qwen3_6_35b_a3b_head_w4_decode_acep85
+    model_name: qwen3_6_35b_a3b_head_w4_decode_safe85
     max_pe_length: 262144
     support_long_context_over_fp16_limit: true
     linear_attention_mode: auto
@@ -45,8 +45,22 @@ export:
         ops: {}
     dynamic_prune:
       mode: decode
+      algorithm: safe
+      # Generate from weights + WikiText train unless explicit artifacts/cache are supplied.
+      ace_priors_path: null
+      exfold_artifact_path: null
+      max_projection_loss: 1.0
+      even_fold_policy: nearest_mass
       threshold: 0.85
       auto_s_scalar: true
+      calibration:
+        dataset: Salesforce/wikitext
+        subset: wikitext-2-raw-v1
+        split: train
+        text_path: null
+        nsamples: 128
+        sequence_length: 2048
+        batch_size: 1
       s_scalar_path: null
       s_scalar_compute_device: auto
 quant:

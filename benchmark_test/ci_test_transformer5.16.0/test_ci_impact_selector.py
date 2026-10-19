@@ -139,6 +139,9 @@ def test_moe_source_selects_its_registered_block_export(filename, expects_layout
         decode_prune = f"{SUITE_RELATIVE}/test_qwen35_decode_prune.py"
         expected.add(decode_prune)
         assert f"rule:qwen35-decode-acep:{changed}" in selection.reasons[decode_prune]
+        safe_prune = f"{SUITE_RELATIVE}/test_qwen35_safe_prune.py"
+        expected.add(safe_prune)
+        assert f"rule:qwen35-safe-decode:{changed}" in selection.reasons[safe_prune]
     assert set(selection.tests) == expected
     assert f"rule:qwen35-moe-source:{changed}" in selection.reasons[target]
     assert selection.full_suite is False

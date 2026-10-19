@@ -218,75 +218,87 @@ DFlash2 的 8K 与 256K 配置分别为 `qwen3_8_27b_full_dflash2_8k.yaml`、
 统一接口复用 checkpoint 时只接受已补齐的 W5 head，不会在构建中隐式补校准。
 
 动态剪枝现在只作用于 Decode，Prefill 始终使用原始 Top-K。
-普通 MoE workflow 可直接配置：
+普通 MoE workflow 中保留 ACEP 时可显式配置：
 
 ```yaml
 export:
   model:
     dynamic_prune:
       mode: decode  # off 关闭；省略整个 dynamic_prune 也默认关闭
+      algorithm: acep
       threshold: 0.85  # ACEP 累计代理概率覆盖率
       auto_s_scalar: true
       s_scalar_path: null
 ```
 
-W4 head / 256K FlashAttention 的默认配置为
-[`qwen3_6_35b_a3b_full_head_w4_decode_prune_256k_fa.yaml`](../../../configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w4_decode_prune_256k_fa.yaml)。
-它保留完整视觉档位和 head 的 quant/export 一致性校验。直接使用已有 head-W4 模型：
+两份剪枝 workflow 现在默认使用 SAFE，覆盖率 `0.85`，仅作用于 Decode：
+
+- `qwen3_6_35b_a3b_dynamic_prune.yaml`：独立 text-only 导出，默认上下文 2048。
+- [`qwen3_6_35b_a3b_full_head_w4_decode_prune_256k_fa.yaml`](../../../configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w4_decode_prune_256k_fa.yaml)：完整视觉档位、W4 head、256K FlashAttention。
+
+两份配置默认 `auto_s_scalar: true`。没有显式 `.pt` 产物时，会在 HF 包装前
+从真实专家权重计算 AMP/AIMER，再用 WikiText-2 raw 训练集全部行按 `"\n".join`
+拼接后的前连续 `128 × 2048` token 校准 ExFold，默认每批 1 个窗口。
+校准只累计同 token 共同路由专家的配对统计，系数回归使用 `ridge=1e-3`、
+裁剪到 `[-4,4]`；未观察配对禁止折叠。无需提前手动生成 `s_scalar`。
+算法、文件格式及固定策略见 [SAFE 接入说明](../../../docs/qwen3_5_safe_decode.md)。
+
+本机 text-only 导出示例使用 `xh2` 环境与配套 `xhquanttool_3`；以下 offline 选项要求
+本机已有 tokenizer 和 WikiText 数据缓存。`USE_TRITON_MATMUL=0`、`XHQUANT_HSUM_JIT=0`
+是本机编译环境的运行选项，不是所有机器的通用要求；SAFE 目前使用常规导出：
 
 ```bash
-HUGE_MODEL_EXPORT_ENABLED=0 CUDA_VISIBLE_DEVICES=3 PYTHONPATH=. python \
-  examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
-  --model-dir work_dirs/Qwen3.6-35B-A3B_autoround_int_sym_xh_n256_iter400_head_w4 \
-  --config-path configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_head_w4_decode_prune_256k_fa.yaml \
-  --export-from-quanted-model \
-  --export-output-dir work_dirs/Qwen3.6-35B-A3B_head_w4_decode_prune_256k_fa_export \
-  --device cuda:0
+HUGE_MODEL_EXPORT_ENABLED=0 CUDA_VISIBLE_DEVICES=0 USE_TRITON_MATMUL=0 \
+XHQUANT_HSUM_JIT=0 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
+PYTHONPATH=.:/data01/home/zukang.xu/workspace/xh2/xhquanttool_3 \
+/data01/home/zukang.xu/anaconda3/envs/xh2/bin/python \
+  examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_workflow.py \
+  --model-dir /data01/datasets/Qwen3.6-35B-A3B \
+  --export-output-dir work_dirs/qwen3_6_35b_safe_export_20261019
 ```
 
-此路径使用常规导出，不生成 golden；暂不支持低内存 placeholder 导出或 MTP/DFlash verify。
-Prefill/Decode 的 MoeBlock 属性独立，专家权重仍共享存储。导出图中应只有 Decode
-的 MoeBlock 带 `prune_threshold=0.85` 和 `s_scalar`，Prefill 不带剪枝属性。
+脚本默认导出目录仍是 `work_dirs/qwen3_5_safe_export`；上述命令显式指定本次本机目标目录。
+完整导出不要加 `--only-first-block`。
 
-保留 [独立 text-only workflow](qwen3_5_dynamic_prune_workflow.py) 和
-`qwen3_6_35b_a3b_dynamic_prune.yaml`。默认 ACEP Top-P 覆盖率为 `0.85`，
-可用 `--coverage`（旧名 `--threshold`）覆盖。`--auto-s-scalar` 可从
-当前加载的主体专家权重计算并缓存 expert scalar。完整导出不要加 `--only-first-block`。
+自动校准文件写入导出工作目录的 `safe_calibration/priors.pt`、
+`safe_calibration/exfold.pt`，随后打包为 `moe_safe_s_scalar_v4.pt`。
+缓存 identity 绑定 checkpoint、实际 token SHA256、校准配置和模型 dtype；
+不匹配会报错，可设置 `overwrite_s_scalar: true` 重建。
+
+可用 `--calibration-text-path` 指向本地原始训练文本；
+`--calibration-nsamples`、`--calibration-sequence-length`、`--calibration-batch-size`
+分别覆盖样本数、窗口长度和批大小。更改样本数、序列长度或数据来源时应记录实际配置，
+不再称为标准 `128 × 2048` WikiText 协议。
+
+显式文件优先：同时传 `--ace-priors-path`、`--exfold-artifact-path`，
+或只传 `--s-scalar-path` 使用已生成的 `safe_exfold_v4` 缓存。
+也可写入 YAML 的 `export.model.dynamic_prune` 同名字段。
+`--no-auto-s-scalar` 要求提供这些手动文件。一维 ACEP scalar 不能替代 SAFE 二维缓存。
+CLI 的 `--prune-algorithm` 默认遵从 YAML；保留 ACEP 的自定义 YAML 不应携带 SAFE 专用字段。
+
+W4 head / 256K 配置使用普通 `qwen3_5_workflow.py`，可沿用自动 SAFE 校准，
+或在 YAML 中填写已有 SAFE 文件路径，再传 `--export-from-quanted-model`
+复用已经量化且包含 W4 head 的 checkpoint。该路径保留完整视觉档位和 head 精度检查。
+
+当前 SAFE 走常规导出，不支持低内存 placeholder 或 MTP/DFlash verify。
+Prefill 不带剪枝数据，Decode 带 `prune_threshold=0.85` 和 FP16 SAFE 二维 `s_scalar`。
+导出后可使用 text-only runtime 验证连续生成：
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 USE_TRITON_MATMUL=0 python \
-  examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_workflow.py \
-  --model-dir /data01/datasets/Qwen3.6-35B-A3B/ \
-  --config-path \
-    configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_dynamic_prune.yaml \
-  --export-output-dir \
-    work_dirs/qwen3_6_35b_a3b_dynamic_prune_acep_topp85_export \
-  --model-name \
-    qwen3_6_35b_a3b_dynamic_prune_acep_topp85 \
-  --context-max-length 262144 \
-  --coverage 0.85 \
-  --auto-s-scalar \
-  --enable-fuse-gdr-ops \
-  --enable-fuse-gdr-block-recurrent-ops \
-  --dump-golden \
-  --overwrite
-```
-
-导出完成后可用 text-only runtime 做连续生成验证：
-
-```bash
-CUDA_VISIBLE_DEVICES=5 USE_TRITON_MATMUL=0 python \
   examples_merak/llm/qwen3_5/qwen3_5_dynamic_prune_hmonnx_generate.py \
-  --config work_dirs/qwen3_6_35b_a3b_dynamic_prune_acep_topp85_export \
+  --config work_dirs/qwen3_5_safe_export \
   --device 0 \
   --prompt "用中文简单介绍 Qwen3.5。" \
   --max-new-tokens 64 \
   --min-output-tokens 8
 ```
 
-`USE_TRITON_MATMUL=0` 只绕开通用 Linear Triton kernel 的编译兼容问题，
-不改变 ACEP Top-P 剪枝逻辑。`MoeBlock` 把 `gate_score * s_scalar`
-归一化成代理概率，降序累计并保留使累计概率首次达到覆盖率的最短专家前缀，
+以上生成命令使用脚本默认导出目录；若使用本机命令的日期目录，应同步修改 `--config`。
+`USE_TRITON_MATMUL=0` 用于绕开本机通用 Linear Triton kernel 的编译兼容问题。
+
+以下是保留的 ACEP 算法说明（使用显式 ACEP YAML 时适用）：
+`MoeBlock` 把 `gate_score * s_scalar` 归一化成代理概率，降序累计并保留使累计概率首次达到覆盖率的最短专家前缀，
 同时始终保留 Router Top-1 专家。`--auto-s-scalar` 在模型包装后遍历真实主体层，使用当前消费的专家权重和
 RMSNorm 的有效系数 `1 + HF weight` 计算 Method1 scalar，不匹配 checkpoint 中的
 fused 名称，也不遍历 MTP。这允许直接使用 AutoRound/GPTQ checkpoint，无需文本校准

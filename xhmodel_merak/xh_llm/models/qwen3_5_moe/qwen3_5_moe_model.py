@@ -113,6 +113,15 @@ class XHQwen3_5MoeModel(XHQwen3_5Model):  # noqa: N801
         # self.wrap_cfg["linear_attention_mode"] = "chunk"  # for prefill
         # self.wrap_cfg["linear_attention_mode"] = "recurrent"  # for decode
 
+    def _wraped_pre(self, hf_model):
+        super()._wraped_pre(hf_model)
+        from .safe_calibration import prepare_automatic_safe_inputs
+
+        prepare_automatic_safe_inputs(
+            hf_model, self.config.dynamic_prune, self.hf_model_dir, self.work_dir,
+            device=self.config.dynamic_prune.get("s_scalar_compute_device", "auto"),
+        )
+
     def _wraped_post(self, hf_model: Qwen3_5MoeForConditionalGeneration):
         super()._wraped_post(hf_model)
 
