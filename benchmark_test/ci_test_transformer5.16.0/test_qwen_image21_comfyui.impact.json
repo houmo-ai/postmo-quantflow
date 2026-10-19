@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "qwen-image21-comfyui-transport",
+    "patterns": [
+      "examples_merak/aigc/qwen_image21/comfyui_worker.py",
+      "examples_merak/aigc/qwen_image21/comfyui_nodes/**",
+      "examples_merak/aigc/qwen_image21/comfyui_workflow.py",
+      "examples_merak/aigc/qwen_image21/verify_comfyui.py",
+      "benchmark_test/ci_test_transformer5.16.0/_qwen_image21_bundle_fixture.py"
+    ]
+  }]
+}

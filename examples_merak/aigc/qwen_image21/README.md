@@ -3,18 +3,17 @@
 ## Qwen-Image-2.1-Turbo
 
 Turbo 使用独立的模型 ID `qwen-image-2.1-turbo`，共享普通版的六图实现与容量规则。
-本机已在既有 conda 环境 `xhquant_55` 中补齐构建和推理依赖，直接使用正式仓库
-`/data01/home/jing.huang/xh2modelzoo` 和 `/data01/home/jing.huang/xhquanttool`。
-从仓库根运行；Diffusers 和 Hub 使用与普通版相同的固定版本：
+先在 Merak 构建/推理环境中安装兼容的 xhquant SDK，再从本仓库根目录运行。
+以下路径均为部署示例，需替换为实际仓库和官方 Turbo 权重目录；
+Diffusers 和 Hub 使用与普通版相同的固定版本：
 
 ```bash
-conda activate xhquant_55
-cd /data01/home/jing.huang/xh2modelzoo
+cd /path/to/xh2modelzoo
 python benchmark_test/ci_test_transformer5.16.0/prepare_dependencies.py \
   --model-id qwen-image-2.1-turbo --packages diffusers huggingface-hub --install
 python -m examples_merak.aigc.qwen_image21.unified \
   --model-id qwen-image-2.1-turbo \
-  --model-dir /data01/datasets/Qwen-Image-2.1-Turbo \
+  --model-dir /path/to/Qwen-Image-2.1-Turbo \
   --artifact-dir work_dirs/qwen_image21_turbo/release_w8a16 \
   --quant-type w8a16_sefp --device cuda:0 \
   --prompt 'A red ceramic teapot on a wooden table.' \
@@ -42,7 +41,7 @@ from xhmodel_merak.model_inference import inference_model
 
 build = build_model(
     model_id="qwen-image-2.1-turbo",
-    model_dir="/data01/datasets/Qwen-Image-2.1-Turbo",
+    model_dir="/path/to/Qwen-Image-2.1-Turbo",
     output_dir="work_dirs/qwen_image21_turbo/api_release",
     device="cuda:0",
     deployment_precision={"image": "w8a16_sefp"},
@@ -225,3 +224,285 @@ image.save('custom.png')
 VAE 在固定画布计算，每层卷积输入输出、重采样和残差路径都有对应分辨率的 mask。
 VAE attention 将有效二维位置收集到连续前缀，FlashAttention 排除 padding 后再恢复二维网格。
 修改容量需要重新构建；容量内改变实际尺寸不增加图数量。
+
+### 尺寸需求与容量规划
+
+当前 Turbo W8A8 包约束的是**导出容量**，不是官方模型每边只能生成 1024。
+`output_size` 是默认输出/导出校准尺寸，`reference_size` 是导出校准参考尺寸，
+真正的运行边界由 token capacity 和 `canvas_size` 共同决定。
+尺寸数组始终是 `[height, width]`；1024×1024 的像素面积约为 1MP，2048×2048 约为 4MP。
+
+| 需求或尺寸 | 当前 1MP 包行为 |
+| --- | --- |
+| 输出 1024×1088、1344×768 | 对齐、画布和 token 数均满足，无需扩容 |
+| 输出 2048×512 | 4096 token 在预算内，但 2048 边超过画布，需要改画布并重新构建 |
+| 输出 2048×2048 | 需要 16384 target token，同时扩大画布 |
+| 上传 2048×2048 参考图 | 可以接收文件；当前 runtime 会先缩到 1024×1024 后编码 |
+| 模型实际使用完整 2048×2048 参考图 | 扩参考 latent、visual patch 容量和画布，重新构建 |
+| 只把生成结果放大后保存为更大的 PNG | 可以使用后处理缩放；不增加去噪生成时的原生细节 |
+
+当前 `target_capacity=4352`，所以实际面积上限为 `4352*256=1,114,112` 像素；
+每边仍不能超过 1536，且高、宽都须是 32 的倍数。`1536×1536` 虽在画布内也超过 token 预算。
+参考图的拟合同时约束边长、面积和 32 对齐，同一份拟合后图像进入 visual 和 VAE encoder。
+接受大图片文件与保留其原始分辨率是两个不同的服务承诺。
+
+令 `B` 为 prompt_budget，`R` 为 max_references，`T` 为真实 tokenizer 测出的模板 token，
+`align64(x)` 表示向上取整到 64。当前 VAE 压缩率为 16、DiT patch_size 为 1，
+单图的 target/reference latent token 与视觉 merge 前 patch 数均为 `H*W/256`；
+视觉 2×2 merge 后送入文本特征编码器的视觉 token 数为 `visual_patch_capacity/4`。
+
+```text
+feature_capacity  = align64(T + B + R * visual_patch_capacity / 4)
+dit_text_capacity = align64(T + B)
+prefix_capacity   = align64(T + B + R * reference_capacity)
+image_tokens      = max(target_capacity, reference_capacity)
+cache_tokens      = prefix_capacity + target_capacity
+```
+
+`T` 来自 `capacity.derive_text_capacities`，不能把 29 当成所有 tokenizer/多参考场景的常数。
+feature_capacity、prefix_capacity 和 dit_text_capacity 由构建器推导，不手填进 YAML。
+DiT 图像分段一次处理一张参考或目标，因此 image_tokens 取最大值；联合 K/V cache 则需要
+容纳全部前缀和目标，所以 cache_tokens 是相加。两者不能混用。
+
+| 字段 | 只增大输出 | 要保留更大的单张参考图 | 原因 |
+| --- | --- | --- | --- |
+| output_size | 更新默认/校准尺寸 | 可保持 | 不等同于最大输出尺寸 |
+| target_capacity | 面积超预算时增大 | 可保持 | 目标 latent 上限 |
+| reference_size | 可保持 | 更新校准尺寸 | 大参考路径需要对应校准样本 |
+| reference_capacity | 保持 | 增大 | 参考 VAE latent 与 DiT 前缀预算 |
+| visual_patch_capacity | 保持 | 增大，且必须不小于 reference_capacity | 视觉 merge 前 patch 预算 |
+| canvas_size | 任一输出边超画布时增大 | 任一参考边超画布时增大 | 当前 VAE encode/decode 共用画布 |
+| feature_capacity | 保持 | 自动增大 | 视觉 token 进入 Qwen3-VL 特征编码 |
+| prefix_capacity | 保持 | 自动增大 | DiT 前缀包含参考 latent |
+| image_tokens | 必要时自动增大 | 必要时自动增大 | max(target, reference) |
+| cache_tokens | 自动增大 | 自动增大 | 前缀与目标联合空间 |
+| prompt_budget、max_references | 保持 | 保持 | 分辨率变化不代表文字变长或图片数量变多 |
+| dit_text_capacity | 保持 | 保持 | 上述文字预算和模板不变 |
+| max_position | 通常保持 | feature 容量/实际 mRoPE 位置超限时才增加 | 文本特征 RoPE 表上限，不是 DiT cache 长度 |
+| 层数、heads、head_dim、latent channels、Turbo sigma、精度 | 保持 | 保持 | 容量扩展不改变模型架构或调度 |
+
+以下四份 W8A8 示例放在 `capacity_configs/`，仅作客户需求拆分和配置检查，
+不登记为统一 recipe 的正式 profile。它们**尚未通过完整权重的新容量导出、运行、精度或板端验收**。
+数值按当前本地 Turbo tokenizer 的 T=29、B=512、R=1 推导：
+
+| YAML 文件 | 输出 H×W / 参考 H×W | target / reference / visual | feature / prefix / cache |
+| --- | --- | --- | --- |
+| 当前发布包（对照） | 1024² / 1024² | 4352 / 4352 / 4352 | 1664 / 4928 / 9280 |
+| [output_2048_reference_1024.yaml](capacity_configs/output_2048_reference_1024.yaml) | 2048² / 1024² | 16384 / 4352 / 4352 | 1664 / 4928 / 21312 |
+| [output_1024_reference_2048.yaml](capacity_configs/output_1024_reference_2048.yaml) | 1024² / 2048² | 4352 / 16384 / 16384 | 4672 / 16960 / 21312 |
+| [output_2048_reference_2048.yaml](capacity_configs/output_2048_reference_2048.yaml) | 2048² / 2048² | 16384 / 16384 / 16384 | 4672 / 16960 / 33344 |
+| [output_512x2048_reference_1024.yaml](capacity_configs/output_512x2048_reference_1024.yaml) | 512×2048 / 1024² | 4352 / 4352 / 4352 | 1664 / 4928 / 9280 |
+
+四例的 dit_text_capacity 都保持 576，max_position 都保持 32768。
+输入输出都是 2048² 时 cache_tokens=33344 大于 32768 并不自动要求增加 max_position：
+后者约束的 feature_capacity 此时为 4672；实际 mRoPE 索引仍需在运行中检查。
+本节状态：配置校验和本地真实 tokenizer 规划为 `verified`；新档位完整权重导出、运行、精度及
+板端证据为 `blocked`（本次未执行）；现有 ComfyUI 对这些未正式发布的新档位为 `unsupported`。
+
+从图的静态边界看，只增大输出的示例改变两张 VAE 图和两张 DiT 图，visual 和 text_encode
+边界不变。只加宽画布的示例仅改变两张 VAE 图边界。增大参考图的示例改变全部六图边界。
+即使参考图仍为 1024，增大共用 canvas 也会改变 VAE encoder 的输入、mask 和输出形状。
+目前 exporter 统一重新导出六图；此边界分析不是手工拼接旧图或改 metadata 的操作指南。
+
+`capacity_plan.py` 是只读检查工具，只加载本地 tokenizer 和配置，不读模型权重、不导出图、
+不进行 GPU 推理。它复用真实的容量校验、tokenizer 模板计数、参考图拟合及 DenoiseGear：
+
+```bash
+CUDA_VISIBLE_DEVICES="" python -m examples_merak.aigc.qwen_image21.capacity_plan \
+  --model-dir /path/to/Qwen-Image-2.1-Turbo \
+  --config \
+    configs_merak/workflows/xh2a/other_models/qwen_image21/qwen_image21_turbo_1mp_w8.yaml \
+    examples_merak/aigc/qwen_image21/capacity_configs/output_2048_reference_1024.yaml \
+    examples_merak/aigc/qwen_image21/capacity_configs/output_1024_reference_2048.yaml \
+    examples_merak/aigc/qwen_image21/capacity_configs/output_2048_reference_2048.yaml \
+    examples_merak/aigc/qwen_image21/capacity_configs/output_512x2048_reference_1024.yaml \
+  --reference-input 2048 2048 \
+  --report work_dirs/qwen_image21_capacity/plan.json
+```
+
+报告状态是 `configuration_checked_not_exported`；changed_graph_boundaries 仅比较尺寸与位置表边界，
+不能证明量化数值、算子可执行性或芯片能力。报告使用实际模型层数、heads、head_dim 计算的
+FP16 逻辑 K/V 大小，每个 CFG 分支约为当前 4.53 GiB、单侧 4MP 的 10.41 GiB、双侧 4MP 的
+16.28 GiB。它不包括权重、SEFP 内部存储、临时 buffer、VAE 和框架开销，不能当作峰值显存。
+固定 canvas 增大时，即使运行较小图片，VAE 的静态 tensor 和计算开销也可能增加。
+
+客户确定需求后，在已有 Merak 环境中、选择空闲 GPU，用新目录执行真实导出。例如只增大输出：
+
+```bash
+python -m examples_merak.aigc.qwen_image21.configured \
+  --model-dir /path/to/Qwen-Image-2.1-Turbo \
+  --config examples_merak/aigc/qwen_image21/capacity_configs/output_2048_reference_1024.yaml \
+  --output-dir work_dirs/qwen_image21_custom_output2048 \
+  --device cuda:0
+```
+
+设备编号需要与 CUDA_VISIBLE_DEVICES 对应。output-dir 必须不存在。
+这会创建 `work_dirs/qwen_image21_custom_output2048/qwen_image21_export`，不会修改原来的 1MP 包。
+成功导出后，使用前文的 `bundle.load_runtime`，例如：
+
+```python
+from pathlib import Path
+from xhmodel_merak.xh_other_model.models.qwen_image21.bundle import load_runtime, read_bundle_metadata
+
+root = Path("work_dirs/qwen_image21_custom_output2048/qwen_image21_export")
+metadata = read_bundle_metadata(root)
+runtime = load_runtime(root, device="cuda:0")
+image, latents = runtime.generate(
+    "A red ceramic teapot on a wooden table.",
+    height=2048, width=2048, seed=42, guidance_scale=1.0,
+)
+image.save(root.parent / "generated_2048.png")
+```
+
+编辑时传入 `images=[PIL.Image.open(...).convert("RGBA")]`；若需要保留 2048² 参考细节，
+须先使用 reference_2048 的配置构建，而不是只改变运行时输出大小。
+验收应检查六图 I/O、precision、跨组件 metadata、每步有限值、尺寸边界、参考图实际拟合尺寸、
+换尺寸后重跑的 cache 隔离、Golden 以及同输入的官方/target-float/W8A8 精度对照，再执行板端验证。
+
+**当前 ComfyUI 还有两层独立限制，不能只把新目录填给现有 worker：**
+
+- 节点 INPUT_TYPES 中 width/height 的 max 仍为 1536，需要与正式新包的画布契约同步。
+- `configured` 产物没有统一 Manifest；现有 worker 调用 `inference_model`，要求正式发布包。
+  统一 recipe 目前只登记 `1mp-c4352`。客户交付新档位时，要先扩展正式 profile/构建发布契约、
+  生成和验证 Manifest，再让 worker 加载，并进行实际 ComfyUI 出图回归；本示例未实现该扩展。
+
+因此应按客户常用场景交付经验证的多个档位，而不是不断把一个通用包扩大。
+大文件输入可以选择显式缩放；要求保留原始细节时再增加参考容量。
+多参考图、长文本、4K 生成和 NPU 峰值资源是独立验收项，不由上述配置检查推断支持。
+
+## Turbo W8A8 的 ComfyUI 接入
+
+`comfyui_nodes/` 提供 `MerakQwenImage21TurboW8A8` 节点，显示名为
+`Qwen Image 2.1 Turbo · Merak W8A8`。它接收 prompt、width、height、seed，
+可选一张 `reference_image`，输出标准 ComfyUI `IMAGE`，直接连接 `SaveImage`。
+文本编码、视觉编码、VAE 编解码、DiT 都使用发布包中的 HMONNX 图；
+Host 只处理 tokenizer/embedding lookup、几何/RoPE、随机噪声和调度器。
+采样使用 checkpoint 的八个 sigma，CFG 固定为 1；不另设无效的 steps 控件。
+
+| 范围 | 状态 |
+| --- | --- |
+| Turbo `w8a8_sefp` 六图、GPU HMONNX V2、1024×1024 文生图 | verified |
+| 单参考图编辑，自动经过量化 visual 和 VAE encode | verified |
+| 同包内 1344×768 输出、清除 ComfyUI 缓存后的固定 seed 重跑 | verified |
+| BF16 原生工作流和 W8A8 节点共存 | verified；使用独立 Python 后端环境 |
+| 官方 float → target float → W8A8 的精度归因及大规模评估 | blocked；本接入不作该精度结论 |
+| 当前 1MP 包的 2048×2048、多参考图、LoRA、NPU 板端执行 | unsupported |
+
+宽、高均对齐 32；当前包要求每边不超过 1536，且
+`height * width / 256 <= 4352`。因此 1536×1536 也超出容量。
+参考图会按原 runtime 规则拟合到参考容量，响应记录实际高、宽。
+W8A8 描述 Linear/Conv2d 的 SEFP 权重和激活位宽；图边界仍使用 FP16/整数几何输入，
+不表示每个输入 tensor 都是 INT8，也不表示已有 NPU 性能优化。
+
+ComfyUI 与 Merak 的 PyTorch/SDK 环境需要隔离。ComfyUI 节点只使用 Torch、NumPy、Pillow
+及标准库 HTTP 客户端，实际推理由本机 `127.0.0.1:8190` 的 worker 执行。
+先准备两个独立环境：Merak 环境安装本仓库及兼容 SDK，按本文开头的 recipe 命令准备依赖；
+ComfyUI 环境按其自身 requirements 安装，无需安装 Merak SDK。
+`verify_comfyui` 还使用 aiohttp，运行前应在执行验证脚本的环境中确认该依赖可用。
+源码提交不包含模型权重；worker 需要完整的已发布 W8A8 模型包，不能直接加载官方 BF16 权重目录。
+
+在 **Merak 推理环境**、仓库根目录运行。GPU 0 仅为示例，需选择实际空闲设备；
+设置 CUDA_VISIBLE_DEVICES 后，`cuda:0` 指可见设备中的第一张卡：
+
+```bash
+cd /path/to/xh2modelzoo
+CUDA_VISIBLE_DEVICES=0 python -m examples_merak.aigc.qwen_image21.comfyui_worker \
+  --artifact-dir /absolute/path/to/published_turbo_w8a8_bundle \
+  --device cuda:0 --port 8190
+```
+
+这里的包必须有统一 build 生成的 Manifest，model_id 为 `qwen-image-2.1-turbo`，
+deployment precision 为 `w8a8_sefp`。每次生成都经过现有 `inference_model` 校验
+Manifest、文件摘要、模型身份、runtime metadata 和依赖，不绕过统一加载契约。
+本地 2026-10-15 验证使用 `xhquant_55` 的 Python 3.12、Torch 2.8、Diffusers 0.41.0、
+Transformers 5.16.1；ComfyUI 使用独立 Python 3.10、Torch 2.12 环境。
+这是复用现有环境的验证，未宣称 recipe 依赖档案已通过全新环境安装。
+
+在另一个终端的 Merak 环境安装节点并生成一个可修改尺寸的工作流：
+
+```bash
+cd /path/to/xh2modelzoo
+export COMFYUI_DIR=/path/to/ComfyUI
+mkdir -p "$COMFYUI_DIR/custom_nodes" "$COMFYUI_DIR/user/default/workflows"
+ln -s "$PWD/examples_merak/aigc/qwen_image21/comfyui_nodes" \
+  "$COMFYUI_DIR/custom_nodes/comfyui_merak_qwen_image21"
+python -m examples_merak.aigc.qwen_image21.comfyui_workflow \
+  --output-dir work_dirs/comfyui_turbo_w8a8/workflows
+cp work_dirs/comfyui_turbo_w8a8/workflows/qwen_image21_turbo_w8a8.json \
+  "$COMFYUI_DIR/user/default/workflows/"
+```
+
+软链接命令用于首次安装；已有同名节点时先核对其指向。仓库移动后需更新软链接。
+然后激活 **ComfyUI 自己的环境**，启动或重启 ComfyUI；示例与 worker 共用同一张 GPU：
+
+```bash
+cd /path/to/ComfyUI
+CUDA_VISIBLE_DEVICES=0 python main.py --listen 127.0.0.1 --port 8188
+```
+
+浏览器刷新后加载 `qwen_image21_turbo_w8a8.json`，填写 prompt 后运行。
+远程部署时，通过 VS Code Ports 或 SSH 将服务器的 8188 端口转发到本机，
+再访问 `http://127.0.0.1:8188`。8190 是两个本机进程之间的通信端口，无需转发到浏览器。
+编辑时添加 `LoadImage`，把 IMAGE 输出连到 W8A8 节点的 `reference_image`；
+VAE 及视觉编码已经在节点内部执行。通过 width/height 修改尺寸，不需要再生成另一份工作流。
+改变 worker 端口时，在 ComfyUI 启动环境设置
+`MERAK_QWEN_IMAGE21_URL=http://127.0.0.1:<port>`；服务和客户端均只允许 IPv4 loopback。
+若所有节点同时出现数字控件过窄、布局或文字异常，可先保存工作流，再强制刷新浏览器；
+仍有异常时，可在设置中关闭 `VueNodes.Enabled`、切回经典节点渲染后刷新。
+这是前端兼容性排查步骤，不要求分发本机 `comfy.settings.json`。
+
+worker 串行处理请求，调用现有公开 API 按请求加载、释放 sessions。
+节点会在请求前释放 ComfyUI 原生模型的显存，worker 在请求结束后释放 CUDA allocator 缓存，
+便于与 BF16 工作流共用 GPU。请求仍有权重加载和摘要校验开销：
+本次文生图推理约 18 秒、端到端约 71 秒；编辑推理约 26 秒、端到端约 89 秒。
+这些是本机 GPU 模拟数据，不是芯片性能结果。ComfyUI 缓存命中会省略后端执行；
+取消 UI 队列也不会立即终止一个已经提交的 worker 请求。
+
+### 验证和调用关系
+
+```bash
+python -m examples_merak.aigc.qwen_image21.verify_comfyui \
+  --comfy-root /path/to/ComfyUI --name t2i --clear-cache \
+  --report work_dirs/comfyui_turbo_w8a8/comfy_t2i.json
+python -m examples_merak.aigc.qwen_image21.verify_comfyui \
+  --comfy-root /path/to/ComfyUI --name edit --clear-cache \
+  --reference reference.png --prompt 'Edit <image1>. Make the object blue.' \
+  --report work_dirs/comfyui_turbo_w8a8/comfy_edit.json
+```
+
+reference 是已存在于 `ComfyUI/input` 的文件名。验证命令检查真实 ComfyUI history 成功状态、
+八步采样统计、参考图计数、PNG 尺寸/颜色/非空内容，以及 PNG 内的 API prompt 和可导入工作流。
+验证脚本遇到 ComfyUI 缓存命中会明确失败，提示先清除缓存，而不把缓存当成新推理。
+`--clear-cache` 要求队列空闲，仅清除执行缓存，不删除历史和已保存图片。
+
+| 源码入口 | 调用与契约 |
+| --- | --- |
+| `comfyui_nodes/__init__.py` | 注册唯一节点类和显示名；不导入 SDK 或 Merak |
+| `comfyui_nodes/nodes.py:INPUT_TYPES/run` | 定义 widgets 和可选 IMAGE；检查 batch=1、RGB/RGBA、有限值；BHWC float 图转 PNG，释放原生模型显存，再调用 client；返回 CPU BHWC float IMAGE |
+| `comfyui_nodes/client.py:encode_image/decode_image/generate` | Pillow PNG 与 base64 无损往返；urllib 请求本机服务；检查返回模型和量化身份，透传明确错误 |
+| `comfyui_worker.py:validate_request` | 拒绝未知字段、无效 prompt/seed、超出导出画布或 token 容量的尺寸；解码可选参考图 |
+| `comfyui_worker.py:ImageWorker` | 验证 Turbo/W8A8 身份；临时参考 PNG 交给公开 `inference_model`；输出图、实际 steps/尺寸/参考计数和时延；finally 释放分配器缓存 |
+| `comfyui_worker.py:create_server/main` | 标准库单请求 HTTPServer；启动读取 bundle metadata；`GET /info`、`POST /generate`；输入错误 400，实际推理错误 500，不回退到 BF16 |
+| `comfyui_workflow.py:build_workflow/main` | 生成同一份两节点 UI workflow 和等价 API prompt；可选参考 socket 默认断开，seed 固定 |
+| `verify_comfyui.py:verify/main` | aiohttp 提交和 websocket 等待；读取 history，再用 Pillow/NumPy 校验真实 PNG 和工作流元数据，保存证据 |
+
+模型调用链复用 `model_inference/api.py` → `model_integrations/qwen_image21/inference.py`
+→ `bundle.load_runtime` → `pipeline.ImageRuntime.generate`，没有复制去噪/编辑实现。
+bundle 根据包内相对路径加载 processor、token embedding 和六个 HMONNX session。
+pipeline 为每次调用新建 scheduler、随机数生成器和 denoise request；
+`segment_runtime.py` 按文本/参考图顺序建立前缀，DiT sessions 用 request-owned CacheTensor
+原地覆盖固定 target 区域。正、负分支的 cache 不共享；此节点固定 CFG=1，仅有条件分支。
+跨请求的 sessions 由公开 API 释放，因此不会沿用上次参考图或 target cache。
+
+本地验证材料在任务 worktree 的 `work_dirs/comfyui_turbo_w8a8/`：
+`graph_audit.json` 保存六图真实 I/O 和加权算子位宽，`comfy_*.json` 保存 API/history/PNG 路径，
+`repeat_comparison.json` 保存清缓存后重跑的逐像素比较，`ci.log` 保存当前 CI 结果。
+recipe 仍未登记统一 Golden，不能把本次 UI 接入表述为新增了统一 Golden API。
+附加验证使用已有最小真实 Turbo/W8A8 六图用例完成构建、搬移、删除源权重后推理、编辑与重跑，
+并将 SDK Golden 输出重定向到独立目录；六图各自生成算子级 Golden。
+生产 worker 保持 SDK `enable_golden=False`：该 SDK 版本的默认 dump 目录与图目录冲突，
+不能直接在发布包上开启。`synthetic_golden_report.json` 记录独立目录和六图文件数。
+`real_golden/` 保存完整权重编辑请求的六图首调用逻辑 tensor I/O 及调用次数，
+其中 CacheTensor 内部 SEFP 状态不属于可搬移的 replay ABI，不将这些快照宣称为板端 Golden。
+该诊断使用原始 RGBA 参考图；ComfyUI `LoadImage` 输出 RGB，两者输入 alpha 不同，
+对应图像差异不能用作量化精度指标。以上诊断不修改共享发布包中的权重和发布元数据。

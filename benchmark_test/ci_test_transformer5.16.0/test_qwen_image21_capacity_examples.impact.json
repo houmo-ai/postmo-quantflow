@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "qwen-image21-capacity-examples",
+    "patterns": [
+      "examples_merak/aigc/qwen_image21/capacity_plan.py",
+      "examples_merak/aigc/qwen_image21/capacity_configs/*.yaml"
+    ]
+  }]
+}

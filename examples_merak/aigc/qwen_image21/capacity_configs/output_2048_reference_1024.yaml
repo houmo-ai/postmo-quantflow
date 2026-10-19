@@ -1,0 +1,20 @@
+# Configuration example; full-weight 4MP export/runtime accuracy is not verified.
+# Size arrays are [height, width]. Larger output, unchanged reference budget.
+quant: null
+export:
+  model_id: qwen-image-2.1-turbo
+  model:
+    type: XHQwenImage21Model
+    quant_scheme:
+      target_device: XH2a
+      quant_type: w8a8_sefp
+  target_device: XH2a
+  output_size: [2048, 2048]
+  reference_size: [1024, 1024]
+  canvas_size: [2048, 2048]
+  target_capacity: 16384
+  reference_capacity: 4352
+  visual_patch_capacity: 4352
+  prompt_budget: 512
+  max_references: 1
+  max_position: 32768
