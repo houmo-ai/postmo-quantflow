@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "depthsplat-source-workflow",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/depthsplat/assets.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/workflow.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/runtime.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/model.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/__init__.py",
+        "configs_merak/workflows/xh2a/other_models/depthsplat/*"
+      ]
+    }
+  ]
+}

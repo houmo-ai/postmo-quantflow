@@ -1,0 +1,1 @@
+{"version": 1, "rules": [{"id": "depthsplat-evaluation", "patterns": ["xhmodel_merak/xh_other_model/models/depthsplat/evaluation.py"]}]}

@@ -1359,3 +1359,21 @@ Files: xhmodel_merak/xh_llm/models/deepseek_v4/chat.py
 Scope: Official reasoning-effort text and single-user token protocol adapted to
 Jinja for the public text API; copyright and MIT permission notice retained
 inside the distributed tokenizer template.
+
+DepthSplat (camera geometry, export and Gaussian demo adaptation)
+----------------------------------------------------------------------
+Source: https://github.com/cvg/depthsplat
+Commit: 2dad25a7b9ba7c5537aba08463ef88d8511a06be
+License: MIT
+License text: licenses/DepthSplat/LICENSE
+Files: xhmodel_merak/xh_other_model/models/depthsplat/postprocess.py
+       xhmodel_merak/xh_other_model/models/depthsplat/preprocess.py
+       xhmodel_merak/xh_other_model/models/depthsplat/source.py
+       xhmodel_merak/xh_other_model/models/depthsplat/onnx_pipeline.py
+       xhmodel_merak/xh_other_model/models/depthsplat/demo.py
+Adaptation: NumPy CPU FP32 Gaussian construction, camera geometry, covariance
+and spherical-harmonic processing, with explicit precomputed camera SH inputs.
+CPU FP32 multi-view matching grid construction from original camera parameters.
+Portable two/six-view export, camera input preparation and external Gaussian
+adapter/render orchestration. Upstream model weights, datasets and CUDA renderer
+implementation are not bundled with this source change.

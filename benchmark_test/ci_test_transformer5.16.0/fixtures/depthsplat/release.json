@@ -1,0 +1,30 @@
+{
+  "archive": "depthsplat-ci-source-v1.tar.gz",
+  "sha256": "c7a459085fc5fab67230e847e7cb5a34c35219660bf69f724f38b7d3635dbf1f",
+  "files": {
+    "LICENSE.DepthSplat": {
+      "sha256": "03614e84680c6b412f52ada874a6b49b2fd1426878f909f036175573a3b4f49b",
+      "size": 1066
+    },
+    "calibration-000c3ab189999a83.npz": {
+      "sha256": "3e9fbfaa3d979095763650ef2d62d5b58da5d815ffa96f9682c8e61d209b0e32",
+      "size": 392266
+    },
+    "config.json": {
+      "sha256": "bfd3d2e0282085960e6f385c6e1dda45e157bfc11cf7c861f5c20f995e865d87",
+      "size": 1944
+    },
+    "encoder.onnx": {
+      "sha256": "289da02862944aa28f51f7f0d07ea189618365863f1cc31e1d3fa754320421d0",
+      "size": 154579327
+    },
+    "evaluation-6ca4076fadf3200e.npz": {
+      "sha256": "92312bc83177af06496c3fb72f4d810fe228bd06d6a083daa1da026e8c08bfdf",
+      "size": 387529
+    },
+    "provenance.json": {
+      "sha256": "0ca6b3133588edf22c4732fc09a34fd87ac622ba38da9160fde821165cc26a9e",
+      "size": 833
+    }
+  }
+}

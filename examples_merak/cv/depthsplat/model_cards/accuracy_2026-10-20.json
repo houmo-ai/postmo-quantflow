@@ -1,0 +1,497 @@
+{
+  "protocol": {
+    "commit": "a363399dae356569b8932e7d774b8ea7deb1c12a",
+    "scene": "6ca4076fadf3200e",
+    "calibration_scene": "000c3ab189999a83",
+    "dataset": "official RealEstate10K 720p test subset",
+    "profiles": [
+      "2v 256x256 W8A8 + Host FP32 matching grid and Gaussian construction",
+      "6v 512x960 W8A8 default geometry",
+      "6v 512x960 W8A8 + eight SEFP a16a16 geometry MatMul"
+    ],
+    "evaluation": "Real target RGB compared with rendered float/quantized predictions before video encoding",
+    "primary_split": "exclude context frames, with full-trajectory results also retained",
+    "metrics": [
+      "mean per-frame PSNR dB",
+      "mean per-frame SSIM",
+      "mean pixel MSE",
+      "100*(mean quant MSE / mean float MSE - 1)"
+    ],
+    "conditional_threshold": "MSE ratio of means increase <=5%, not a confirmed universal business acceptance definition",
+    "limitations": [
+      "one held-out scene, not full dataset",
+      "correlated video frames, not independent scenes",
+      "no compiler or hardware validation",
+      "no LPIPS in this run"
+    ]
+  },
+  "results": [
+    {
+      "label": "2v W8A8 + Host FP32",
+      "profile": "2v",
+      "variant": "quantized",
+      "splits": {
+        "all": {
+          "count": 274,
+          "float": {
+            "psnr_db": 20.83680731705644,
+            "ssim": 0.7873260923763261,
+            "mse": 0.018959866445995937
+          },
+          "quantized": {
+            "psnr_db": 20.696138931813877,
+            "ssim": 0.7791454409160753,
+            "mse": 0.01909423324051755
+          },
+          "psnr_delta_db": -0.14066838524256298,
+          "ssim_delta": -0.00818065146025082,
+          "mse_ratio_of_means_increase_pct": 0.7086906171218654,
+          "conditional_mse_5pct_pass": true,
+          "frames_mse_increase_over_5pct": 89,
+          "worst_psnr_frames": [
+            {
+              "target_index": 149,
+              "psnr_delta_db": -0.54757949226628,
+              "ssim_delta": -0.008699238300323486,
+              "mse_increase_pct": 13.437840215576413
+            },
+            {
+              "target_index": 129,
+              "psnr_delta_db": -0.5386936557408788,
+              "ssim_delta": -0.009730994701385498,
+              "mse_increase_pct": 13.205979196137463
+            },
+            {
+              "target_index": 131,
+              "psnr_delta_db": -0.5360488045913598,
+              "ssim_delta": -0.009103477001190186,
+              "mse_increase_pct": 13.137057802010489
+            },
+            {
+              "target_index": 148,
+              "psnr_delta_db": -0.53193104343935,
+              "ssim_delta": -0.009060025215148926,
+              "mse_increase_pct": 13.029837790523091
+            },
+            {
+              "target_index": 128,
+              "psnr_delta_db": -0.5315897929849811,
+              "ssim_delta": -0.01028895378112793,
+              "mse_increase_pct": 13.02095672715311
+            }
+          ]
+        },
+        "noncontext": {
+          "count": 272,
+          "float": {
+            "psnr_db": 20.769293210121887,
+            "ssim": 0.7861591065850329,
+            "mse": 0.019091521078628243
+          },
+          "quantized": {
+            "psnr_db": 20.63015849771393,
+            "ssim": 0.777981832404347,
+            "mse": 0.01922623190244742
+          },
+          "psnr_delta_db": -0.13913471240795872,
+          "ssim_delta": -0.008177274180685812,
+          "mse_ratio_of_means_increase_pct": 0.7056055055245203,
+          "conditional_mse_5pct_pass": true,
+          "frames_mse_increase_over_5pct": 87,
+          "worst_psnr_frames": [
+            {
+              "target_index": 149,
+              "psnr_delta_db": -0.54757949226628,
+              "ssim_delta": -0.008699238300323486,
+              "mse_increase_pct": 13.437840215576413
+            },
+            {
+              "target_index": 129,
+              "psnr_delta_db": -0.5386936557408788,
+              "ssim_delta": -0.009730994701385498,
+              "mse_increase_pct": 13.205979196137463
+            },
+            {
+              "target_index": 131,
+              "psnr_delta_db": -0.5360488045913598,
+              "ssim_delta": -0.009103477001190186,
+              "mse_increase_pct": 13.137057802010489
+            },
+            {
+              "target_index": 148,
+              "psnr_delta_db": -0.53193104343935,
+              "ssim_delta": -0.009060025215148926,
+              "mse_increase_pct": 13.029837790523091
+            },
+            {
+              "target_index": 128,
+              "psnr_delta_db": -0.5315897929849811,
+              "ssim_delta": -0.01028895378112793,
+              "mse_increase_pct": 13.02095672715311
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "6v 默认 W8A8",
+      "profile": "6v",
+      "variant": "default",
+      "splits": {
+        "all": {
+          "count": 274,
+          "float": {
+            "psnr_db": 22.528784573261664,
+            "ssim": 0.7833702307547966,
+            "mse": 0.006350860040444527
+          },
+          "quantized": {
+            "psnr_db": 17.415854437212467,
+            "ssim": 0.5305221949833153,
+            "mse": 0.018459708351696278
+          },
+          "psnr_delta_db": -5.112930136049197,
+          "ssim_delta": -0.2528480357714813,
+          "mse_ratio_of_means_increase_pct": 190.66470106628572,
+          "conditional_mse_5pct_pass": false,
+          "frames_mse_increase_over_5pct": 274,
+          "worst_psnr_frames": [
+            {
+              "target_index": 54,
+              "psnr_delta_db": -7.54505865626631,
+              "ssim_delta": -0.3121517300605774,
+              "mse_increase_pct": 468.2060657585495
+            },
+            {
+              "target_index": 55,
+              "psnr_delta_db": -7.525858843195515,
+              "ssim_delta": -0.3114262819290161,
+              "mse_increase_pct": 465.6996164956507
+            },
+            {
+              "target_index": 209,
+              "psnr_delta_db": -7.366160004507677,
+              "ssim_delta": -0.28892582654953003,
+              "mse_increase_pct": 445.27551982672253
+            },
+            {
+              "target_index": 52,
+              "psnr_delta_db": -7.329632623965786,
+              "ssim_delta": -0.315112829208374,
+              "mse_increase_pct": 440.7085816836756
+            },
+            {
+              "target_index": 207,
+              "psnr_delta_db": -7.328008023569453,
+              "ssim_delta": -0.2924773097038269,
+              "mse_increase_pct": 440.50635229060686
+            }
+          ]
+        },
+        "noncontext": {
+          "count": 268,
+          "float": {
+            "psnr_db": 22.506682880119776,
+            "ssim": 0.7824171236646709,
+            "mse": 0.006343784014027177
+          },
+          "quantized": {
+            "psnr_db": 17.40966435294811,
+            "ssim": 0.528760189774321,
+            "mse": 0.018479400859978883
+          },
+          "psnr_delta_db": -5.097018527171667,
+          "ssim_delta": -0.2536569338903498,
+          "mse_ratio_of_means_increase_pct": 191.29933836205345,
+          "conditional_mse_5pct_pass": false,
+          "frames_mse_increase_over_5pct": 268,
+          "worst_psnr_frames": [
+            {
+              "target_index": 55,
+              "psnr_delta_db": -7.525858843195515,
+              "ssim_delta": -0.3114262819290161,
+              "mse_increase_pct": 465.6996164956507
+            },
+            {
+              "target_index": 209,
+              "psnr_delta_db": -7.366160004507677,
+              "ssim_delta": -0.28892582654953003,
+              "mse_increase_pct": 445.27551982672253
+            },
+            {
+              "target_index": 52,
+              "psnr_delta_db": -7.329632623965786,
+              "ssim_delta": -0.315112829208374,
+              "mse_increase_pct": 440.7085816836756
+            },
+            {
+              "target_index": 207,
+              "psnr_delta_db": -7.328008023569453,
+              "ssim_delta": -0.2924773097038269,
+              "mse_increase_pct": 440.50635229060686
+            },
+            {
+              "target_index": 58,
+              "psnr_delta_db": -7.3213259820568055,
+              "ssim_delta": -0.32970404624938965,
+              "mse_increase_pct": 439.6753703200119
+            }
+          ]
+        }
+      }
+    },
+    {
+      "label": "6v 几何 SEFP a16a16",
+      "profile": "6v",
+      "variant": "geometry16",
+      "splits": {
+        "all": {
+          "count": 274,
+          "float": {
+            "psnr_db": 22.528784573261664,
+            "ssim": 0.7833702307547966,
+            "mse": 0.006350860040444527
+          },
+          "quantized": {
+            "psnr_db": 22.011380428882298,
+            "ssim": 0.7499211545843277,
+            "mse": 0.006933581708576938
+          },
+          "psnr_delta_db": -0.5174041443793662,
+          "ssim_delta": -0.03344907617046888,
+          "mse_ratio_of_means_increase_pct": 9.175476461793085,
+          "conditional_mse_5pct_pass": false,
+          "frames_mse_increase_over_5pct": 220,
+          "worst_psnr_frames": [
+            {
+              "target_index": 54,
+              "psnr_delta_db": -1.2075076382901706,
+              "ssim_delta": -0.04447847604751587,
+              "mse_increase_pct": 32.05375766896233
+            },
+            {
+              "target_index": 55,
+              "psnr_delta_db": -1.176726684813044,
+              "ssim_delta": -0.04319429397583008,
+              "mse_increase_pct": 31.121125519294935
+            },
+            {
+              "target_index": 109,
+              "psnr_delta_db": -1.1736798465216438,
+              "ssim_delta": -0.03578227758407593,
+              "mse_increase_pct": 31.029168384897442
+            },
+            {
+              "target_index": 110,
+              "psnr_delta_db": -1.1644848053993684,
+              "ssim_delta": -0.03477257490158081,
+              "mse_increase_pct": 30.75204212647065
+            },
+            {
+              "target_index": 52,
+              "psnr_delta_db": -1.122832185000746,
+              "ssim_delta": -0.042901813983917236,
+              "mse_increase_pct": 29.50401067194617
+            }
+          ]
+        },
+        "noncontext": {
+          "count": 268,
+          "float": {
+            "psnr_db": 22.506682880119776,
+            "ssim": 0.7824171236646709,
+            "mse": 0.006343784014027177
+          },
+          "quantized": {
+            "psnr_db": 21.99375522832677,
+            "ssim": 0.7489925084719017,
+            "mse": 0.006929591417124968
+          },
+          "psnr_delta_db": -0.5129276517930066,
+          "ssim_delta": -0.03342461519276918,
+          "mse_ratio_of_means_increase_pct": 9.23435290045298,
+          "conditional_mse_5pct_pass": false,
+          "frames_mse_increase_over_5pct": 215,
+          "worst_psnr_frames": [
+            {
+              "target_index": 55,
+              "psnr_delta_db": -1.176726684813044,
+              "ssim_delta": -0.04319429397583008,
+              "mse_increase_pct": 31.121125519294935
+            },
+            {
+              "target_index": 110,
+              "psnr_delta_db": -1.1644848053993684,
+              "ssim_delta": -0.03477257490158081,
+              "mse_increase_pct": 30.75204212647065
+            },
+            {
+              "target_index": 52,
+              "psnr_delta_db": -1.122832185000746,
+              "ssim_delta": -0.042901813983917236,
+              "mse_increase_pct": 29.50401067194617
+            },
+            {
+              "target_index": 112,
+              "psnr_delta_db": -1.1055483306702918,
+              "ssim_delta": -0.03427577018737793,
+              "mse_increase_pct": 28.989640710417163
+            },
+            {
+              "target_index": 58,
+              "psnr_delta_db": -1.0817695172725372,
+              "ssim_delta": -0.04300898313522339,
+              "mse_increase_pct": 28.285317010348955
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "evidence_date": "2026-10-20",
+  "provenance": {
+    "2v": {
+      "git_commit": "a363399dae356569b8932e7d774b8ea7deb1c12a",
+      "profile": "2v_256x256",
+      "dataset": "RealEstate10K re10k_720p_test_subset",
+      "evaluation_scene": "6ca4076fadf3200e",
+      "calibration_scene": "000c3ab189999a83",
+      "calibration_evaluation_disjoint_scenes": true,
+      "sample_scope": "one held-out scene, all 274 frames; not full benchmark",
+      "fresh_steps": [
+        "float ONNX inference",
+        "reloaded real HMONNX inference",
+        "FP32 host postprocess",
+        "float full trajectory rendering",
+        "quantized full trajectory rendering"
+      ],
+      "files": {
+        "work_dirs/depthsplat-adaptation/portable-export-2v/encoder.onnx": {
+          "sha256": "289da02862944aa28f51f7f0d07ea189618365863f1cc31e1d3fa754320421d0",
+          "size_bytes": 154579327
+        },
+        "work_dirs/depthsplat-adaptation/portable-export-2v/config.json": {
+          "sha256": "b18645492c4a04f4c310306b9f1456bd3dcefaf6f8069f46a9a304385c02838f",
+          "size_bytes": 1944
+        },
+        "work_dirs/depthsplat-adaptation/portable-export-2v/evaluation-6ca4076fadf3200e.npz": {
+          "sha256": "c6ff07f9ce96b81a28d6198ccc261ed204ca0c1b6343299963fd749cfe1aea09",
+          "size_bytes": 387528
+        },
+        "work_dirs/depthsplat-adaptation/portable-export-2v/calibration-000c3ab189999a83.npz": {
+          "sha256": "1da1b39a517fc6ea63feb9bd201d2d7fbee1dd13036ee6245a194ab9af022fe1",
+          "size_bytes": 392265
+        },
+        "work_dirs/depthsplat-adaptation/submission/portable-demo-context2.npz": {
+          "sha256": "3593f7036c09590af6e054a676aa54cf40936cca8c97f3b5d880ee59e1012357",
+          "size_bytes": 387925
+        },
+        "work_dirs/depthsplat-adaptation/host-prepost-v3/ci-artifact/visual_2v_256x256/model.onnx": {
+          "sha256": "6b9eddc019af40c095bd9c9cf7c0db71e0be8977d2458f179762ff70be9e565b",
+          "size_bytes": 7816141
+        },
+        "examples_merak/cv/depthsplat/evaluate.py": {
+          "sha256": "5f7b9da44c08820e72e11ebe0717e0d03d89f0b90d4b875af2587f22f5f76780",
+          "size_bytes": 3450
+        },
+        "examples_merak/cv/depthsplat/demo.py": {
+          "sha256": "c0d6dba7a16343e7250fc4510e1bd6f3d407344100940d16e7ddfee8ef7ed9fb",
+          "size_bytes": 2316
+        },
+        "xhmodel_merak/xh_other_model/models/depthsplat/demo.py": {
+          "sha256": "f6e5d90aef19aaf38e6186df536ab0466b22bbcb6f15626750abb0ef2d365076",
+          "size_bytes": 14542
+        }
+      },
+      "render_vs_inference_input_alignment": {
+        "images": {
+          "equal": true,
+          "max_abs_difference": 0.0
+        },
+        "intrinsics": {
+          "equal": true,
+          "max_abs_difference": 0.0
+        },
+        "extrinsics": {
+          "equal": true,
+          "max_abs_difference": 0.0
+        },
+        "near": {
+          "equal": true,
+          "max_abs_difference": 0.0
+        },
+        "far": {
+          "equal": true,
+          "max_abs_difference": 0.0
+        }
+      }
+    },
+    "6v": {
+      "created_utc": "2026-10-20T02:57:21.491271+00:00",
+      "git_head": "a363399dae356569b8932e7d774b8ea7deb1c12a",
+      "gpu_visible_devices": "1",
+      "scene": "6ca4076fadf3200e",
+      "dataset": "RealEstate10K official 720p test subset",
+      "context_indices": [
+        0,
+        54,
+        109,
+        163,
+        218,
+        273
+      ],
+      "target_count": 274,
+      "excluded_context_count": 268,
+      "float_baseline": "CPU ONNX outputs from committed exporter --verify; host FP32 Gaussian adapter and official CUDA renderer",
+      "calibration_scene": "000c3ab189999a83",
+      "new_network_inference": [
+        "geometry16",
+        "default-w8a8"
+      ],
+      "files": [
+        {
+          "path": "work_dirs/depthsplat-adaptation/submission/portable-quantized-geometry16/model.onnx",
+          "bytes": 11778969,
+          "sha256": "fd681aaad5251fb6d53a7230339d7ac0c1cf50c56958b49b4445bd1109dea36a"
+        },
+        {
+          "path": "work_dirs/depthsplat-adaptation/submission/portable-quantized-geometry16/model_external_data",
+          "bytes": 1744996206,
+          "sha256": "4287b9fd9ace386f63897da8a578593ab9da74cf77a88d20cfc42b4da2b1388b"
+        },
+        {
+          "path": "work_dirs/depthsplat-adaptation/demo-6v-export/quantized-gather/model.onnx",
+          "bytes": 11778945,
+          "sha256": "44f68b170ca0861effb9d0d43e604048b8aaf8b4f540a83e85b0534078bc0a7e"
+        },
+        {
+          "path": "work_dirs/depthsplat-adaptation/demo-6v-export/quantized-gather/model_external_data",
+          "bytes": 1744996206,
+          "sha256": "4287b9fd9ace386f63897da8a578593ab9da74cf77a88d20cfc42b4da2b1388b"
+        },
+        {
+          "path": "work_dirs/depthsplat-adaptation/submission/portable-6v-inputs.npz",
+          "bytes": 35395330,
+          "sha256": "0164548b191e686a941eb9e0d3ead2ae1190d853635825c0b13752e6315ae3f3"
+        },
+        {
+          "path": "work_dirs/depthsplat-adaptation/submission/portable-demo-context6.npz",
+          "bytes": 8184678,
+          "sha256": "62fedefac0b09cc731477ec282024c6ff79d0b13709b77123fd11fdccab1f63e"
+        },
+        {
+          "path": "work_dirs/depthsplat-adaptation/portable-export-6v/context-6ca4076fadf3200e-raw-onnx.npz",
+          "bytes": 405080348,
+          "sha256": "4d853585796fa7f47cafa2105c3191ee3c0d403555dd800bb0f03d88c1fcc152"
+        }
+      ],
+      "conditional_acceptance": "If chosen, MSE ratio of means increase <= 5%; not an agreed formal acceptance threshold.",
+      "float_baseline_recomputed_this_run": false,
+      "float_render_recomputed_this_run": true,
+      "quantized_inference_recomputed_this_run": true,
+      "float_reference_explanation": "Reused previously verified committed-exporter CPU ONNX raw outputs; current test freshly renders those and runs both HMONNX variants, then renders their new raw outputs against identical GT frames."
+    }
+  },
+  "raw_reports_local_directory": "work_dirs/depthsplat-adaptation/accuracy-2026-10-20",
+  "status": "diagnostic_accuracy_evaluation_not_full_benchmark_acceptance"
+}

@@ -300,6 +300,7 @@ def test_registry_covers_each_public_artifact_kind():
 
     assert {recipe.artifact_format for recipe in recipes} == {
         "aigc",
+        "gaussian-scene",
         "autoregressive",
         "asr",
         "tts",

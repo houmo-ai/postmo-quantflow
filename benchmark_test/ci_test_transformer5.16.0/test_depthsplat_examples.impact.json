@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "depthsplat-example-cli-and-scene-selection",
+      "patterns": [
+        "examples_merak/cv/depthsplat/workflow.py",
+        "examples_merak/cv/depthsplat/unified.py",
+        "examples_merak/cv/depthsplat/evaluate.py",
+        "examples_merak/cv/depthsplat/export_onnx.py",
+        "examples_merak/cv/depthsplat/onnx_pipeline.py",
+        "examples_merak/cv/depthsplat/demo.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/demo.py"
+      ]
+    }
+  ]
+}

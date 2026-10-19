@@ -68,7 +68,7 @@ Checkpoint loading retains its no-initialization optimization inside a test;
 restoration runs on both success and failure. This isolates tests, not production
 calls. A test that constructs a native model after loading a checkpoint must
 request the `restore_model_initialization_state` fixture and scope that load
-with `with restore_model_initialization_state():`, or use a separate worker. The 51 unified flows already use independent workers.
+with `with restore_model_initialization_state():`, or use a separate worker. The unified flows already use independent workers.
 Module/session fixtures and collection must not load checkpoints in the shared
 pytest process: the function-scoped guard does not bracket those operations.
 
@@ -220,12 +220,17 @@ avoid repeated large-model setup, redundant cases and a Cartesian product of
 unrelated dimensions. Full coverage means the changed contracts are exercised,
 not that every model size is exported.
 
-Keep PR CI fast: no new default full-model download, re-quantization or golden
-generation. Reuse the block harness for a necessary real export; retain the
-existing BGE compatibility exception. A new expensive requirement should have
-a concrete regression it catches that the smaller layers cannot. Markers
-describe categories; the selector and impact declarations determine execution.
-Do not make a required case silently pass by skipping unavailable dependencies.
+Keep PR CI fast: prefer small native models or the block harness for a necessary
+real export. Full-model downloads, re-quantization or golden generation require
+a concrete regression that smaller layers cannot catch; retain the existing
+BGE compatibility exception. DepthSplat uses its smallest registered fixed
+2v/256×256 profile to verify actual neural PTQ, Host camera preprocessing,
+artifact relocation and source-independent inference together. Its immutable
+137 MiB ONNX/input bundle is fetched once from the internal mirror and cached;
+it does not download a checkpoint or install upstream renderer dependencies.
+Markers describe categories; the selector and impact declarations determine
+execution. Do not make a required case silently pass by skipping unavailable
+dependencies.
 
 Confirm selection with the actual patchset (or repeat `--changed-file` for a
 small selection probe), then run the CI entrypoint from the repository root:
@@ -417,6 +422,18 @@ four components and relocation/inference. The published four-gear default and
 its rejection of missing gears remain covered by the fast Kokoro contract tests;
 larger gears are not numerically exercised by the unified smoke test.
 
+DepthSplat similarly downloads its pinned 137 MiB source bundle automatically.
+The final 2v 256×256 pretrained ONNX graph uses Host FP32 camera matching-grid
+preprocessing and Gaussian postprocessing; calibration and held-out samples
+come from separate real RE10K scenes. The archive includes source/checkpoint
+provenance and the upstream MIT license. Its SHA-256 and each extracted file's
+size/hash are checked, including cached or overridden inputs. The full case
+runs actual W8A8 PTQ, artifact relocation and HMONNX inference. It needs no
+upstream renderer or manually configured model path. See
+[the asset manifest and mirror details](fixtures/depthsplat/README.md).
+`DEPTHSPLAT_CI_BUNDLE` remains an optional override for a complete extracted
+release archive and cannot bypass the same integrity checks.
+
 With the CI environment activated, run:
 
 ```bash
@@ -432,7 +449,7 @@ its process group before the GPU is reused. Its `.impact.json` selects parameter
 nodes for model-private source/adapter changes, and all variants of the specific
 model for its workflow configurations. Shared Qwen source also selects its MoE,
 Qwen3-Next, Macaron and WeMM consumers. Public unified build/inference/catalog
-and shared fixture changes select the entire 51-case matrix. Multiple changes
+and shared fixture changes select the entire registered case matrix. Multiple changes
 are combined; `--format report` shows the exact pytest nodes and reasons.
 `test_unified_small_model_coverage.py` checks registered workflow routing, shared
 consumers and the actual pytest collection of every declared node. Global policy

@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "depthsplat-recipe",
+      "patterns": [
+        "xhmodel_merak/model_integrations/depthsplat/**",
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_build/resolver.py",
+        "xhmodel_merak/model_artifact/files.py",
+        "xhmodel_merak/model_inference/inputs.py",
+        "configs_merak/workflows/xh2a/other_models/depthsplat/**",
+        "benchmark_test/ci_test_transformer5.16.0/test_depthsplat_recipe.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_depthsplat_recipe.impact.json",
+        "xhmodel_merak/xh_other_model/builder.py",
+        "xhmodel_merak/xh_other_model/scan_model_types.py",
+        "xhmodel_merak/workflows/auto.py",
+        "xhmodel_merak/xh_other_model/workflows/**",
+        "xhmodel_merak/xh_other_model/models/depthsplat/assets.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/runtime.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/workflow.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/model.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/__init__.py"
+      ]
+    }
+  ]
+}

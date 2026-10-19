@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "depthsplat-onnx-camera-export-contracts",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/depthsplat/onnx_pipeline.py",
+        "xhmodel_merak/xh_other_model/models/depthsplat/source.py"
+      ]
+    }
+  ]
+}

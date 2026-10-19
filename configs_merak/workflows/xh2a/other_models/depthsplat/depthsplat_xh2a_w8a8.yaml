@@ -1,0 +1,8 @@
+quant: null
+export:
+  target_device: XH2a
+  model:
+    type: XHDepthSplatModel
+    quant_scheme:
+      quant_type: w8a8
+  profile: 2v_256x256
