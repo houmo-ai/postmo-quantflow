@@ -7,6 +7,7 @@
         "xhmodel_merak/xh_other_model/models/minimax_h3/components_hmonnx.py",
         "xhmodel_merak/xh_other_model/models/minimax_h3/minimax_h3_converter.py",
         "xhmodel_merak/xh_other_model/models/minimax_h3/text_conditioning.py",
+        "xhmodel_merak/xh_other_model/models/minimax_h3/text_embedding_host.py",
         "xhmodel_merak/xh_other_model/models/minimax_h3/text_encoder_wrapper.py",
         "xhmodel_merak/xh_other_model/models/minimax_h3/vision_encoder_wrapper.py",
         "xhmodel_merak/xh_other_model/models/minimax_h3/workflow.py",

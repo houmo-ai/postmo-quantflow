@@ -58,6 +58,27 @@ def resolve_hmonnx_demo_components(components: list[str] | None) -> list[str] | 
     return [component for component in COMPONENTS if component in selected]
 
 
+def resolve_demo_pretrained_component_names(pipe, *, use_light_text_host: bool) -> list[str]:
+    """Choose ``load_components`` names, optionally skipping the full text_encoder."""
+    preferred = (
+        "image_processor",
+        "tokenizer",
+        "processor",
+        "vae",
+        "scheduler",
+        "audio_scheduler",
+        "transformer",
+        "video_processor",
+        "audio_vae",
+    )
+    names = [name for name in preferred if name in getattr(pipe, "_component_specs", {})]
+    if not use_light_text_host and "text_encoder" in getattr(pipe, "_component_specs", {}):
+        # Keep text_encoder near the front so tokenizer/processor pairing stays familiar.
+        insert_at = 1 if names and names[0] == "image_processor" else 0
+        names.insert(insert_at, "text_encoder")
+    return names
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run MiniMax-H3 with exported HMONNX components.")
     parser.add_argument("--model-dir", required=True, help="MiniMax-H3 HF / diffusers model directory.")
@@ -112,6 +133,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-inference-steps", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lora-path", type=Path, default=DEFAULT_LORA_PATH)
+    parser.add_argument(
+        "--no-lora",
+        action="store_true",
+        help="Do not load LoRA even if --lora-path exists.",
+    )
+    parser.add_argument(
+        "--require-lora",
+        action="store_true",
+        help="Fail if --lora-path does not exist (default: skip missing LoRA).",
+    )
     parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
     parser.add_argument("--lora-scale", type=float, default=DEFAULT_LORA_SCALE)
     return parser.parse_args()
@@ -119,6 +150,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.no_lora and args.require_lora:
+        raise ValueError("--no-lora and --require-lora are mutually exclusive")
     if args.workflow == "fl2va" and not args.image:
         raise ValueError("--image is required for fl2va")
     if args.workflow == "t2va" and args.image:
@@ -133,6 +166,11 @@ def main() -> None:
 
     from xhmodel_merak.xh_other_model.models.minimax_h3.components_hmonnx import install_hmonnx_components
     from xhmodel_merak.xh_other_model.models.minimax_h3.lora import load_minimax_h3_lora
+    from xhmodel_merak.xh_other_model.models.minimax_h3.text_embedding_host import (
+        install_hmonnx_text_encoder_host,
+        text_embedding_path,
+        vision_geometry_path,
+    )
 
     device = torch.device(args.device)
     manager = ComponentsManager()
@@ -142,21 +180,6 @@ def main() -> None:
         workflow=args.workflow,
         components_manager=manager,
     )
-    pipe.load_components(
-        dtype={
-            "default": torch.float16,
-            "vae": torch.float16,
-            "audio_vae": torch.float16,
-            "text_encoder": torch.float16,
-            "transformer": torch.float16,
-        }
-    )
-    load_minimax_h3_lora(
-        pipe.transformer,
-        args.lora_path,
-        lora_alpha=args.lora_alpha,
-        lora_scale=args.lora_scale,
-    )
     selected_components = resolve_hmonnx_demo_components(args.components)
     if args.components and "transformer" in args.components and selected_components is not None:
         print(
@@ -164,6 +187,65 @@ def main() -> None:
             f"text embeds + encoder_attention_mask; enabling: {', '.join(selected_components)}",
             flush=True,
         )
+
+    export_dir = Path(args.export_dir).expanduser().resolve()
+    use_light_text_host = text_embedding_path(export_dir).is_file()
+    require_vision_geometry = args.workflow == "fl2va" or (
+        selected_components is None or "vision_encoder" in selected_components
+    )
+    if use_light_text_host and require_vision_geometry and not vision_geometry_path(export_dir).is_file():
+        raise FileNotFoundError(
+            f"Export has text embeddings but is missing vision geometry: {vision_geometry_path(export_dir)}"
+        )
+
+    component_names = resolve_demo_pretrained_component_names(pipe, use_light_text_host=use_light_text_host)
+    pipe.load_components(
+        names=component_names,
+        dtype={
+            "default": torch.float16,
+            "vae": torch.float16,
+            "audio_vae": torch.float16,
+            "text_encoder": torch.float16,
+            "transformer": torch.float16,
+        },
+    )
+    if use_light_text_host:
+        install_hmonnx_text_encoder_host(
+            pipe,
+            args.model_dir,
+            export_dir,
+            dtype=torch.float16,
+            require_vision_geometry=require_vision_geometry,
+        )
+        print(
+            "Loaded lightweight text_encoder host from exported embeddings "
+            f"({text_embedding_path(export_dir).name}"
+            + (
+                f", {vision_geometry_path(export_dir).name}"
+                if vision_geometry_path(export_dir).is_file()
+                else ""
+            )
+            + "); skipped full original text_encoder weights",
+            flush=True,
+        )
+    if args.no_lora:
+        print("LoRA disabled via --no-lora", flush=True)
+    else:
+        lora_path = Path(args.lora_path).expanduser()
+        if not lora_path.is_absolute():
+            lora_path = Path.cwd() / lora_path
+        if lora_path.is_file():
+            load_minimax_h3_lora(
+                pipe.transformer,
+                lora_path,
+                lora_alpha=args.lora_alpha,
+                lora_scale=args.lora_scale,
+            )
+            print(f"LoRA loaded: {lora_path}", flush=True)
+        elif args.require_lora:
+            raise FileNotFoundError(f"LoRA checkpoint does not exist: {lora_path}")
+        else:
+            print(f"LoRA not found, continuing without LoRA: {lora_path}", flush=True)
     exec_devices = parse_exec_devices(args.exec_devices, device)
     installed_components = install_hmonnx_components(
         pipe,

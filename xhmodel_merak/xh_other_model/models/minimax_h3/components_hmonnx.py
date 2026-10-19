@@ -16,6 +16,8 @@ from .minimax_h3_converter import expand_minimax_h3_components
 from .text_conditioning import install_fixed_length_text_conditioning
 from .text_encoder_wrapper import build_minimax_h3_attention_bias
 from .transformer_wrapper import (
+    MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS,
+    build_minimax_h3_denoise_unique_timesteps,
     build_minimax_h3_transformer_conditioning,
     build_pack_gather_indices,
     build_packed_attention_mask,
@@ -296,10 +298,32 @@ class _HMONNXModule(nn.Module):
             torch.cuda.empty_cache()
 
 
-class _HMONNXTransformerModule(nn.Module):
-    """HMONNX transformer adapter with host-side temb/adaln/rotary precompute."""
+def _resolve_fixed_adaln_unique_timesteps(
+    fixed_adaln_meta: dict[str, Any] | None,
+    *,
+    num_inference_steps: int = MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS,
+) -> list[list[float]]:
+    """Prefer export-baked unique timesteps; otherwise rebuild the default fl2va schedule."""
+    if fixed_adaln_meta:
+        unique = fixed_adaln_meta.get("unique_timesteps")
+        if isinstance(unique, list) and unique:
+            return [list(map(float, row)) for row in unique]
+        num_inference_steps = int(fixed_adaln_meta.get("num_inference_steps", num_inference_steps))
+    rebuilt = build_minimax_h3_denoise_unique_timesteps(num_inference_steps=num_inference_steps)
+    return [row.detach().float().cpu().tolist() for row in rebuilt]
 
-    def __init__(self, runtime: _LazyHMONNXRuntime, fallback: nn.Module, input_names: tuple[str, ...]):
+
+class _HMONNXTransformerModule(nn.Module):
+    """HMONNX transformer adapter with host-side step_index/adaln/rotary precompute."""
+
+    def __init__(
+        self,
+        runtime: _LazyHMONNXRuntime,
+        fallback: nn.Module,
+        input_names: tuple[str, ...],
+        *,
+        fixed_adaln_meta: dict[str, Any] | None = None,
+    ):
         super().__init__()
         self.runtime = runtime
         self.fallback = fallback
@@ -312,10 +336,32 @@ class _HMONNXTransformerModule(nn.Module):
         self.time_embedder = fallback.time_embedder
         self.rope = fallback.rope
         self._fallback_offloaded = False
+        fallback_meta = getattr(fallback, "_minimax_fixed_adaln_meta", None)
+        meta = fixed_adaln_meta or fallback_meta or {}
+        self._fixed_adaln_unique_timesteps = _resolve_fixed_adaln_unique_timesteps(meta)
+        self._fixed_adaln_num_evals = len(self._fixed_adaln_unique_timesteps)
+        self._minimax_step_counter = 0
 
     @property
     def dtype(self):
         return self._dtype
+
+    def _resolve_step_index(self, timestep: torch.Tensor) -> int:
+        current = timestep.detach().float().cpu().reshape(-1).tolist()
+        for idx, expected in enumerate(self._fixed_adaln_unique_timesteps):
+            if len(expected) != len(current):
+                continue
+            if all(abs(float(a) - float(b)) < 1e-4 for a, b in zip(current, expected, strict=True)):
+                self._minimax_step_counter = (idx + 1) % max(self._fixed_adaln_num_evals, 1)
+                return idx
+        if self._fixed_adaln_num_evals <= 0:
+            raise RuntimeError(
+                "MiniMax-H3 HMONNX transformer is missing baked AdaLN unique-timestep metadata; "
+                "re-export after install_fixed_adaln_lut."
+            )
+        step_index = int(self._minimax_step_counter % self._fixed_adaln_num_evals)
+        self._minimax_step_counter = (step_index + 1) % self._fixed_adaln_num_evals
+        return step_index
 
     def forward(
         self,
@@ -339,16 +385,28 @@ class _HMONNXTransformerModule(nn.Module):
         if encoder_attention_mask is None:
             raise ValueError("MiniMax-H3 HMONNX transformer requires encoder_attention_mask")
 
-        temb, adaln_indices, rotary_cos, rotary_sin = build_minimax_h3_transformer_conditioning(
+        # Host still builds adaln_indices / rotary from live timestep helpers; temb itself is
+        # baked into the AdaLN LUT and replaced by scalar step_index on the graph ABI.
+        legacy_temb, adaln_indices, rotary_cos, rotary_sin = build_minimax_h3_transformer_conditioning(
             self,
             timestep=timestep,
             timestep_indices=timestep_indices,
             token_tags=token_tags,
             position_ids=position_ids,
         )
-        # Export wrapper has no dtype cast; host aligns conditioning tensors to graph/body dtype.
-        if temb.dtype != self.dtype:
-            temb = temb.to(dtype=self.dtype)
+        # Graph ABI uses INT32 scalar step_index (torch.onnx may downcast INT64 scalars).
+        step_index = torch.tensor(
+            self._resolve_step_index(timestep),
+            device=hidden_states.device,
+            dtype=torch.int32,
+        )
+        # Export wrapper has no dtype cast; host aligns live tensors to graph/body dtype.
+        if hidden_states.dtype != self.dtype:
+            hidden_states = hidden_states.to(dtype=self.dtype)
+        if audio_hidden_states.dtype != self.dtype:
+            audio_hidden_states = audio_hidden_states.to(dtype=self.dtype)
+        if encoder_hidden_states.dtype != self.dtype:
+            encoder_hidden_states = encoder_hidden_states.to(dtype=self.dtype)
         if rotary_cos.dtype != self.dtype:
             rotary_cos = rotary_cos.to(dtype=self.dtype)
         if rotary_sin.dtype != self.dtype:
@@ -361,6 +419,8 @@ class _HMONNXTransformerModule(nn.Module):
             text_indices,
             sequence_length=sequence_length,
         )
+        if packed_attention_mask.dtype != self.dtype:
+            packed_attention_mask = packed_attention_mask.to(dtype=self.dtype)
         pack_gather_indices = build_pack_gather_indices(
             text_indices,
             video_indices,
@@ -372,7 +432,7 @@ class _HMONNXTransformerModule(nn.Module):
             "hidden_states": hidden_states,
             "audio_hidden_states": audio_hidden_states,
             "encoder_hidden_states": encoder_hidden_states,
-            "temb": temb,
+            "step_index": step_index,
             "timestep_indices": timestep_indices.to(torch.int32),
             "adaln_indices": adaln_indices.to(torch.int32),
             "rotary_cos": rotary_cos,
@@ -383,6 +443,8 @@ class _HMONNXTransformerModule(nn.Module):
             "encoder_attention_mask": encoder_attention_mask,
             "packed_attention_mask": packed_attention_mask,
         }
+        if "temb" in self.input_names:
+            named_inputs["temb"] = legacy_temb.to(device=hidden_states.device, dtype=self.dtype)
         try:
             inputs = tuple(named_inputs[name] for name in self.input_names)
         except KeyError as exc:
@@ -395,7 +457,20 @@ class _HMONNXTransformerModule(nn.Module):
                 f"expected {expected}, got {actual}"
             )
         output = self.runtime(*inputs)
-        return output
+        # Auto-offload may leave graph outputs on a secondary CUDA device; scheduler.step
+        # expects noise preds on the same device as latents (usually the pipeline device).
+        target_device = hidden_states.device
+
+        def _align_device(value: Any) -> Any:
+            if torch.is_tensor(value) and value.device != target_device:
+                return value.to(device=target_device, non_blocking=True)
+            return value
+
+        if isinstance(output, tuple):
+            return tuple(_align_device(item) for item in output)
+        if isinstance(output, list):
+            return [_align_device(item) for item in output]
+        return _align_device(output)
         # return MiniMaxH3TransformerOutput(sample=output[0], audio_sample=output[1])
 
     def _release_fallback(self) -> None:
@@ -884,7 +959,16 @@ def install_hmonnx_components(
                 release_decode_prerequisites,
             )
         elif component == "transformer":
-            pipe.transformer = _HMONNXTransformerModule(runtime, pipe.transformer, input_names)
+            component_meta = meta["components"][component]
+            fixed_adaln_meta = component_meta.get("fixed_adaln")
+            if not isinstance(fixed_adaln_meta, dict):
+                fixed_adaln_meta = None
+            pipe.transformer = _HMONNXTransformerModule(
+                runtime,
+                pipe.transformer,
+                input_names,
+                fixed_adaln_meta=fixed_adaln_meta,
+            )
             # Keep only time_proj/time_embedder/rope for host precompute; drop the FP body.
             pipe.transformer._release_fallback()
         elif component == "vision_encoder":

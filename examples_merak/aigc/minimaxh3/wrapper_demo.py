@@ -28,9 +28,9 @@ class _ExportABITransformerAdapter(nn.Module):
         *,
         config: Any,
         dtype: torch.dtype,
-        pad_temb_to_3: bool,
-        log_temb_shapes: bool = False,
-        log_temb_limit: int = 8,
+        log_step_index: bool = False,
+        log_step_limit: int = 8,
+        pad_temb_to_3: bool = False,
     ):
         super().__init__()
         self.wrapped = wrapped
@@ -47,10 +47,14 @@ class _ExportABITransformerAdapter(nn.Module):
         self.time_proj = body.time_proj
         self.time_embedder = body.time_embedder
         self.rope = body.rope
-        self.pad_temb_to_3 = pad_temb_to_3
-        self.log_temb_shapes = log_temb_shapes
-        self.log_temb_limit = log_temb_limit
-        self._temb_logs = 0
+        self.log_step_index = log_step_index
+        self.log_step_limit = log_step_limit
+        self._pad_temb_to_3 = bool(pad_temb_to_3)
+        self._step_logs = 0
+        meta = getattr(body, "_minimax_fixed_adaln_meta", None) or {}
+        self._fixed_adaln_unique_timesteps = [list(map(float, row)) for row in (meta.get("unique_timesteps") or [])]
+        self._fixed_adaln_num_evals = int(meta.get("num_denoise_evals") or len(self._fixed_adaln_unique_timesteps) or 0)
+        self._minimax_step_counter = 0
 
     @property
     def dtype(self):
@@ -84,15 +88,14 @@ class _ExportABITransformerAdapter(nn.Module):
 
     def get_memory_footprint(self, return_buffers: bool = True) -> int:
         # AutoOffloadStrategy requires ModelMixin-like footprint APIs on managed components.
-        # Block offload only keeps shared modules + one live block on CUDA.
+        # When blocks are parked on CPU, only the shared modules remain live on the execution
+        # device; the parked transformer blocks are intentionally excluded from the live footprint.
         body = self._body
         if self._block_cpu_offload_enabled:
             mem = 0
             for child_name, child in body.named_children():
                 if child_name == "transformer_blocks":
-                    if len(child) == 0:
-                        continue
-                    child = child[0]
+                    continue
                 mem += sum(param.nelement() * param.element_size() for param in child.parameters())
                 if return_buffers:
                     mem += sum(buf.nelement() * buf.element_size() for buf in child.buffers())
@@ -101,6 +104,23 @@ class _ExportABITransformerAdapter(nn.Module):
         if return_buffers:
             mem += sum(buf.nelement() * buf.element_size() for buf in self.buffers())
         return mem
+
+    def _resolve_step_index(self, timestep: torch.Tensor) -> int:
+        current = timestep.detach().float().cpu().reshape(-1).tolist()
+        for idx, expected in enumerate(self._fixed_adaln_unique_timesteps):
+            if len(expected) != len(current):
+                continue
+            if all(abs(float(a) - float(b)) < 1e-4 for a, b in zip(current, expected, strict=True)):
+                self._minimax_step_counter = (idx + 1) % max(self._fixed_adaln_num_evals, 1)
+                return idx
+        if self._fixed_adaln_num_evals <= 0:
+            raise RuntimeError(
+                "MiniMax-H3 wrapper adapter is missing baked AdaLN unique-timestep metadata; "
+                "call install_fixed_adaln_lut before wrapping."
+            )
+        step_index = int(self._minimax_step_counter % self._fixed_adaln_num_evals)
+        self._minimax_step_counter = (step_index + 1) % self._fixed_adaln_num_evals
+        return step_index
 
     def _prepare_block_cpu_offload(self, device: torch.device | str) -> None:
         from xhmodel_merak.xh_other_model.models.minimax_h3.transformer_wrapper import (
@@ -164,7 +184,6 @@ class _ExportABITransformerAdapter(nn.Module):
             MiniMaxH3TransformerOutput,
         )
         from xhmodel_merak.xh_other_model.models.minimax_h3.transformer_wrapper import (
-            MINIMAX_H3_FIXED_TEMB_TIMESTEPS,
             build_minimax_h3_transformer_conditioning,
             build_pack_gather_indices,
             build_packed_attention_mask,
@@ -175,28 +194,29 @@ class _ExportABITransformerAdapter(nn.Module):
         if encoder_attention_mask is None:
             raise ValueError("MiniMax-H3 wrapper FP path requires encoder_attention_mask")
 
-        temb, adaln_indices, rotary_cos, rotary_sin = build_minimax_h3_transformer_conditioning(
+        # The export ABI is scalar step_index-only: the host still computes the AdaLN/rotary
+        # conditioning tables, but the graph itself no longer consumes a live temb tensor.
+        _, adaln_indices, rotary_cos, rotary_sin = build_minimax_h3_transformer_conditioning(
             self,
             timestep=timestep,
             timestep_indices=timestep_indices,
             token_tags=token_tags,
             position_ids=position_ids,
-            fixed_temb_timesteps=MINIMAX_H3_FIXED_TEMB_TIMESTEPS if self.pad_temb_to_3 else None,
         )
-        if self.log_temb_shapes and self._temb_logs < self.log_temb_limit:
+        step_index_value = self._resolve_step_index(timestep)
+        step_index = torch.tensor(step_index_value, device=hidden_states.device, dtype=torch.int64)
+        if self.log_step_index and self._step_logs < self.log_step_limit:
             print(
-                "wrapper temb: "
+                "wrapper step_index: "
+                f"step={step_index_value} "
                 f"unique={int(timestep.numel())} "
-                f"padded={tuple(temb.shape)} "
                 f"timestep_indices_max={int(timestep_indices.max())} "
                 f"adaln_indices_max={int(adaln_indices.max())}",
                 flush=True,
             )
-            self._temb_logs += 1
+            self._step_logs += 1
 
         # Export wrapper does not cast; host must align conditioning tensors to body dtype.
-        if temb.dtype != self.dtype:
-            temb = temb.to(dtype=self.dtype)
         if rotary_cos.dtype != self.dtype:
             rotary_cos = rotary_cos.to(dtype=self.dtype)
         if rotary_sin.dtype != self.dtype:
@@ -221,7 +241,7 @@ class _ExportABITransformerAdapter(nn.Module):
             hidden_states.to(torch.float16),
             audio_hidden_states.to(torch.float16),
             encoder_hidden_states.to(torch.float16),
-            temb.to(torch.float16),
+            step_index,
             timestep_indices.to(torch.int32),
             adaln_indices.to(torch.int32),
             rotary_cos.to(torch.float16),
@@ -444,14 +464,16 @@ def install_transformer_wrapper(
     pipe,
     *,
     transformer: nn.Module,
-    pad_temb_to_3: bool,
-    log_temb_shapes: bool,
+    num_inference_steps: int,
+    log_step_index: bool,
+    device: torch.device | str | None = None,
 ) -> _ExportABITransformerAdapter:
     from xhmodel_merak.xh_other_model.models.minimax_h3.transformer_minimax_h3 import (
         MiniMaxH3Transformer3DModel,
     )
     from xhmodel_merak.xh_other_model.models.minimax_h3.transformer_wrapper import (
         MiniMaxH3TransformerWrapper,
+        install_fixed_adaln_lut,
     )
     from xhquant.utils.registry.dynamic_module import DynamicModule
 
@@ -469,6 +491,20 @@ def install_transformer_wrapper(
         raise AttributeError(
             "native transformer.config.patch_size is required for MiniMaxH3ModularPipeline.canvas_multiple"
         )
+    # Bake AdaLN / final-norm constants before wrap so the export ABI uses step_index.
+    tables = install_fixed_adaln_lut(
+        transformer,
+        num_inference_steps=int(num_inference_steps),
+        device=device,
+        dtype=torch.float16,
+    )
+    print(
+        "installed fixed AdaLN LUT: "
+        f"num_inference_steps={tables['num_inference_steps']} "
+        f"num_denoise_evals={tables['num_denoise_evals']} "
+        f"fixed_temb_timesteps={tables['fixed_temb_timesteps']}",
+        flush=True,
+    )
     wrapped = MiniMaxH3TransformerWrapper(transformer).eval()
     body = wrapped.transformer
     if not isinstance(body, DynamicModule):
@@ -482,8 +518,7 @@ def install_transformer_wrapper(
         wrapped,
         config=native_config,
         dtype=native_dtype,
-        pad_temb_to_3=pad_temb_to_3,
-        log_temb_shapes=log_temb_shapes,
+        log_step_index=log_step_index,
     )
     _register_managed_transformer(pipe, adapter)
     if getattr(pipe, "transformer", None) is not adapter:
@@ -520,12 +555,37 @@ def parse_args() -> argparse.Namespace:
         default="cuda:0",
         help="Execution device for ComponentsManager auto offload. Prefer a free GPU; cuda:0 may already be occupied.",
     )
+    parser.add_argument(
+        "--resolution",
+        choices=("demo", "480p", "720p", "720p_16x9"),
+        default=None,
+        help=(
+            "Named resolution preset. demo=608x352, 480p=832x480, "
+            "720p=1344x768 (official short-side 768), 720p_16x9=1280x704. "
+            "Overrides --height/--width when set."
+        ),
+    )
     parser.add_argument("--height", type=int, default=352)
     parser.add_argument("--width", type=int, default=608)
     parser.add_argument("--num-frames", type=int, default=124)
     parser.add_argument("--num-inference-steps", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--lora-path", type=Path, default=DEFAULT_LORA_PATH)
+    parser.add_argument(
+        "--lora-path",
+        type=Path,
+        default=DEFAULT_LORA_PATH,
+        help="Optional FL2V LoRA path. Missing path is skipped unless --require-lora is set.",
+    )
+    parser.add_argument(
+        "--require-lora",
+        action="store_true",
+        help="Fail if --lora-path does not exist (default: skip missing LoRA).",
+    )
+    parser.add_argument(
+        "--no-lora",
+        action="store_true",
+        help="Do not load LoRA even if --lora-path exists.",
+    )
     parser.add_argument("--lora-alpha", type=int, default=DEFAULT_LORA_ALPHA)
     parser.add_argument("--lora-scale", type=float, default=DEFAULT_LORA_SCALE)
     parser.add_argument(
@@ -545,15 +605,9 @@ def parse_args() -> argparse.Namespace:
         help="Do not load fixed-point calibration after wrapping.",
     )
     parser.add_argument(
-        "--pad-temb",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Pad unique-timestep temb to leading dim 3 with unused zero rows (default: true).",
-    )
-    parser.add_argument(
-        "--log-temb-shapes",
+        "--log-step-index",
         action="store_true",
-        help="Print the first few unique/padded temb shapes during denoise.",
+        help="Print the first few resolved AdaLN LUT step_index values during denoise.",
     )
     parser.add_argument(
         "--block-cpu-offload",
@@ -573,6 +627,8 @@ def main() -> None:
         raise ValueError("--image is required for fl2va")
     if args.workflow == "t2va" and args.image:
         raise ValueError("--image is only valid for fl2va")
+    if args.no_lora and args.require_lora:
+        raise ValueError("--no-lora and --require-lora are mutually exclusive")
 
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
@@ -583,10 +639,22 @@ def main() -> None:
     from diffusers.utils.export_utils import encode_video
 
     from xhmodel_merak.xh_other_model.models.minimax_h3.lora import load_minimax_h3_lora
+    from xhmodel_merak.xh_other_model.models.minimax_h3.resolution import get_resolution_preset
     from xhmodel_merak.xh_other_model.models.minimax_h3.transformer_minimax_h3 import (
         MiniMaxH3Transformer3DModel,
         load_fixed_point_calibration,
     )
+
+    if args.resolution is not None:
+        preset = get_resolution_preset(args.resolution)
+        args.height = preset.height
+        args.width = preset.width
+        print(
+            f"resolution preset={preset.name}: {preset.width}x{preset.height} "
+            f"frames={args.num_frames} Nv={preset.num_video_tokens} "
+            f"Na={preset.num_audio_tokens} S={preset.packed_sequence_length}",
+            flush=True,
+        )
 
     device = torch.device(args.device)
     if device.type == "cuda":
@@ -630,18 +698,30 @@ def main() -> None:
         subfolder="transformer",
         torch_dtype=torch.float16,
     )
-    load_minimax_h3_lora(
-        merak_transformer,
-        args.lora_path,
-        lora_alpha=args.lora_alpha,
-        lora_scale=args.lora_scale,
-    )
+    if args.no_lora:
+        print("LoRA disabled via --no-lora", flush=True)
+    else:
+        lora_path = Path(args.lora_path).expanduser()
+        if not lora_path.is_absolute():
+            lora_path = Path.cwd() / lora_path
+        if lora_path.is_file():
+            load_minimax_h3_lora(
+                merak_transformer,
+                lora_path,
+                lora_alpha=args.lora_alpha,
+                lora_scale=args.lora_scale,
+            )
+        elif args.require_lora:
+            raise FileNotFoundError(f"LoRA checkpoint does not exist: {lora_path}")
+        else:
+            print(f"LoRA not found, continuing without LoRA: {lora_path}", flush=True)
 
     adapter = install_transformer_wrapper(
         pipe,
         transformer=merak_transformer,
-        pad_temb_to_3=args.pad_temb,
-        log_temb_shapes=args.log_temb_shapes,
+        num_inference_steps=args.num_inference_steps,
+        log_step_index=args.log_step_index,
+        device=device,
     )
     # FixedPointMulAdd is created during wrap; apply calibration afterwards so the ops refresh.
     if not args.disable_fixed_point_calibration:
@@ -692,7 +772,7 @@ def main() -> None:
 
     print(
         "installed Merak transformer wrapper via export-ABI adapter: "
-        f"pad_temb_to_3={args.pad_temb} dtype={adapter.dtype}",
+        f"num_inference_steps={args.num_inference_steps} dtype={adapter.dtype}",
         flush=True,
     )
     print(

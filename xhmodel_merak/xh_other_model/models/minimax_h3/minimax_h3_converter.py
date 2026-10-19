@@ -20,6 +20,7 @@ from . import MiniMaxH3VisionEncoderWrapper
 from .audio_vae_decoder_wrapper import MiniMaxH3AudioVAEDecoderWrapper
 from .audio_vae_encoder_wrapper import MiniMaxH3AudioVAEEncoderWrapper
 from .lora import DEFAULT_LORA_ALPHA, DEFAULT_LORA_SCALE, load_minimax_h3_lora
+from .text_embedding_host import export_text_embedding_weights, export_vision_geometry_weights
 from .text_encoder_wrapper import (
     DEFAULT_INPUT_SEQUENCE_LENGTH,
     DEFAULT_TEXT_ENCODER_LAYER,
@@ -33,10 +34,13 @@ from .transformer_minimax_h3 import (
     load_fixed_point_calibration,
 )
 from .transformer_wrapper import (
+    MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS,
+    MINIMAX_H3_FIXED_TEMB_TIMESTEPS,
     MiniMaxH3TransformerWrapper,
     build_pack_gather_indices,
     build_packed_attention_mask,
     disable_transformer_block_cpu_offload,
+    install_fixed_adaln_lut,
     prepare_transformer_block_cpu_offload,
 )
 from .vae_decoder_wrapper import MiniMaxH3VAEDecoderWrapper, build_vae_decoder_rotary_emb
@@ -81,6 +85,7 @@ COMPONENT_GROUPS = (
     ("text_encoder", "vision_encoder"),
 )
 _TEXT_VISION_COMPONENTS = frozenset({"text_encoder", "vision_encoder"})
+_RMSNORM_FP16_REDUCE_WIDTH = 128
 
 
 def expand_minimax_h3_components(components: set[str] | tuple[str, ...] | list[str], export: bool = False) -> set[str]:
@@ -94,6 +99,42 @@ def expand_minimax_h3_components(components: set[str] | tuple[str, ...] | list[s
     return selected
 
 
+def _rmsnorm_reduce_width(module: torch.nn.Module) -> int | None:
+    """Return RMSNorm reduce width when the module is a 1-D RMSNorm."""
+    normalized_shape = getattr(module, "normalized_shape", None)
+    if normalized_shape is not None:
+        shape = tuple(normalized_shape)
+        if len(shape) == 1:
+            return int(shape[0])
+        return None
+    hidden_size = getattr(module, "hidden_size", None)
+    if hidden_size is not None:
+        return int(hidden_size)
+    weight = getattr(module, "weight", None)
+    if weight is not None and getattr(weight, "ndim", 0) == 1:
+        return int(weight.shape[0])
+    return None
+
+
+def apply_minimax_h3_rmsnorm_fp16_mode(wrapper: torch.nn.Module, quant_cfg: ConfigDict) -> ConfigDict:
+    """Force reduce-width-128 RMSNorm nodes into fp16 mode.
+
+    XH2a uses ``force_fp32=False``; XH3 uses ``intermediate_dtype='float16'``.
+    Only Q/K norms (width 128) are overridden; hidden/final norms stay default.
+    """
+    nodes_cfg = quant_cfg.setdefault("nodes_cfg", ConfigDict())
+    for name, module in wrapper.named_modules():
+        width = _rmsnorm_reduce_width(module)
+        if width != _RMSNORM_FP16_REDUCE_WIDTH:
+            continue
+        node_cfg = nodes_cfg.setdefault(name, ConfigDict())
+        node_cfg["force_fp32"] = False
+        node_cfg["intermediate_dtype"] = "float16"
+        # Dynamo may rewrite dotted names with underscores in nodes_cfg keys.
+        nodes_cfg.setdefault(name.replace(".", "_"), node_cfg)
+    return quant_cfg
+
+
 TENSOR_NAMES = {
     "vae_encoder": (("video",), ("latents",)),
     "vae_decoder": (("latents", "rotary_cos", "rotary_sin"), ("video",)),
@@ -104,14 +145,13 @@ TENSOR_NAMES = {
             "hidden_states",
             "audio_hidden_states",
             "encoder_hidden_states",
-            "temb",
+            "step_index",
             "timestep_indices",
             "adaln_indices",
             "rotary_cos",
             "rotary_sin",
             "video_indices",
             "audio_indices",
-            # text_indices are host-only (build pack_gather / packed mask); Dynamo drops unused args.
             "pack_gather_indices",
             "encoder_attention_mask",
             "packed_attention_mask",
@@ -185,6 +225,24 @@ class MiniMaxH3Converter:
             wrapped_module = getattr(getattr(wrapped_module, "model", None), "visual", None)
             if wrapped_module is None:
                 raise AttributeError("MiniMax-H3 text encoder is missing model.visual")
+        fixed_adaln_meta: dict[str, Any] | None = None
+        if component == "transformer":
+            # Bake AdaLN / final-norm constants before DynamicModule wrap so the graph
+            # consumes scalar step_index instead of live temb→adaln_proj.
+            h3_cfg = self.cfg.get("minimax_h3") or {}
+            tables = install_fixed_adaln_lut(
+                wrapped_module,
+                num_inference_steps=int(h3_cfg.get("num_inference_steps", MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS)),
+                fixed_temb_timesteps=int(h3_cfg.get("fixed_temb_timesteps", MINIMAX_H3_FIXED_TEMB_TIMESTEPS)),
+                device=self.device,
+                dtype=torch.float16,
+            )
+            fixed_adaln_meta = {
+                "num_inference_steps": int(tables["num_inference_steps"]),
+                "num_denoise_evals": int(tables["num_denoise_evals"]),
+                "fixed_temb_timesteps": int(tables["fixed_temb_timesteps"]),
+                "unique_timesteps": tables["unique_timesteps"],
+            }
         wrapper = wrapper_type(wrapped_module, **wrapper_kwargs).eval()
         if component == "vae_encoder":
             wrapper = wrapper.tile_encoder
@@ -195,7 +253,9 @@ class MiniMaxH3Converter:
             # Disable before Dynamo so `.to(cpu/cuda)` side effects are not captured.
             prepare_transformer_block_cpu_offload(wrapper.transformer, self.device)
         else:
-            wrapper = wrapper.to(self.device)
+            # ModularPipeline may leave VAE/audio weights in float32 even when load dtype is fp16.
+            # Export inputs are float16, so cast the wrapped module before the warm-up forward.
+            wrapper = wrapper.to(device=self.device, dtype=torch.float16)
         if component == "vision_encoder":
             inputs, vision_meta = self._build_vision_encoder_inputs(pipe, wrapper)
         else:
@@ -215,6 +275,8 @@ class MiniMaxH3Converter:
             quant_cfg.auto_release_unused_parameters = True
             quant_cfg.infer_shape = False
             disable_transformer_block_cpu_offload(wrapper.transformer)
+        # Q/K RMSNorm reduce width is 128 → fp16 mode (XH2a force_fp32=False / XH3 intermediate_dtype).
+        apply_minimax_h3_rmsnorm_fp16_mode(wrapper, quant_cfg)
 
         wrapper = wrapper.cpu()
         inputs = [tensor.cpu() for tensor in inputs]
@@ -234,9 +296,7 @@ class MiniMaxH3Converter:
             )
         if component == "transformer":
             wrapper_param_names = tuple(
-                name
-                for name in inspect.signature(MiniMaxH3TransformerWrapper.forward).parameters
-                if name != "self"
+                name for name in inspect.signature(MiniMaxH3TransformerWrapper.forward).parameters if name != "self"
             )
             if wrapper_param_names != tuple(input_names):
                 raise ValueError(
@@ -258,6 +318,20 @@ class MiniMaxH3Converter:
         }
         if vision_meta is not None:
             result.update(vision_meta)
+        if fixed_adaln_meta is not None:
+            result["fixed_adaln"] = fixed_adaln_meta
+        if component == "text_encoder":
+            language_model = getattr(
+                getattr(getattr(pipe, "text_encoder", None), "model", None), "language_model", None
+            )
+            if language_model is None:
+                raise AttributeError("MiniMax-H3 text encoder is missing model.language_model for host embeddings")
+            result.update(export_text_embedding_weights(language_model, output_dir))
+        elif component == "vision_encoder":
+            visual = getattr(getattr(getattr(pipe, "text_encoder", None), "model", None), "visual", None)
+            if visual is None:
+                raise AttributeError("MiniMax-H3 text encoder is missing model.visual for host geometry")
+            result.update(export_vision_geometry_weights(visual, output_dir))
         del wrapper, inputs, quanted
         self._release_memory()
         return result
@@ -357,15 +431,21 @@ class MiniMaxH3Converter:
         """Build gather/scatter indices that stay inside AdaLN / packing bounds.
 
         Export dummies previously used ``randint(0, 1024)`` for every int64 tensor. With
-        ``temb`` of shape ``[T, ...]`` the AdaLN table only has ``T * MINIMAX_H3_MODALITY_NUM``
-        rows, so values ``>= T * 3`` trigger CUDA ``index_select`` OOB asserts.
+        fixed AdaLN capacity ``T = MINIMAX_H3_FIXED_TEMB_TIMESTEPS`` the table only has
+        ``T * MINIMAX_H3_MODALITY_NUM`` rows, so values ``>= T * 3`` trigger CUDA
+        ``index_select`` OOB asserts. Graph input is scalar ``step_index`` (LUT row);
+        ``num_timesteps`` still bounds ``timestep_indices`` / ``adaln_indices``.
         """
-        temb_shape = cls._spec_shape(specs, "temb")
         adaln_shape = cls._spec_shape(specs, "adaln_indices")
         timestep_shape = cls._spec_shape(specs, "timestep_indices")
-        if len(temb_shape) < 1 or temb_shape[0] <= 0:
-            raise ValueError(f"`temb` must have a positive leading timestep count, got {list(temb_shape)}")
-        num_timesteps = int(temb_shape[0])
+        step_index_shape = None
+        try:
+            step_index_shape = cls._spec_shape(specs, "step_index")
+        except KeyError:
+            pass
+        if step_index_shape is not None and step_index_shape not in ((), (1,)):
+            raise ValueError(f"`step_index` must be a scalar or length-1 tensor, got shape {list(step_index_shape)}")
+        num_timesteps = int(MINIMAX_H3_FIXED_TEMB_TIMESTEPS)
         sequence_length = int(adaln_shape[0])
         if timestep_shape != adaln_shape:
             raise ValueError(
@@ -426,15 +506,18 @@ class MiniMaxH3Converter:
             audio_indices,
             sequence_length=sequence_length,
         )
-        return {
+        payload = {
             "timestep_indices": timestep_indices,
             "adaln_indices": adaln_indices,
             "video_indices": video_indices,
             "audio_indices": audio_indices,
-            # Host-only helper tensor for building packed_attention_mask; not in TENSOR_NAMES.
+            # Host-only helper tensor for building pack_gather / packed mask, not an export input.
             "text_indices": text_indices,
             "pack_gather_indices": pack_gather_indices,
         }
+        if step_index_shape is not None:
+            payload["step_index"] = torch.zeros(step_index_shape, device=device, dtype=torch.int64)
+        return payload
 
     def _build_inputs(self, component: str, pipe) -> tuple[torch.Tensor, ...]:
         if component == "text_encoder":
@@ -465,6 +548,16 @@ class MiniMaxH3Converter:
                     raise ValueError(f"Generated {name} shape {tuple(tensor.shape)} != configured {shape}")
                 if tensor.dtype != dtype:
                     tensor = tensor.to(dtype=dtype)
+                inputs.append(tensor)
+                built_by_name[name] = tensor
+            elif name == "step_index":
+                if shape not in ((), (1,)):
+                    raise ValueError(f"`step_index` must be scalar or length-1, got configured {shape}")
+                tensor = torch.zeros(shape, device=self.device, dtype=dtype)
+                inputs.append(tensor)
+                built_by_name[name] = tensor
+            elif name == "temb":
+                tensor = torch.randn(*shape, device=self.device, dtype=dtype, generator=generator)
                 inputs.append(tensor)
                 built_by_name[name] = tensor
             elif name == "encoder_attention_mask":

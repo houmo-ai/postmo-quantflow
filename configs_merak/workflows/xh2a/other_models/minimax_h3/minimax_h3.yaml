@@ -9,6 +9,8 @@ export:
     lora_path: data/models/minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors
     lora_alpha: 8
     lora_scale: 1.0
+    # AdaLN LUT bake schedule. Default 4 => 3 denoise evals (step_index 0..2).
+    num_inference_steps: 4
     # Applied when exporting transformer. Set null/empty to skip.
     fixed_point_calibration_path: examples_merak/aigc/minimaxh3/minimax_h3_fixed_point_calibration.json
     # Public unified-api builds export the complete registered component set.
@@ -35,7 +37,7 @@ export:
       audio_vae_encoder: w8a8_ssfp
       audio_vae_decoder: w8a8_ssfp
       vision_encoder: w8a8_ssfp
-      text_encoder: w8a8_ssfp
+      text_encoder: w4a8h0_ssfp
       transformer: w8a8_ssfp
     input_shapes:
       vae_encoder:
@@ -55,17 +57,20 @@ export:
       audio_vae_decoder:
         - {name: latents, shape: [2, 32, 207], dtype: float16}
       transformer:
-        # Host precomputes temb / adaln_indices / rotary_* / pack_gather_indices / packed_attention_mask;
-        # position_ids/token_tags/timestep/text_indices stay off-graph (text_indices only builds packing).
-        # Fixed text capacity is 512. Packed S = Nv + Na + 512 (current demo: 7942 + 414 + 512 = 8868).
+        # Host precomputes step_index / adaln_indices / rotary_* / pack_gather_indices / packed_attention_mask;
+        # temb is baked into AdaLN LUT before wrap; position_ids/token_tags/timestep/text_indices stay off-graph.
+        # Fixed text capacity is 512. Packed S = Nv + Na + 512.
+        # Default demo packing: 608x352 → Nv=7942, Na=414, S=8868.
+        # Resolution presets (via --resolution): 480p=832x480 → Nv=14820/S=15746;
+        # 720p=1344x768 → Nv=38304/S=39230; 720p_16x9=1280x704 → Nv=33440/S=34366.
         # encoder_attention_mask is additive key-padding bias for token_refiner (text-only).
         # pack_gather_indices remaps Concat([text,video,audio]) onto the packed layout via Gather.
         # packed_attention_mask is the host-expanded packed-sequence bias for main blocks.
         - {name: hidden_states, shape: [1, 7942, 96], dtype: float16}
         - {name: audio_hidden_states, shape: [1, 414, 32], dtype: float16}
         - {name: encoder_hidden_states, shape: [1, 512, 5120], dtype: float16}
-        # Fixed to max distinct noise levels per denoise step (video/audio/condition). Host pads shorter temb.
-        - {name: temb, shape: [3, 2688], dtype: float16}
+        # Scalar denoise-eval index into baked AdaLN / final-norm LUT (temb is host-only / pre-baked).
+        - {name: step_index, shape: [], dtype: int64}
         - {name: timestep_indices, shape: [8868], dtype: int64}
         - {name: adaln_indices, shape: [8868], dtype: int64}
         - {name: rotary_cos, shape: [8868, 96], dtype: float16}

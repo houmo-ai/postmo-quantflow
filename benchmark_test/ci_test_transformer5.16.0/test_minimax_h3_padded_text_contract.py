@@ -112,7 +112,7 @@ def test_converter_builds_additive_encoder_attention_mask():
                     {"name": "hidden_states", "shape": [1, 2, 2], "dtype": "float16"},
                     {"name": "audio_hidden_states", "shape": [1, 1, 4], "dtype": "float16"},
                     {"name": "encoder_hidden_states", "shape": [1, 5, 12], "dtype": "float16"},
-                    {"name": "temb", "shape": [1, 8], "dtype": "float16"},
+                    {"name": "step_index", "shape": [1], "dtype": "int64"},
                     {"name": "timestep_indices", "shape": [8], "dtype": "int64"},
                     {"name": "adaln_indices", "shape": [8], "dtype": "int64"},
                     {"name": "rotary_cos", "shape": [8, 6], "dtype": "float16"},

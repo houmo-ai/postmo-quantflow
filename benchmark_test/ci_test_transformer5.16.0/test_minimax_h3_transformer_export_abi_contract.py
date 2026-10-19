@@ -67,7 +67,7 @@ def test_tensor_names_use_host_precomputed_transformer_abi():
         "hidden_states",
         "audio_hidden_states",
         "encoder_hidden_states",
-        "temb",
+        "step_index",
         "timestep_indices",
         "adaln_indices",
         "rotary_cos",
@@ -158,7 +158,7 @@ def test_pad_minimax_h3_temb_to_fixed_export_capacity():
 
     assert tuple(padded.shape) == (MINIMAX_H3_FIXED_TEMB_TIMESTEPS, 8)
     torch.testing.assert_close(padded[:2], temb)
-    torch.testing.assert_close(padded[2:], torch.zeros(1, 8, dtype=torch.float16))
+    torch.testing.assert_close(padded[2:], torch.zeros(2, 8, dtype=torch.float16))
 
     model = _make_model()
     sequence_length = 6
@@ -179,11 +179,11 @@ def test_pad_minimax_h3_temb_to_fixed_export_capacity():
     assert int(adaln_indices.max()) < timestep.numel() * MINIMAX_H3_MODALITY_NUM
 
     with pytest.raises(ValueError, match="exceeds the fixed export capacity"):
-        pad_minimax_h3_temb(torch.randn(4, 8), MINIMAX_H3_FIXED_TEMB_TIMESTEPS)
+        pad_minimax_h3_temb(torch.randn(5, 8), MINIMAX_H3_FIXED_TEMB_TIMESTEPS)
 
 
 def test_export_wrapper_consumes_precomputed_abi_and_requires_mask():
-    # Wrapper itself does not cast dtypes; host precompute aligns temb to model.dtype.
+    # Wrapper itself does not cast dtypes; host precompute aligns step_index inputs to model.dtype.
     model = _make_model().half()
     model.time_proj = model.time_proj.float()
     model.time_embedder = model.time_embedder.float()
@@ -223,7 +223,9 @@ def test_export_wrapper_consumes_precomputed_abi_and_requires_mask():
         token_tags=token_tags,
         position_ids=position_ids,
     )
-    # Wrapper does not cast; caller/host must feed body-aligned conditioning tensors.
+    # Wrapper still accepts the legacy 2-D temb table for compatibility, but the exported
+    # ABI now uses scalar step_index as the denoise selector.
+    step_index = torch.tensor(int(timestep_indices.min().item()), dtype=torch.int32)
     temb = temb.to(dtype=torch.float16)
     rotary_cos = rotary_cos.to(dtype=torch.float16)
     rotary_sin = rotary_sin.to(dtype=torch.float16)
@@ -233,7 +235,7 @@ def test_export_wrapper_consumes_precomputed_abi_and_requires_mask():
             video,
             audio,
             text,
-            temb,
+            step_index,
             timestep_indices,
             adaln_indices,
             rotary_cos,
@@ -253,7 +255,7 @@ def test_export_wrapper_consumes_precomputed_abi_and_requires_mask():
             video,
             audio,
             text,
-            temb,
+            step_index,
             timestep_indices,
             adaln_indices,
             rotary_cos,
@@ -337,12 +339,13 @@ def test_hmonnx_transformer_host_precomputes_and_rejects_missing_mask():
         token_tags=token_tags,
         position_ids=position_ids,
     )
+    step_index = torch.tensor(int(timestep_indices.min().item()), dtype=torch.int32)
     assert tuple(temb.shape) == (MINIMAX_H3_FIXED_TEMB_TIMESTEPS, model.config.time_embed_dim)
     expected_shapes = (
         tuple(video.shape),
         tuple(audio.shape),
         tuple(text.shape),
-        tuple(temb.shape),
+        tuple(step_index.shape),
         tuple(timestep_indices.shape),
         tuple(adaln_indices.shape),
         tuple(rotary_cos.shape),
@@ -381,17 +384,12 @@ def test_hmonnx_transformer_host_precomputes_and_rejects_missing_mask():
 
     assert runtime.inputs is not None
     assert len(runtime.inputs) == len(TRANSFORMER_INPUT_NAMES)
-    # Adapter aligns temb/rotary to model/body dtype; graph indices stay int32.
-    # Shorter unique-timestep vectors are zero-padded to the fixed export capacity.
-    expected_temb = temb.to(dtype=model.dtype)
+    # Adapter aligns step_index/rotary to model/body dtype; graph indices stay int32.
+    # Shorter unique-timestep vectors are zero-padded in the host precompute table.
     expected_rotary_cos = rotary_cos.to(dtype=model.dtype)
     expected_rotary_sin = rotary_sin.to(dtype=model.dtype)
-    torch.testing.assert_close(runtime.inputs[3], expected_temb)
-    assert tuple(runtime.inputs[3].shape) == (MINIMAX_H3_FIXED_TEMB_TIMESTEPS, model.config.time_embed_dim)
-    torch.testing.assert_close(
-        runtime.inputs[3][timestep.numel() :],
-        torch.zeros_like(runtime.inputs[3][timestep.numel() :]),
-    )
+    torch.testing.assert_close(runtime.inputs[3], step_index.to(torch.int32))
+    assert tuple(runtime.inputs[3].shape) == tuple(step_index.shape)
     torch.testing.assert_close(runtime.inputs[5], adaln_indices.to(torch.int32))
     torch.testing.assert_close(runtime.inputs[6], expected_rotary_cos)
     torch.testing.assert_close(runtime.inputs[7], expected_rotary_sin)
@@ -476,7 +474,7 @@ def test_converter_builds_in_range_adaln_and_packing_indices():
                     {"name": "hidden_states", "shape": [1, video_len, 2], "dtype": "float16"},
                     {"name": "audio_hidden_states", "shape": [1, audio_len, 4], "dtype": "float16"},
                     {"name": "encoder_hidden_states", "shape": [1, text_len, 12], "dtype": "float16"},
-                    {"name": "temb", "shape": [num_timesteps, 8], "dtype": "float16"},
+                    {"name": "step_index", "shape": [1], "dtype": "int64"},
                     {"name": "timestep_indices", "shape": [sequence_length], "dtype": "int64"},
                     {"name": "adaln_indices", "shape": [sequence_length], "dtype": "int64"},
                     {"name": "rotary_cos", "shape": [sequence_length, 6], "dtype": "float16"},

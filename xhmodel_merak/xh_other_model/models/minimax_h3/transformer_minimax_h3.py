@@ -45,19 +45,15 @@ MINIMAX_H3_FP16_MAX = 65504.0
 
 
 def _saturate_fp16(hidden_states: torch.Tensor) -> torch.Tensor:
+    # Kept for optional debug only. Binary ops already saturate by default, so
+    # callers should not rely on an extra clip[-65504, 65504] after Add/Mul.
     if hidden_states.dtype != torch.float16:
         return hidden_states
     nan_count = torch.isnan(hidden_states).sum().item()
     overflow_count = (hidden_states.abs() > MINIMAX_H3_FP16_MAX).sum().item()
     if nan_count or overflow_count:
         print(f"MiniMax-H3 fp16 saturation: nan_count={nan_count} overflow_count={overflow_count}")
-    # hidden_states = torch.nan_to_num(
-    #     hidden_states,
-    #     nan=0.0,
-    #     posinf=MINIMAX_H3_FP16_MAX,
-    #     neginf=-MINIMAX_H3_FP16_MAX,
-    # )
-    return hidden_states.clamp(min=-MINIMAX_H3_FP16_MAX, max=MINIMAX_H3_FP16_MAX)
+    return hidden_states
 
 
 def _bf16_mul_add(lhs: torch.Tensor, rhs: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
@@ -69,14 +65,30 @@ def _bf16_mul_add(lhs: torch.Tensor, rhs: torch.Tensor, bias: torch.Tensor | Non
 
 def _fp16_mul_add(lhs: torch.Tensor, rhs: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
     output = lhs * rhs
-    output = _saturate_fp16(output)
     if bias is not None:
         output = output + bias
-    return _saturate_fp16(output)
+    return output
 
 
 def _fp16_add(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
-    return _saturate_fp16(lhs + rhs)
+    return lhs + rhs
+
+
+def _rms_norm_fp16(
+    hidden_states: torch.Tensor,
+    norm: nn.RMSNorm,
+) -> torch.Tensor:
+    """Run RMSNorm in fp16 intermediate mode (used for reduce-width 128 Q/K norms)."""
+    if hidden_states.dtype not in (torch.bfloat16, torch.float16):
+        return norm(hidden_states)
+
+    normalized = torch.nn.functional.rms_norm(
+        hidden_states.to(torch.float16),
+        norm.normalized_shape,
+        weight=norm.weight.to(torch.float16),
+        eps=norm.eps,
+    )
+    return normalized.to(dtype=hidden_states.dtype)
 
 
 @dataclass
@@ -484,8 +496,9 @@ class MiniMaxH3AttnProcessor:
         key = key.unflatten(-1, (attn.heads, -1))
         value = value.unflatten(-1, (attn.heads, -1))
 
-        query = attn.norm_q(query)
-        key = attn.norm_k(key)
+        # Q/K RMSNorm reduce width is attention_head_dim (default 128) → fp16 mode.
+        query = _rms_norm_fp16(query, attn.norm_q)
+        key = _rms_norm_fp16(key, attn.norm_k)
 
         if rotary_emb is not None:
             query = _apply_rotary_emb(query, *rotary_emb)
@@ -773,6 +786,9 @@ class MiniMaxH3TransformerBlock(nn.Module):
 
         return hidden_states
 
+    def _rms_norm_fp16(self, hidden_states: torch.Tensor, norm: nn.RMSNorm) -> torch.Tensor:
+        return _rms_norm_fp16(hidden_states, norm)
+
     def _fixed_mul_add(
         self,
         point_index: int,
@@ -812,22 +828,6 @@ class MiniMaxH3TransformerBlock(nn.Module):
             config=self.fixed_point_configs[point_index],
             input_scale=input_scale,
         )
-
-    @staticmethod
-    def _rms_norm_fp16(
-        hidden_states: torch.Tensor,
-        norm: nn.RMSNorm,
-    ) -> torch.Tensor:
-        if hidden_states.dtype not in (torch.bfloat16, torch.float16):
-            return norm(hidden_states)
-
-        normalized = torch.nn.functional.rms_norm(
-            hidden_states.to(torch.float16),
-            norm.normalized_shape,
-            weight=norm.weight.to(torch.float16),
-            eps=norm.eps,
-        )
-        return normalized.to(dtype=hidden_states.dtype)
 
 
 class MiniMaxH3Transformer3DModel(ModelMixin, ConfigMixin, AttentionMixin, PeftAdapterMixin, CacheMixin):

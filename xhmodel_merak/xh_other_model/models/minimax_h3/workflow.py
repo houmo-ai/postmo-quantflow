@@ -121,6 +121,9 @@ _ONNX_TO_TORCH_DTYPE = {
     onnx.TensorProto.FLOAT16: torch.float16,
     onnx.TensorProto.BFLOAT16: torch.bfloat16,
     onnx.TensorProto.INT64: torch.int64,
+    onnx.TensorProto.INT32: torch.int32,
+    onnx.TensorProto.INT8: torch.int8,
+    onnx.TensorProto.BOOL: torch.bool,
 }
 
 

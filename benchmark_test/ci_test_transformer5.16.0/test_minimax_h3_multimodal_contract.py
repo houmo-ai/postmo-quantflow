@@ -409,7 +409,7 @@ def _write_transformer_text_vision_export(tmp_path: Path) -> Path:
             "hidden_states",
             "audio_hidden_states",
             "encoder_hidden_states",
-            "temb",
+            "step_index",
             "timestep_indices",
             "adaln_indices",
             "rotary_cos",
@@ -599,3 +599,115 @@ def test_minimax_h3_workflow_merges_existing_export_meta(tmp_path, monkeypatch):
     assert meta["components"]["text_encoder"]["hmonnx_file"].endswith(
         "text_encoder/minimax_h3_text_encoder-XH2a-w8a8_ssfp.onnx"
     )
+
+
+def _tiny_qwen3vl_config():
+    from transformers import Qwen3VLConfig
+
+    return Qwen3VLConfig(
+        text_config={
+            "vocab_size": 32,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_hidden_layers": 2,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "head_dim": 4,
+            "max_position_embeddings": 64,
+            "rope_theta": 10000.0,
+        },
+        vision_config={
+            "depth": 2,
+            "hidden_size": 16,
+            "intermediate_size": 32,
+            "num_heads": 4,
+            "in_channels": 3,
+            "patch_size": 2,
+            "temporal_patch_size": 2,
+            "spatial_merge_size": 2,
+            "out_hidden_size": 12,
+            "num_position_embeddings": 16,
+            "deepstack_visual_indexes": [0, 1],
+        },
+    )
+
+
+def test_export_and_build_hmonnx_text_encoder_host(tmp_path):
+    from safetensors.torch import load_file
+
+    from xhmodel_merak.xh_other_model.models.minimax_h3.text_embedding_host import (
+        build_hmonnx_text_encoder_host,
+        export_text_embedding_weights,
+        export_vision_geometry_weights,
+        install_hmonnx_text_encoder_host,
+        text_embedding_path,
+        vision_geometry_path,
+    )
+
+    model_dir = tmp_path / "model"
+    text_encoder_dir = model_dir / "text_encoder"
+    text_encoder_dir.mkdir(parents=True)
+    _tiny_qwen3vl_config().save_pretrained(text_encoder_dir)
+
+    export_dir = tmp_path / "export"
+    language_model = SimpleNamespace(embed_tokens=nn.Embedding(32, 16))
+    visual = SimpleNamespace(pos_embed=nn.Embedding(16, 16))
+    with torch.no_grad():
+        language_model.embed_tokens.weight.copy_(torch.arange(32 * 16, dtype=torch.float32).reshape(32, 16))
+        visual.pos_embed.weight.copy_(torch.arange(16 * 16, dtype=torch.float32).reshape(16, 16) + 1)
+
+    text_meta = export_text_embedding_weights(language_model, export_dir)
+    vision_meta = export_vision_geometry_weights(visual, export_dir)
+    assert text_meta["text_embeddings_file"] == "text_encoder/text_embeddings.safetensors"
+    assert vision_meta["vision_geometry_file"] == "vision_encoder/vision_geometry.safetensors"
+    assert text_embedding_path(export_dir).is_file()
+    assert vision_geometry_path(export_dir).is_file()
+    assert load_file(str(text_embedding_path(export_dir)))["embed_tokens.weight"].shape == (32, 16)
+
+    host = build_hmonnx_text_encoder_host(model_dir, export_dir, dtype=torch.float16)
+    assert len(host.model.language_model.layers) == 0
+    assert len(host.model.visual.blocks) == 0
+    assert host.model.language_model.embed_tokens.weight.dtype == torch.float16
+    assert host.model.visual.pos_embed.weight.dtype == torch.float16
+    torch.testing.assert_close(
+        host.model.language_model.embed_tokens.weight.float(),
+        language_model.embed_tokens.weight.float(),
+    )
+    torch.testing.assert_close(
+        host.model.visual.pos_embed.weight.float(),
+        visual.pos_embed.weight.float(),
+    )
+    embeds = host.get_input_embeddings()(torch.tensor([[1, 2, 3]]))
+    assert embeds.shape == (1, 3, 16)
+    assert embeds.dtype == torch.float16
+
+    pipe = SimpleNamespace(_modules={"text_encoder": None})
+    installed = install_hmonnx_text_encoder_host(pipe, model_dir, export_dir, dtype=torch.float16)
+    assert pipe.text_encoder is installed
+    assert pipe._modules["text_encoder"] is installed
+
+
+def test_resolve_demo_pretrained_component_names_skips_text_encoder_for_light_host():
+    from examples_merak.aigc.minimaxh3.hmonnx_demo import resolve_demo_pretrained_component_names
+
+    pipe = SimpleNamespace(
+        _component_specs={
+            "image_processor": object(),
+            "text_encoder": object(),
+            "tokenizer": object(),
+            "processor": object(),
+            "vae": object(),
+            "scheduler": object(),
+            "audio_scheduler": object(),
+            "transformer": object(),
+            "video_processor": object(),
+            "audio_vae": object(),
+        }
+    )
+    light = resolve_demo_pretrained_component_names(pipe, use_light_text_host=True)
+    full = resolve_demo_pretrained_component_names(pipe, use_light_text_host=False)
+    assert "text_encoder" not in light
+    assert light[0] == "image_processor"
+    assert "tokenizer" in light and "processor" in light
+    assert full[1] == "text_encoder"
+    assert "text_encoder" in full

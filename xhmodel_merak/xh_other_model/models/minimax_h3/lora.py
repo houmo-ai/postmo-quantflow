@@ -87,6 +87,18 @@ def _validate_lora_state_dict(state_dict: Mapping[str, torch.Tensor], path: Path
     return ranks.pop()
 
 
+def _resolve_linear_module(transformer: torch.nn.Module, module_name: str) -> torch.nn.Linear:
+    module: torch.nn.Module = transformer
+    for part in module_name.split("."):
+        if part.isdigit():
+            module = module[int(part)]  # type: ignore[index]
+        else:
+            module = getattr(module, part)
+    if not isinstance(module, torch.nn.Linear):
+        raise TypeError(f"LoRA target {module_name!r} is {type(module).__name__}, expected nn.Linear.")
+    return module
+
+
 def load_minimax_h3_lora(
     transformer: torch.nn.Module,
     lora_path: str | Path,
@@ -94,50 +106,40 @@ def load_minimax_h3_lora(
     lora_alpha: int = DEFAULT_LORA_ALPHA,
     lora_scale: float = DEFAULT_LORA_SCALE,
 ) -> None:
-    from peft import LoraConfig
+    """Fuse a pure PEFT-format LoRA into transformer Linear weights.
+
+    Avoids importing ``peft`` so export works even when peft/gptqmodel versions conflict.
+    Effective update matches the previous peft path:
+    ``W <- W + (lora_scale * lora_alpha / rank) * (B @ A)``.
+    """
 
     path = Path(lora_path).expanduser().resolve()
     state_dict = _load_lora_state_dict(path)
     rank = _validate_lora_state_dict(state_dict, path)
-    transformer.add_adapter(
-        LoraConfig(
-            r=rank,
-            lora_alpha=lora_alpha,
-            init_lora_weights=False,
-            target_modules=list(LORA_TARGET_MODULES),
-            use_rslora=False,
-        )
-    )
+    effective_scale = float(lora_scale) * float(lora_alpha) / float(rank)
 
-    adapter_parameters = {
-        name: parameter
-        for name, parameter in transformer.named_parameters()
-        if ".lora_A." in name or ".lora_B." in name
-    }
-    missing = sorted(adapter_parameters.keys() - state_dict.keys())
-    unexpected = sorted(state_dict.keys() - adapter_parameters.keys())
-    shape_mismatches = [
-        (name, tuple(state_dict[name].shape), tuple(parameter.shape))
-        for name, parameter in adapter_parameters.items()
-        if name in state_dict and state_dict[name].shape != parameter.shape
-    ]
-    if missing or unexpected or shape_mismatches:
-        raise ValueError(
-            "LoRA checkpoint is incompatible with the loaded H3 transformer: "
-            f"missing={missing[:3]}, unexpected={unexpected[:3]}, shape_mismatches={shape_mismatches[:3]}."
-        )
+    module_names = sorted({key[: -len(_LORA_A_SUFFIX)] for key in state_dict if key.endswith(_LORA_A_SUFFIX)})
+    fused_modules = 0
+    with torch.no_grad():
+        for module_name in module_names:
+            linear = _resolve_linear_module(transformer, module_name)
+            lora_a = state_dict[f"{module_name}{_LORA_A_SUFFIX}"].to(
+                device=linear.weight.device,
+                dtype=torch.float32,
+            )
+            lora_b = state_dict[f"{module_name}{_LORA_B_SUFFIX}"].to(
+                device=linear.weight.device,
+                dtype=torch.float32,
+            )
+            delta = torch.matmul(lora_b, lora_a)
+            if tuple(delta.shape) != tuple(linear.weight.shape):
+                raise ValueError(
+                    f"LoRA delta shape mismatch for {module_name}: "
+                    f"delta{tuple(delta.shape)} vs weight{tuple(linear.weight.shape)}."
+                )
+            linear.weight.add_(delta, alpha=effective_scale)
+            fused_modules += 1
 
-    incompatible = transformer.load_state_dict(state_dict, strict=False)
-    missing_lora = [key for key in incompatible.missing_keys if ".lora_A." in key or ".lora_B." in key]
-    if incompatible.unexpected_keys or missing_lora:
-        raise RuntimeError(
-            "LoRA loading did not consume the expected adapter tensors: "
-            f"missing={missing_lora[:3]}, unexpected={incompatible.unexpected_keys[:3]}."
-        )
-
-    transformer.set_adapters("default", weights=lora_scale)
-    transformer.fuse_lora(lora_scale=1.0, safe_fusing=True, adapter_names=["default"])
-    transformer.unload_lora()
     transformer.requires_grad_(False)
     transformer.eval()
     tensor_count = len(state_dict)
@@ -146,8 +148,9 @@ def load_minimax_h3_lora(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     print(
-        f"Loaded LoRA: path={path} tensors={tensor_count} rank={rank} alpha={lora_alpha} "
-        f"scale={lora_scale} effective_scale={lora_scale * lora_alpha / rank:.8g} fused=True",
+        f"Loaded LoRA: path={path} tensors={tensor_count} modules={fused_modules} "
+        f"rank={rank} alpha={lora_alpha} scale={lora_scale} "
+        f"effective_scale={effective_scale:.8g} fused=True peft_free=True",
         flush=True,
     )
 

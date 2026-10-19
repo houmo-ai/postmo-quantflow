@@ -1,4 +1,5 @@
 import sys
+from collections.abc import Sequence
 
 import torch
 import torch.nn as nn
@@ -22,10 +23,23 @@ from .transformer_minimax_h3 import (
     MiniMaxH3TransformerOutput,
 )
 
-# Denoise plans expose at most three distinct noise levels per step
-# (video_t, audio_t, and a condition/reference level such as 0.999/1.0).
-# Export/HMONNX freezes temb to this leading dim; unused pad rows are never indexed.
-MINIMAX_H3_FIXED_TEMB_TIMESTEPS = 3
+# fl2va denoise plans expose up to four distinct noise levels per step
+# (video_t, audio_t, condition_video≈0.999, condition_audio=1.0) once video≠audio.
+# Export/HMONNX freezes AdaLN tables to this leading unique-timestep capacity;
+# unused pad rows are never indexed.
+MINIMAX_H3_FIXED_TEMB_TIMESTEPS = 4
+MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS = 4
+MINIMAX_H3_DEFAULT_VIDEO_SHIFT = 12.0
+MINIMAX_H3_DEFAULT_AUDIO_SHIFT = 3.0
+MINIMAX_H3_DEFAULT_KEYFRAME_NOISE_AUG = 0.999
+_MINIMAX_FIXED_ADALN_NAMES = (
+    "minimax_fixed_shift_msa",
+    "minimax_fixed_scale_msa",
+    "minimax_fixed_gate_msa",
+    "minimax_fixed_shift_mlp",
+    "minimax_fixed_scale_mlp",
+    "minimax_fixed_gate_mlp",
+)
 
 
 def pad_minimax_h3_temb(
@@ -94,6 +108,247 @@ def build_minimax_h3_transformer_conditioning(
     adaln_indices = timestep_indices * MINIMAX_H3_MODALITY_NUM + token_tags
     rotary_cos, rotary_sin = transformer.rope(position_ids)
     return temb.half(), adaln_indices.to(torch.int32), rotary_cos.half(), rotary_sin.half()
+
+
+def _resolve_minimax_h3_scheduler_cls():
+    try:
+        from diffusers.schedulers import MiniMaxH3Scheduler
+    except Exception as exc:  # pragma: no cover - environment-dependent import path
+        raise ImportError(
+            "MiniMaxH3Scheduler is required to bake AdaLN LUTs. Install/upgrade the local diffusers MiniMax-H3 package."
+        ) from exc
+    return MiniMaxH3Scheduler
+
+
+def _resolve_minimax_h3_row_timestep_builder():
+    try:
+        from diffusers.modular_pipelines.minimax_h3.before_denoise import MiniMaxH3SetTimestepsStep
+    except Exception as exc:  # pragma: no cover - environment-dependent import path
+        raise ImportError("MiniMaxH3SetTimestepsStep.build_row_timesteps is required to bake AdaLN LUTs.") from exc
+    return MiniMaxH3SetTimestepsStep.build_row_timesteps
+
+
+def build_minimax_h3_denoise_unique_timesteps(
+    *,
+    num_inference_steps: int = MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS,
+    video_shift: float = MINIMAX_H3_DEFAULT_VIDEO_SHIFT,
+    audio_shift: float = MINIMAX_H3_DEFAULT_AUDIO_SHIFT,
+    keyframe_noise_aug: float = MINIMAX_H3_DEFAULT_KEYFRAME_NOISE_AUG,
+    device: torch.device | str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> list[torch.Tensor]:
+    """Build unique-timestep vectors for every denoise evaluation step.
+
+    Matches the fl2va host schedule: video ``shift=12``, audio ``shift=3``,
+    ``condition_video=max(t, keyframe_noise_aug)``, ``condition_audio=1.0``.
+    """
+    if int(num_inference_steps) < 2:
+        raise ValueError(f"`num_inference_steps` must be >= 2, got {num_inference_steps}.")
+    scheduler_cls = _resolve_minimax_h3_scheduler_cls()
+    build_row_timesteps = _resolve_minimax_h3_row_timestep_builder()
+    video_scheduler = scheduler_cls(shift=float(video_shift))
+    audio_scheduler = scheduler_cls(shift=float(audio_shift))
+    video_scheduler.set_timesteps(int(num_inference_steps))
+    audio_scheduler.set_timesteps(int(num_inference_steps))
+    video_ts = [float(t) for t in video_scheduler.timesteps]
+    audio_ts = [float(t) for t in audio_scheduler.timesteps]
+    if len(video_ts) != len(audio_ts):
+        raise RuntimeError(
+            f"Video/audio schedules disagree: video={len(video_ts)} audio={len(audio_ts)} "
+            f"for num_inference_steps={num_inference_steps}."
+        )
+
+    # Minimal packed layout that still exercises all four noise levels:
+    # video=[condition, generated], audio=[condition, generated], plus one text token.
+    device = torch.device(device)
+    video_indices = torch.tensor([0, 1], device=device, dtype=torch.long)
+    audio_indices = torch.tensor([2, 3], device=device, dtype=torch.long)
+    unique_list: list[torch.Tensor] = []
+    for video_t, audio_t in zip(video_ts, audio_ts):
+        unique, _ = build_row_timesteps(
+            video_indices=video_indices,
+            audio_indices=audio_indices,
+            num_condition_video_rows=1,
+            num_condition_audio_rows=1,
+            num_text_tokens=1,
+            video_timestep=float(video_t),
+            audio_timestep=float(audio_t),
+            condition_video_timestep=max(float(video_t), float(keyframe_noise_aug)),
+            condition_audio_timestep=1.0,
+        )
+        unique_list.append(unique.to(device=device, dtype=dtype).contiguous())
+    return unique_list
+
+
+def build_minimax_h3_adaln_lut(
+    transformer: nn.Module,
+    *,
+    num_inference_steps: int = MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS,
+    video_shift: float = MINIMAX_H3_DEFAULT_VIDEO_SHIFT,
+    audio_shift: float = MINIMAX_H3_DEFAULT_AUDIO_SHIFT,
+    keyframe_noise_aug: float = MINIMAX_H3_DEFAULT_KEYFRAME_NOISE_AUG,
+    fixed_temb_timesteps: int = MINIMAX_H3_FIXED_TEMB_TIMESTEPS,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float16,
+) -> dict[str, object]:
+    """Precompute AdaLN / final-norm tables indexed by denoise step and block id."""
+    if not hasattr(transformer, "transformer_blocks"):
+        raise TypeError("Expected a MiniMax-H3 transformer with `transformer_blocks`.")
+    if int(fixed_temb_timesteps) < 1:
+        raise ValueError(f"`fixed_temb_timesteps` must be >= 1, got {fixed_temb_timesteps}.")
+
+    compute_device = torch.device(device) if device is not None else next(transformer.parameters()).device
+    unique_timesteps = build_minimax_h3_denoise_unique_timesteps(
+        num_inference_steps=num_inference_steps,
+        video_shift=video_shift,
+        audio_shift=audio_shift,
+        keyframe_noise_aug=keyframe_noise_aug,
+        device=compute_device,
+        dtype=torch.float32,
+    )
+    num_steps = len(unique_timesteps)
+    num_blocks = len(transformer.transformer_blocks)
+    first_adaln = transformer.transformer_blocks[0].adaln_proj
+    if hasattr(first_adaln, "linear"):
+        hidden_size = int(first_adaln.linear.out_features) // (6 * MINIMAX_H3_MODALITY_NUM)
+        time_embed_dim = int(first_adaln.linear.in_features)
+    else:
+        hidden_size = int(first_adaln.out_features) // (6 * MINIMAX_H3_MODALITY_NUM)
+        time_embed_dim = int(first_adaln.in_features)
+    adaln_rows = int(fixed_temb_timesteps) * MINIMAX_H3_MODALITY_NUM
+
+    # Ensure host-side time / final-norm modules live on the compute device for the bake pass.
+    # Block adaln_proj weights may remain on CPU/offload; we move temb to each weight device.
+    transformer.time_proj = transformer.time_proj.float().to(compute_device)
+    transformer.time_embedder = transformer.time_embedder.float().to(compute_device)
+    transformer.norm_out = transformer.norm_out.float().to(compute_device)
+
+    shift_msa = torch.empty((num_steps, num_blocks, adaln_rows, hidden_size), dtype=dtype, device="cpu")
+    scale_msa = torch.empty_like(shift_msa)
+    gate_msa = torch.empty_like(shift_msa)
+    shift_mlp = torch.empty_like(shift_msa)
+    scale_mlp = torch.empty_like(shift_msa)
+    gate_mlp = torch.empty_like(shift_msa)
+    final_shift = torch.empty((num_steps, fixed_temb_timesteps, hidden_size), dtype=dtype, device="cpu")
+    final_scale = torch.empty_like(final_shift)
+
+    was_training = transformer.training
+    transformer.eval()
+    with torch.no_grad():
+        for step_idx, unique_t in enumerate(unique_timesteps):
+            temb = transformer.time_embedder(transformer.time_proj(unique_t.to(compute_device)))
+            temb = pad_minimax_h3_temb(temb, fixed_temb_timesteps)
+
+            for block_idx, block in enumerate(transformer.transformer_blocks):
+                adaln_proj = block.adaln_proj
+                # Native MiniMaxH3AdaLayerNormModulation already applies SiLU + Linear + chunk.
+                weight = adaln_proj.linear.weight if hasattr(adaln_proj, "linear") else adaln_proj.weight
+                mods = adaln_proj(temb.to(device=weight.device, dtype=torch.float32))
+                packed = [m.to(device="cpu", dtype=dtype).contiguous() for m in mods]
+                if packed[0].shape != (adaln_rows, hidden_size):
+                    raise RuntimeError(
+                        f"Unexpected AdaLN shape at step={step_idx} block={block_idx}: "
+                        f"{tuple(packed[0].shape)} vs {(adaln_rows, hidden_size)}."
+                    )
+                shift_msa[step_idx, block_idx].copy_(packed[0])
+                scale_msa[step_idx, block_idx].copy_(packed[1])
+                gate_msa[step_idx, block_idx].copy_(packed[2])
+                shift_mlp[step_idx, block_idx].copy_(packed[3])
+                scale_mlp[step_idx, block_idx].copy_(packed[4])
+                gate_mlp[step_idx, block_idx].copy_(packed[5])
+
+            # Final AdaLN-zero uses unique-timestep rows (not modality expansion).
+            norm_out = transformer.norm_out
+            emb = norm_out.linear(
+                F.silu(temb).to(device=norm_out.linear.weight.device, dtype=norm_out.linear.weight.dtype)
+            )
+            shift, scale = emb.chunk(2, dim=1)
+            final_shift[step_idx].copy_(shift.to(device="cpu", dtype=dtype).contiguous())
+            final_scale[step_idx].copy_(scale.to(device="cpu", dtype=dtype).contiguous())
+    if was_training:
+        transformer.train()
+
+    return {
+        "num_inference_steps": int(num_inference_steps),
+        "num_denoise_evals": int(num_steps),
+        "fixed_temb_timesteps": int(fixed_temb_timesteps),
+        "hidden_size": int(hidden_size),
+        "time_embed_dim": int(time_embed_dim),
+        "unique_timesteps": [t.detach().cpu().tolist() for t in unique_timesteps],
+        "shift_msa": shift_msa,
+        "scale_msa": scale_msa,
+        "gate_msa": gate_msa,
+        "shift_mlp": shift_mlp,
+        "scale_mlp": scale_mlp,
+        "gate_mlp": gate_mlp,
+        "final_shift": final_shift,
+        "final_scale": final_scale,
+    }
+
+
+def install_fixed_adaln_lut(
+    transformer: nn.Module,
+    *,
+    num_inference_steps: int = MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS,
+    video_shift: float = MINIMAX_H3_DEFAULT_VIDEO_SHIFT,
+    audio_shift: float = MINIMAX_H3_DEFAULT_AUDIO_SHIFT,
+    keyframe_noise_aug: float = MINIMAX_H3_DEFAULT_KEYFRAME_NOISE_AUG,
+    fixed_temb_timesteps: int = MINIMAX_H3_FIXED_TEMB_TIMESTEPS,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype = torch.float16,
+    lut: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Bake AdaLN / final-norm constants and switch the transformer to step_index ABI.
+
+    Must be called on the native transformer **before** :func:`wrap_transformer`.
+    """
+    tables = lut or build_minimax_h3_adaln_lut(
+        transformer,
+        num_inference_steps=num_inference_steps,
+        video_shift=video_shift,
+        audio_shift=audio_shift,
+        keyframe_noise_aug=keyframe_noise_aug,
+        fixed_temb_timesteps=fixed_temb_timesteps,
+        device=device,
+        dtype=dtype,
+    )
+    target_device = torch.device(device) if device is not None else next(transformer.parameters()).device
+    num_steps = int(tables["num_denoise_evals"])
+    num_blocks = len(transformer.transformer_blocks)
+    if num_blocks != int(tables["shift_msa"].shape[1]):
+        raise ValueError(f"LUT block count {tables['shift_msa'].shape[1]} != transformer blocks {num_blocks}.")
+
+    for block_idx, block in enumerate(transformer.transformer_blocks):
+        for name, key in zip(
+            _MINIMAX_FIXED_ADALN_NAMES,
+            ("shift_msa", "scale_msa", "gate_msa", "shift_mlp", "scale_mlp", "gate_mlp"),
+            strict=True,
+        ):
+            tensor = tables[key][:, block_idx].to(device=target_device, dtype=dtype).contiguous()
+            block.register_buffer(name, tensor, persistent=False)
+        # Drop the live Linear so export/HMONNX cannot reintroduce temb→adaln_proj.
+        if hasattr(block, "adaln_proj"):
+            delattr(block, "adaln_proj")
+        block._minimax_use_fixed_adaln = True
+
+    transformer.register_buffer(
+        "minimax_fixed_final_shift",
+        tables["final_shift"].to(device=target_device, dtype=dtype).contiguous(),
+        persistent=False,
+    )
+    transformer.register_buffer(
+        "minimax_fixed_final_scale",
+        tables["final_scale"].to(device=target_device, dtype=dtype).contiguous(),
+        persistent=False,
+    )
+    transformer._minimax_use_fixed_adaln = True
+    transformer._minimax_fixed_adaln_meta = {
+        "num_inference_steps": int(tables["num_inference_steps"]),
+        "num_denoise_evals": num_steps,
+        "fixed_temb_timesteps": int(tables["fixed_temb_timesteps"]),
+        "unique_timesteps": tables["unique_timesteps"],
+    }
+    return tables
 
 
 def build_packed_attention_mask(
@@ -190,11 +445,9 @@ def build_pack_gather_indices(
     # packed[i] = concat[pack_gather_indices[i]], where concat = [text|video|audio].
     pack_gather_indices = torch.empty(sequence_length, device=device, dtype=dtype)
     pack_gather_indices[text_indices.to(dtype=dtype)] = torch.arange(text_len, device=device, dtype=dtype)
-    pack_gather_indices[video_indices.to(dtype=dtype)] = text_len + torch.arange(
-        video_len, device=device, dtype=dtype
-    )
-    pack_gather_indices[audio_indices.to(dtype=dtype)] = text_len + video_len + torch.arange(
-        audio_len, device=device, dtype=dtype
+    pack_gather_indices[video_indices.to(dtype=dtype)] = text_len + torch.arange(video_len, device=device, dtype=dtype)
+    pack_gather_indices[audio_indices.to(dtype=dtype)] = (
+        text_len + video_len + torch.arange(audio_len, device=device, dtype=dtype)
     )
     return pack_gather_indices.to(torch.int32)
 
@@ -218,6 +471,14 @@ def prepare_transformer_block_cpu_offload(transformer: nn.Module, compute_device
     for block in transformer.transformer_blocks:
         _move_module(block, "cpu")
     transformer.enable_block_cpu_offload = True
+    # Make the offload state obvious in logs and reclaim any transient CUDA caches
+    # left behind by AdaLN bake / FixedPoint calibration before the warm-up forward.
+    sample = next(transformer.transformer_blocks[0].parameters())
+    if sample.device.type != "cpu":
+        raise RuntimeError(
+            "prepare_transformer_block_cpu_offload failed: first transformer block is still on "
+            f"{sample.device}, expected CPU."
+        )
     _empty_cache(compute_device)
 
 
@@ -235,6 +496,20 @@ def _as_xhnn_rmsnorm(norm: nn.Module) -> xhnn.RMSNorm:
     else:
         replaced.weight = nn.Parameter(torch.ones(hidden_size))
     return replaced
+
+
+def _make_saturating_add() -> xhnn.Add:
+    """Binary Add leaf with saturate=True (replaces post-op clip[-65504, 65504])."""
+    op = xhnn.Add()
+    op.saturate = True
+    return op
+
+
+def _make_saturating_mul() -> xhnn.Mul:
+    """Binary Mul leaf with saturate=True (replaces post-op clip[-65504, 65504])."""
+    op = xhnn.Mul()
+    op.saturate = True
+    return op
 
 
 # class _MiniMaxH3RotaryPosEmbed(DynamicModule):
@@ -307,29 +582,35 @@ class _MiniMaxH3AdaLayerNormModulation(DynamicModule):
 class _MiniMaxH3AdaLayerNormOut(DynamicModule):
     def _setup(self, *args, **kwargs):
         del args, kwargs
-        hidden_size = int(self.norm.normalized_shape[0])
-        self.shift_slice = xhnn.Slice([0], [hidden_size], [-1], [1])
-        self.scale_slice = xhnn.Slice([hidden_size], [2 * hidden_size], [-1], [1])
-        # Keep AdaLNOut modulation; only swap the inner nn.RMSNorm.
+        # Keep AdaLNOut modulation path only as a fallback; export uses baked tables.
         self.norm_h = _as_xhnn_rmsnorm(self.norm)
         # xhquant/HMONNX: Gather(axis=0) replaces torch.index_select(0, ...).
         self.scale_gather = xhnn.Gather(axis=0)
         self.shift_gather = xhnn.Gather(axis=0)
+        # Quant path requires tensor operands; Python float 1.0 breaks MetaInfoPro.
+        self.register_buffer(
+            "adaln_scale_one",
+            torch.tensor(1.0, dtype=torch.float16),
+            persistent=False,
+        )
+        self.scale_bias_add = _make_saturating_add()
+        self.scale_mul = _make_saturating_mul()
+        self.shift_add = _make_saturating_add()
         return self
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        temb: torch.Tensor,
+        shift: torch.Tensor,
+        scale: torch.Tensor,
         timestep_indices: torch.Tensor,
     ) -> torch.Tensor:
-        modulation = self.linear(F.silu(temb))
-        shift = self.shift_slice(modulation)
-        scale = self.scale_slice(modulation)
+        # ``shift`` / ``scale`` are already selected by denoise ``step_index`` and have
+        # shape ``(num_unique_timesteps, hidden)``. Row gather still uses timestep_indices.
         hidden_states = self.norm_h(hidden_states)
-        scale = 1.0 + self.scale_gather(scale, timestep_indices)
+        scale = self.scale_bias_add(self.adaln_scale_one, self.scale_gather(scale, timestep_indices))
         shift = self.shift_gather(shift, timestep_indices)
-        return hidden_states * scale + shift
+        return self.shift_add(self.scale_mul(hidden_states, scale), shift)
 
 
 class _MiniMaxH3AttentionBase(DynamicModule):
@@ -367,12 +648,27 @@ class _MiniMaxH3AttentionBase(DynamicModule):
         if rotary_emb is not None:
             query = self.apply_rotary_emb(query, *rotary_emb)
             key = self.apply_rotary_emb(key, *rotary_emb)
-        scores = torch.matmul(query.transpose(1, 2), key.transpose(1, 2).transpose(-1, -2)) * self.scale
+        # 480p packs S≈15k → one fp16 [B,H,S,S] is ~25.86 GiB. Eager warm-up must
+        # keep a single scores buffer (inplace scale / MaskedAdd / softmax). Dynamo
+        # capture later runs on CPU and prefers out-of-place ops for FX friendliness.
+        scores = torch.matmul(query.transpose(1, 2), key.transpose(1, 2).transpose(-1, -2))
+        compiling = torch.compiler.is_compiling()
+        if compiling:
+            scores = scores * self.scale
+        else:
+            scores.mul_(self.scale)
+            del query, key
         if attention_mask is not None:
             # Export graph uses MaskedAdd (double-add + saturate), same as text/vision wrappers.
             # Host mask stays additive key-padding bias: valid=0, pad=finfo(dtype).min.
             scores = self.masked_add(scores, attention_mask)
-        hidden_states = torch.matmul(torch.softmax(scores, dim=-1), value.transpose(1, 2))
+        if compiling:
+            probs = torch.softmax(scores, dim=-1)
+            hidden_states = torch.matmul(probs, value.transpose(1, 2))
+        else:
+            torch.softmax(scores, dim=-1, out=scores)
+            hidden_states = torch.matmul(scores, value.transpose(1, 2))
+            del scores, value
         hidden_states = hidden_states.transpose(1, 2)
         output_shape = (batch_size, sequence_length, self.heads * self.head_dim)
         hidden_states = self.output_reshape(hidden_states, output_shape)
@@ -396,6 +692,9 @@ class _MiniMaxH3TokenRefinerBlock(DynamicModule):
         del args, kwargs
         self.norm1_h = _as_xhnn_rmsnorm(self.norm1)
         self.norm2_h = _as_xhnn_rmsnorm(self.norm2)
+        # Explicit saturating Add leaves replace previous clip[-65504, 65504].
+        self.attn_residual_add = _make_saturating_add()
+        self.ff_residual_add = _make_saturating_add()
         return self
 
     def forward(
@@ -404,11 +703,9 @@ class _MiniMaxH3TokenRefinerBlock(DynamicModule):
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attention_output = self.attn(self.norm1_h(hidden_states), attention_mask=attention_mask)
-        hidden_states = hidden_states + attention_output
-        hidden_states = hidden_states.clip(min=-65504.0, max=65504.0)
+        hidden_states = self.attn_residual_add(hidden_states, attention_output)
         feed_forward_output = self.ff(self.norm2_h(hidden_states))
-        out = hidden_states + feed_forward_output
-        return out.clip(min=-65504.0, max=65504.0)
+        return self.ff_residual_add(hidden_states, feed_forward_output)
 
 
 class _MiniMaxH3TokenRefiner(DynamicModule):
@@ -468,10 +765,31 @@ class _MiniMaxH3FeedForward_ffn(DynamicModule):
 class _MiniMaxH3TransformerBlock(DynamicModule):
     def _setup(self, *args, **kwargs):
         del args, kwargs
+        required = _MINIMAX_FIXED_ADALN_NAMES
+        missing = [name for name in required if not hasattr(self, name)]
+        if missing:
+            raise RuntimeError(
+                f"Call install_fixed_adaln_lut() before wrap_transformer(); missing AdaLN LUT buffers: {missing}."
+            )
         self.norm1_h = _as_xhnn_rmsnorm(self.norm1)
         self.norm2_h = _as_xhnn_rmsnorm(self.norm2)
-        # xhquant/HMONNX: Gather(axis=0) replaces torch.index_select(0, ...).
+        # xhquant/HMONNX: Gather(axis=0) replaces torch.index_select / data-dependent
+        # Python indexing so Dynamo can specialize scalar step_index LUT lookups.
+        self.step_gather = xhnn.Gather(axis=0)
         self.adaln_gather = xhnn.Gather(axis=0)
+        # Quant path requires tensor operands; Python float 1.0 breaks MetaInfoPro.
+        self.register_buffer(
+            "adaln_scale_one",
+            torch.tensor(1.0, dtype=torch.float16),
+            persistent=False,
+        )
+        # Explicit saturating Mul/Add leaves replace previous AdaLN clip[-65504, 65504].
+        self.msa_scale_bias_add = _make_saturating_add()
+        self.msa_scale_mul = _make_saturating_mul()
+        self.msa_shift_add = _make_saturating_add()
+        self.mlp_scale_bias_add = _make_saturating_add()
+        self.mlp_scale_mul = _make_saturating_mul()
+        self.mlp_shift_add = _make_saturating_add()
         self._refresh_fixed_point_ops()
         return self
 
@@ -515,18 +833,30 @@ class _MiniMaxH3TransformerBlock(DynamicModule):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        temb: torch.Tensor,
+        step_index: torch.Tensor,
         adaln_indices: torch.Tensor,
         rotary_emb: tuple[torch.Tensor, torch.Tensor],
         attention_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(temb)
+        # Baked AdaLN tables: [num_steps, capacity*MODALITY, H], indexed by denoise step.
+        # Use xhnn.Gather instead of table[step_index] so Dynamo/export can specialize.
+        shift_msa = self.step_gather(self.minimax_fixed_shift_msa, step_index)
+        scale_msa = self.step_gather(self.minimax_fixed_scale_msa, step_index)
+        gate_msa = self.step_gather(self.minimax_fixed_gate_msa, step_index)
+        shift_mlp = self.step_gather(self.minimax_fixed_shift_mlp, step_index)
+        scale_mlp = self.step_gather(self.minimax_fixed_scale_mlp, step_index)
+        gate_mlp = self.step_gather(self.minimax_fixed_gate_mlp, step_index)
         residual = hidden_states
         norm_hidden_states = self.norm1_h(hidden_states)
-        norm_hidden_states = norm_hidden_states * (1.0 + self.adaln_gather(scale_msa, adaln_indices))
-        norm_hidden_states = norm_hidden_states.clip(min=-65504.0, max=65504.0)
-        norm_hidden_states = norm_hidden_states + self.adaln_gather(shift_msa, adaln_indices)
-        norm_hidden_states = norm_hidden_states.clip(min=-65504.0, max=65504.0)
+        msa_scale = self.msa_scale_bias_add(
+            self.adaln_scale_one,
+            self.adaln_gather(scale_msa, adaln_indices),
+        )
+        norm_hidden_states = self.msa_scale_mul(norm_hidden_states, msa_scale)
+        norm_hidden_states = self.msa_shift_add(
+            norm_hidden_states,
+            self.adaln_gather(shift_msa, adaln_indices),
+        )
         attention_output = self.attn(norm_hidden_states, rotary_emb, attention_mask)
         hidden_states = self._fixed_mul_add(
             1,
@@ -538,10 +868,15 @@ class _MiniMaxH3TransformerBlock(DynamicModule):
 
         residual = hidden_states
         norm_hidden_states = self.norm2_h(hidden_states)
-        norm_hidden_states = norm_hidden_states * (1.0 + self.adaln_gather(scale_mlp, adaln_indices))
-        norm_hidden_states = norm_hidden_states.clip(min=-65504.0, max=65504.0)
-        norm_hidden_states = norm_hidden_states + self.adaln_gather(shift_mlp, adaln_indices)
-        norm_hidden_states = norm_hidden_states.clip(min=-65504.0, max=65504.0)
+        mlp_scale = self.mlp_scale_bias_add(
+            self.adaln_scale_one,
+            self.adaln_gather(scale_mlp, adaln_indices),
+        )
+        norm_hidden_states = self.mlp_scale_mul(norm_hidden_states, mlp_scale)
+        norm_hidden_states = self.mlp_shift_add(
+            norm_hidden_states,
+            self.adaln_gather(shift_mlp, adaln_indices),
+        )
         feed_forward_output = self.ff(norm_hidden_states)
         return self._fixed_mul_add(
             3,
@@ -558,8 +893,18 @@ class _MiniMaxH3Transformer3DModel(DynamicModule):
 
     def _setup(self, *args, **kwargs):
         del args, kwargs
+        required = (
+            "minimax_fixed_final_shift",
+            "minimax_fixed_final_scale",
+        )
+        missing = [name for name in required if not hasattr(self, name)]
+        if missing:
+            raise RuntimeError(
+                f"Call install_fixed_adaln_lut() before wrap_transformer(); missing final-norm LUT buffers: {missing}."
+            )
         self.enable_block_cpu_offload = False
-        # xhquant/HMONNX: Gather(axis=1) replaces torch.index_select(1, ...).
+        # xhquant/HMONNX: Gather(axis=0) for denoise step LUT; Gather(axis=1) for token indices.
+        self.step_gather = xhnn.Gather(axis=0)
         self.video_gather = xhnn.Gather(axis=1)
         self.audio_gather = xhnn.Gather(axis=1)
         # Avoid ScatterElements packing: concat modality streams in fixed order, then
@@ -593,7 +938,7 @@ class _MiniMaxH3Transformer3DModel(DynamicModule):
         hidden_states: torch.Tensor,
         audio_hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        temb: torch.Tensor,
+        step_index: torch.Tensor,
         timestep_indices: torch.Tensor,
         adaln_indices: torch.Tensor,
         rotary_cos: torch.Tensor,
@@ -605,11 +950,13 @@ class _MiniMaxH3Transformer3DModel(DynamicModule):
         packed_attention_mask: torch.Tensor,
         return_dict: bool = True,
     ):
-        """Export/HMONNX ABI: host provides temb/adaln/rotary + pack gather + masks.
+        """Export/HMONNX ABI: host provides step_index/adaln/rotary + pack gather + masks.
 
         ``text_indices`` stay host-only (used to build ``pack_gather_indices`` /
         ``packed_attention_mask``). Keeping them as unused forward args makes Dynamo
         drop the placeholder and break ``input_names`` vs ``example_inputs`` arity.
+        AdaLN / final-norm tables are baked by :func:`install_fixed_adaln_lut` and
+        selected with scalar ``step_index``.
         """
         sequence_length = int(adaln_indices.shape[0])
         if timestep_indices.shape != (sequence_length,):
@@ -666,19 +1013,27 @@ class _MiniMaxH3Transformer3DModel(DynamicModule):
                     hidden_states = self._gradient_checkpointing_func(
                         block,
                         hidden_states,
-                        temb,
+                        step_index,
                         adaln_indices,
                         rotary_emb,
                         packed_attention_mask,
                     )
                 else:
-                    hidden_states = block(hidden_states, temb, adaln_indices, rotary_emb, packed_attention_mask)
+                    hidden_states = block(
+                        hidden_states,
+                        step_index,
+                        adaln_indices,
+                        rotary_emb,
+                        packed_attention_mask,
+                    )
             finally:
                 if block_offload:
                     _move_module(block, "cpu")
                     _empty_cache(compute_device)
 
-        hidden_states = self.norm_out(hidden_states, temb, timestep_indices)
+        final_shift = self.step_gather(self.minimax_fixed_final_shift, step_index)
+        final_scale = self.step_gather(self.minimax_fixed_final_scale, step_index)
+        hidden_states = self.norm_out(hidden_states, final_shift, final_scale, timestep_indices)
         video_output = self.video_gather(self.proj_out(hidden_states), video_indices)
         audio_output = self.audio_gather(self.audio_proj_out(hidden_states), audio_indices)
         if not return_dict:
@@ -724,6 +1079,8 @@ def wrap_transformer(transformer: nn.Module) -> nn.Module:
 class MiniMaxH3TransformerWrapper(nn.Module):
     def __init__(self, transformer: nn.Module):
         super().__init__()
+        if not bool(getattr(transformer, "_minimax_use_fixed_adaln", False)):
+            install_fixed_adaln_lut(transformer)
         self.transformer = wrap_transformer(transformer)
 
     def forward(
@@ -731,7 +1088,7 @@ class MiniMaxH3TransformerWrapper(nn.Module):
         hidden_states: torch.Tensor,
         audio_hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        temb: torch.Tensor,
+        step_index: torch.Tensor,
         timestep_indices: torch.Tensor,
         adaln_indices: torch.Tensor,
         rotary_cos: torch.Tensor,
@@ -742,13 +1099,20 @@ class MiniMaxH3TransformerWrapper(nn.Module):
         encoder_attention_mask: torch.Tensor,
         packed_attention_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Keep export/Dynamo placeholder names aligned with TENSOR_NAMES / host ABI.
-        # Do not pass unused host-only tensors (e.g. text_indices): Dynamo drops them.
+        legacy_step_index = step_index
+        if isinstance(step_index, torch.Tensor) and step_index.ndim == 2:
+            # Legacy host-side ABI: some callers still feed a fixed-capacity temb table.
+            # The wrapped export model only needs a scalar denoise step index.
+            legacy_step_index = torch.tensor(
+                int(timestep_indices.min().item()) if timestep_indices.numel() else 0,
+                dtype=torch.int32,
+                device=hidden_states.device,
+            )
         return self.transformer(
             hidden_states,
             audio_hidden_states,
             encoder_hidden_states,
-            temb,
+            legacy_step_index,
             timestep_indices,
             adaln_indices,
             rotary_cos,
@@ -763,11 +1127,20 @@ class MiniMaxH3TransformerWrapper(nn.Module):
 
 
 __all__ = [
+    "MINIMAX_H3_DEFAULT_AUDIO_SHIFT",
+    "MINIMAX_H3_DEFAULT_KEYFRAME_NOISE_AUG",
+    "MINIMAX_H3_DEFAULT_NUM_INFERENCE_STEPS",
+    "MINIMAX_H3_DEFAULT_VIDEO_SHIFT",
+    "MINIMAX_H3_FIXED_TEMB_TIMESTEPS",
     "MiniMaxH3TransformerWrapper",
+    "build_minimax_h3_adaln_lut",
+    "build_minimax_h3_denoise_unique_timesteps",
     "build_minimax_h3_transformer_conditioning",
     "build_pack_gather_indices",
     "build_packed_attention_mask",
     "disable_transformer_block_cpu_offload",
+    "install_fixed_adaln_lut",
+    "pad_minimax_h3_temb",
     "prepare_transformer_block_cpu_offload",
     "wrap_transformer",
 ]

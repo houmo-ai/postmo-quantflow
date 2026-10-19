@@ -31,6 +31,13 @@ PYTHONPATH=$PWD python examples_merak/aigc/minimaxh3/minimax_h3_workflow.py \
 `vae_encoder`、`transformer`、`vae_decoder`、`audio_vae_encoder` 和 `audio_vae_decoder` 可独立替换；
 `text_encoder` 与 `vision_encoder` 会绑定一起导出/安装。其他未导出的组件保持 FP：
 
+导出 `text_encoder`/`vision_encoder` 时，会额外写出 host 侧轻量权重：
+
+- `text_encoder/text_embeddings.safetensors`（`embed_tokens.weight`）
+- `vision_encoder/vision_geometry.safetensors`（`pos_embed.weight`）
+
+`hmonnx_demo.py` 检测到这些文件后，会跳过加载完整原始 `text_encoder`，改为构建仅含 embedding/geometry 的轻量 host，再安装 HMONNX TE/VE。TE ONNX ABI 仍从 `hidden_states` 开始，不变。
+
 ```bash
 CUDA_VISIBLE_DEVICES=<gpu_id> PYTHONPATH=$PWD \
 python examples_merak/aigc/minimaxh3/hmonnx_demo.py \
@@ -43,7 +50,7 @@ python examples_merak/aigc/minimaxh3/hmonnx_demo.py \
   --device cuda:0
 ```
 
-workflow 和 demo 默认都会加载并融合仓库中的 MiniMax-H3 FL2V LoRA：
+workflow 和 demo 默认都会尝试加载并融合仓库中的 MiniMax-H3 FL2V LoRA：
 
 ```text
 data/models/minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors
@@ -57,7 +64,22 @@ data/models/minimax_h3_fl2v_turbo_8step_v1.0_bf16.safetensors
 --lora-scale 1.0
 ```
 
+若本地没有 LoRA，默认会跳过并继续；需要强制存在时加 `--require-lora`，或用 `--no-lora` 显式关闭。
+
 导出 `transformer` 时 LoRA 会在 HMONNX 导出前融合；运行 demo 时同一份 LoRA 会融合到未导出的 FP transformer，保证两条路径使用一致的 transformer 权重。
+
+## 分辨率预设
+
+`wrapper_demo.py` / `minimax_h3_workflow.py` 支持 `--resolution`：
+
+| preset | 像素 | transformer packing (frames=124, text=512) |
+| --- | --- | --- |
+| `demo` | 608x352 | Nv=7942, Na=414, S=8868 |
+| `480p` | 832x480 | Nv=14820, Na=414, S=15746 |
+| `720p` | 1344x768 | Nv=38304, Na=414, S=39230 |
+| `720p_16x9` | 1280x704 | Nv=33440, Na=414, S=34366 |
+
+导出时 `--resolution` 只覆盖 `input_shapes.transformer`；VAE tile / text / audio 示例形状保持不变。
 
 `transformer` 导出图不再接收 `timestep` / `token_tags` / `position_ids`。
 demo 安装 HMONNX transformer 后，会在 host 侧用保留的 `time_proj` / `time_embedder` / `rope`
