@@ -1,0 +1,123 @@
+schema_version: 2
+external:
+  model:
+    id: gemma4_12b_unified
+    family: gemma4_series
+    display_name: gemma 4.12B unified
+  parameters:
+    total: 11959730224
+    active: 11959730224
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2048]
+    prefill: 51.26
+    decode: 0.025029
+    unit: TFLOPs
+    status: inferred
+    note: 文本侧统一 2048-token 静态口径。A20 导出窗口为 2048/320。
+  precision:
+    float_format: BF16
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: ceval_full_gptq_hmonnx_yuehui
+      dataset: CEval full / 1346 samples
+      metric: Accuracy，float BF16 vs GPTQ W4G64 + YueHui HMONNX w8a8h1_sefp（max_tokens=512，CUDA HMONNX 仿真）
+      float: 0.6471
+      quant: 0.6285
+      delta: -0.0186
+      evidence: https://houmo.feishu.cn/docx/GeYQd74nLoQWFixMDH2cgQ8Ingh
+      status: verified
+  owner: junjie.yang
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - yuehui
+    - llm
+    - a20
+  source:
+    provider: Google
+    name: gemma4 12b unified
+    url: ''
+    license: ''
+    raw_model_path: /data01/nfs_shared/gemma-4-12B-it
+  components:
+  - id: model
+    display_name: gemma 4.12B unified
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/yuehui/llm_models/gemma4_series/12b_unified/gemma4_12b_unified_full.yaml
+    model_dir: /data01/nfs_shared/gemma-4-12B-it
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: YueHui
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+        model_video_visual_config_quant_scheme: w8a8h1_sefp
+        model_audio_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/gemma4_12b_unified
+  release:
+    version_id: gemma4_12b_unified_yuehui_gptq_w4g64_ctx2048
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: gemma 4.12B unified
+      release_path: work_dirs/gemma4_yuehui/12b_unified/export_20261013/hmquant_yuehui_gemma_4_12b_unified_w4a8_320_2k_mpe256k_20261013
+      release_url: ''
+      version: '20261013'
+      date: '2026-10-13'
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: ready
+  presentation:
+    summary: Gemma 4 12B Unified A20（YueHui）GPTQ W4G64 + w8a8h1_sefp HMONNX。CEval 相对差 0.0287，门禁 warn。CUDA HMONNX 仿真，不是芯片实测。
+    demo:
+      kind: metadata_only
+    limitations:
+    - CEval full 1346、max_tokens 512。float 0.6471（871/1346），HMONNX 0.6285（846/1346），delta 为 quant-float。相对差 0.0287，门禁 warn，未标 frozen。
+    - 评测运行时是 CUDA HMONNX 仿真，不能写成 YueHui 真机。
+    evidence:
+      examples:
+      - examples_merak/llm/gemma4_series
+      readme:
+      - examples_merak/llm/gemma4_series/README.md

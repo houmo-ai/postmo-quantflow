@@ -429,6 +429,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 contract=unified_contract,
                 input_modality="image",
                 quant_scheme=quant_scheme,
+                chip_arch=chip_arch,
             )
             if video_visual_config is None and visual_config is not None:
                 video_visual_config = {}
@@ -439,6 +440,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 contract=unified_contract,
                 input_modality="video",
                 quant_scheme=quant_scheme,
+                chip_arch=chip_arch,
             )
             audio_config = self._build_unified_audio_config(
                 audio_config,
@@ -446,12 +448,14 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 hf_model=hf_model,
                 contract=unified_contract,
                 quant_scheme=quant_scheme,
+                chip_arch=chip_arch,
             )
         elif isinstance(visual_config, dict):
             if "model_name" not in visual_config:
                 visual_config["model_name"] = f"{model_name}_visual"
             if "hf_model" not in visual_config:
                 visual_config["hf_model"] = hf_model
+            visual_config = self._inherit_chip_arch(visual_config, chip_arch)
             visual_config = XHGemma4SeriesVisualConfig(**visual_config)
         if unified_contract is None and video_visual_config is None and visual_config is not None:
             video_visual_config = {
@@ -478,6 +482,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 video_visual_config.setdefault("pooling_kernel_size", visual_config.pooling_kernel_size)
                 video_visual_config.setdefault("quant_scheme", copy.deepcopy(visual_config.quant_scheme))
             video_visual_config.setdefault("input_modality", "video")
+            video_visual_config = self._inherit_chip_arch(video_visual_config, chip_arch)
             video_visual_config = XHGemma4SeriesVisualConfig(**video_visual_config)
         if unified_contract is None and audio_config is None and isinstance(hf_config.get("audio_config"), dict):
             audio_config = {
@@ -494,6 +499,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
                 audio_config["model_name"] = f"{model_name}_audio"
             if "hf_model" not in audio_config:
                 audio_config["hf_model"] = hf_model
+            audio_config = self._inherit_chip_arch(audio_config, chip_arch)
             audio_config = XHGemma4SeriesAudioConfig(**audio_config)
         self.visual_config = visual_config
         self.video_visual_config = video_visual_config
@@ -548,6 +554,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         contract: Gemma4SeriesModalityContract,
         input_modality: str,
         quant_scheme,
+        chip_arch: str,
     ):
         if value is None:
             return None
@@ -589,6 +596,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         cfg.setdefault("model_name", f"{model_name}_{'visual' if input_modality == 'image' else 'video_visual'}")
         cfg.setdefault("hf_model", hf_model)
         cfg.setdefault("quant_scheme", copy.deepcopy(quant_scheme))
+        cfg.setdefault("chip_arch", chip_arch)
         return XHGemma4UnifiedVisualConfig(
             image_seq_length=expected_tokens,
             input_dim=contract.vision_patch_dim,
@@ -605,6 +613,7 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         hf_model: str,
         contract: Gemma4SeriesModalityContract,
         quant_scheme,
+        chip_arch: str,
     ):
         if isinstance(value, XHGemma4UnifiedAudioConfig):
             return value
@@ -628,12 +637,26 @@ class XHGemma4SeriesModelConfig(VisionLLMModelConfig):
         cfg.setdefault("model_name", f"{model_name}_audio")
         cfg.setdefault("hf_model", hf_model)
         cfg.setdefault("quant_scheme", copy.deepcopy(quant_scheme))
+        cfg.setdefault("chip_arch", chip_arch)
         return XHGemma4UnifiedAudioConfig(
             input_feature_length=contract.audio_soft_tokens,
             feature_size=contract.audio_feature_dim,
             sampling_rate=contract.sampling_rate,
             **cfg,
         )
+
+    @staticmethod
+    def _inherit_chip_arch(value, chip_arch: str):
+        """Copy the parent chip onto a side-graph mapping that did not set one.
+
+        Constructed config objects are returned unchanged. Callers that pass an
+        explicit ``chip_arch`` keep it, including an intentional XH2a side graph
+        under a YueHui parent.
+        """
+        if isinstance(value, Mapping) and "chip_arch" not in value:
+            value = dict(value)
+            value["chip_arch"] = chip_arch
+        return value
 
     @staticmethod
     def _normalize_sliding_kv_cache_input_mode(mode: str | None) -> str:

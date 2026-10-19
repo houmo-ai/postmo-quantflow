@@ -60,7 +60,7 @@ def run_evaluation(
     datasets: List[str],
     work_dir: str,
     dataset_registry: Any,
-    limit: int = 0,
+    limit: int | float = 0,
     max_tokens: int = 512,
     timeout: int = 1800,
     seed: int = 42,
@@ -76,7 +76,7 @@ def run_evaluation(
         datasets: List of dataset names to evaluate.
         work_dir: Output directory for evalscope results.
         dataset_registry: DatasetRegistry instance for dataset metadata.
-        limit: Max samples per subset (0 = all).
+        limit: Max samples per subset, or a fraction in (0, 1) (0 = all).
         max_tokens: Max tokens per generation.
         timeout: Timeout per dataset evaluation in seconds.
         seed: Random seed.

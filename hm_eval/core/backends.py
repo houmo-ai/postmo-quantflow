@@ -410,7 +410,15 @@ class FloatBackend(EvalBackend):
         if not is_gemma4:
             load_kwargs["trust_remote_code"] = True
 
-        if is_gemma4:
+        if model_class == "Gemma4UnifiedForConditionalGeneration":
+            from transformers.models.gemma4_unified.modeling_gemma4_unified import (
+                Gemma4UnifiedForConditionalGeneration,
+            )
+
+            self.model = Gemma4UnifiedForConditionalGeneration.from_pretrained(
+                hf_model_dir, **load_kwargs
+            )
+        elif is_gemma4:
             from transformers import Gemma4ForConditionalGeneration
 
             load_kwargs["experts_implementation"] = experts_implementation

@@ -1,0 +1,123 @@
+schema_version: 2
+external:
+  model:
+    id: gemma4_31b
+    family: gemma4_series
+    display_name: gemma 4.31B
+  parameters:
+    total: 31273088876
+    active: 31273088876
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 2048]
+    prefill: 131.94
+    decode: 0.064424
+    unit: TFLOPs
+    status: inferred
+    note: 文本侧统一 2048-token 静态口径。A20 导出窗口为 262144/320。
+  precision:
+    float_format: BF16
+    quantized_format: w8a8h1_sefp
+    comparisons:
+    - name: ceval_full_autoround_hmonnx_yuehui
+      dataset: CEval full / 1346 samples
+      metric: Accuracy，float BF16 vs AutoRound W4G64 + YueHui HMONNX w8a8h1_sefp（max_tokens=512，CUDA HMONNX 仿真）
+      float: 0.7979
+      quant: 0.7793
+      delta: -0.0186
+      evidence: https://houmo.feishu.cn/docx/GHJ6d4lcNoWf91xXLZdcBFjHnLf
+      status: verified
+  owner: junjie.yang
+internal:
+  model:
+    type: llm_models
+    modality:
+    - text
+    task:
+    - inference
+    tags:
+    - merak
+    - yuehui
+    - llm
+    - a20
+  source:
+    provider: Google
+    name: gemma4 31b
+    url: ''
+    license: ''
+    raw_model_path: /data01/nfs_shared/gemma-4-31B-it
+  components:
+  - id: model
+    display_name: gemma 4.31B
+    type: llm_models
+    precision: w8a8h1_sefp
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  io:
+    inputs:
+    - name: input
+      type: tensor
+      required: true
+      description: 模型输入张量或预处理后的输入参数。
+    outputs:
+    - name: output
+      type: tensor
+      required: false
+      description: 模型输出张量或后处理前的输出参数。
+  workflow:
+    config_path: configs_merak/workflows/yuehui/llm_models/gemma4_series/31b/gemma4_31b_autoround_flash_attention.yaml
+    model_dir: /data01/nfs_shared/gemma-4-31B-it
+    class: auto
+    actions:
+    - quant
+    - export
+    - dump_golden
+    - eval
+    category: llm_models
+    target_device: YueHui
+    precision:
+      overall: w8a8h1_sefp
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+        model_video_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 1024
+    work_dir: work_dirs/merak_delivery/gemma4_31b
+  release:
+    version_id: gemma4_31b_it_yuehui_autoround_w4g64_ctx262144
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models:
+    - name: gemma 4.31B
+      release_path: work_dirs/gemma4_yuehui/31b/export_flash_20261010/hmquant_yuehui_gemma_4_31b_w4a8_320_256k_mpe256k_20261010
+      release_url: ''
+      version: '20261010'
+      date: '2026-10-11'
+      quant_type: w8a8h1_sefp
+      artifact_type: hmonnx
+      status: ready
+  presentation:
+    summary: Gemma 4 31B A20（YueHui）AutoRound W4G64 + FlashAttention 导出 + w8a8h1_sefp HMONNX。CEval 相对差 0.0233，门禁 warn。CUDA HMONNX 仿真，不是芯片实测。
+    demo:
+      kind: metadata_only
+    limitations:
+    - CEval full 1346、max_tokens 512。float 0.7979（1074/1346），HMONNX 0.7793（1049/1346），delta 为 quant-float。相对差 0.0233，门禁 warn，未标 frozen。
+    - 被测图是 FlashAttention 导出。分数使用修复后的 YueHui RMSNorm：weight 乘 sqrt(N) 超过 fp16 时保持 fp32。
+    - 评测运行时是 CUDA HMONNX 仿真，不能写成 YueHui 真机。
+    evidence:
+      examples:
+      - examples_merak/llm/gemma4_series
+      readme:
+      - examples_merak/llm/gemma4_series/README.md

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "hm-eval-gemma4-parameters-and-loading",
+      "patterns": [
+        "hm_eval/__main__.py",
+        "hm_eval/core/backends.py",
+        "hm_eval/core/eval_runner.py",
+        "hm_eval/core/model_registry.py",
+        "hm_eval/core/normalize.py",
+        "hm_eval/model_configs/gemma4_*.yaml",
+        "benchmark_test/ci_test_transformer5.16.0/test_hm_eval_gemma4_contract.py"
+      ]
+    }
+  ]
+}

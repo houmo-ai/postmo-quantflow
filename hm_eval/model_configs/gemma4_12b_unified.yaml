@@ -1,0 +1,50 @@
+# Gemma-4-12B-Unified 评测配置（对齐 m50 model card）
+config_id: gemma4_12b_unified
+display_name: Gemma-4-12B-Unified
+model_family: gemma4_series
+architecture: Gemma4UnifiedForConditionalGeneration
+hf_model_dir: /data01/nfs_shared/gemma-4-12B-it
+processor_class: AutoProcessor
+transformers_version: "5.13.0"
+
+recommended_datasets:
+  - ceval
+  - cmmmu
+  - mmmu
+  - mmlu_pro
+  - mmlu
+  - gpqa
+  - gsm8k
+  - math_500
+  - humaneval
+  - ifeval
+  - arc
+  - hellaswag
+  - bbh
+  - truthfulqa
+
+normalize_choice_range: A-D
+disable_thinking: true
+max_tokens: 32
+
+backends:
+  float:
+    type: float
+    model_class: Gemma4UnifiedForConditionalGeneration
+    use_processor: true
+    chat_template: processor
+    extra_args:
+      torch_dtype: bfloat16
+      device_map: auto
+
+  hmonnx:
+    type: hmonnx
+    onnx_model_type: xhmodel_merak
+    export_script: examples_merak/llm/gemma4_series/gemma4_workflow_demo.py
+    export_config: configs_merak/workflows/yuehui/llm_models/gemma4_series/12b_unified/gemma4_12b_unified_full.yaml
+    export_configs:
+      - configs_merak/workflows/yuehui/llm_models/gemma4_series/12b_unified/gemma4_12b_unified_full.yaml
+    export_meta_info: ${HM_EVAL_GEMMA4_12B_UNIFIED_HMONNX_META}
+    sliding_window: true
+    kv_cache_heterogeneous: true
+    extra_args: {}

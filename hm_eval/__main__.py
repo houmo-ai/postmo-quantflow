@@ -4,6 +4,21 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
+
+
+def _parse_limit(raw: str) -> int | float:
+    """Accept a per-subset count or a fraction in (0, 1); zero means all."""
+    value = float(raw)
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError("limit must be finite")
+    if value < 0:
+        raise argparse.ArgumentTypeError("limit must be >= 0")
+    if value > 1 and not value.is_integer():
+        raise argparse.ArgumentTypeError("limit above 1 must be an integer sample count")
+    if value.is_integer():
+        return int(value)
+    return value
 
 
 def main() -> None:
@@ -16,7 +31,12 @@ def main() -> None:
     parser.add_argument("--model", type=str, help="[CLI] Model display name or config_id")
     parser.add_argument("--backend", type=str, default="float", help="[CLI] Backend: float or hmonnx")
     parser.add_argument("--datasets", nargs="+", help="[CLI] Dataset names")
-    parser.add_argument("--limit", type=int, default=0, help="[CLI] Per-subset sample limit (0=all)")
+    parser.add_argument(
+        "--limit",
+        type=_parse_limit,
+        default=0,
+        help="[CLI] Per-subset sample count, or a fraction in (0, 1) (0=all; 1 or 1.0=one per subset)",
+    )
     parser.add_argument("--max-tokens", type=int, default=512, help="[CLI] Max generation tokens")
     parser.add_argument("--hmonnx-meta", type=str, default="", help="[CLI] HMONNX golden_meta_info.json/export_meta_info.json/meta.json path")
     parser.add_argument("--vision-hmonnx-meta", type=str, default="", help="[CLI] Vision export_meta_info.json path for legacy multimodal HMONNX")
