@@ -361,13 +361,13 @@ class _Gemma4TextAttention(DynamicModule):
             flash_attention_cfg = _cfg_get(cfg, "flash_attention", {})
             flash_bits = {
                 name: int(_cfg_get(flash_attention_cfg, name, 8))
-                for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+                for name in ("q_bits", "k_bits", "v_bits", "p_bits")
             }
             invalid_bits = {name: value for name, value in flash_bits.items() if value not in (8, 16)}
             if invalid_bits:
                 invalid = ", ".join(f"{name}={value}" for name, value in invalid_bits.items())
                 raise ValueError(
-                    f"Gemma4 flash_attention q_bits/k_bits/v_bits/s_bits/p_bits must be 8 or 16, got {invalid}"
+                    f"Gemma4 flash_attention q_bits/k_bits/v_bits/p_bits must be 8 or 16, got {invalid}"
                 )
             self.flash_attn = xhnn.FlashAttention(
                 num_heads=self.num_attention_heads,

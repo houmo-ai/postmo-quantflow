@@ -87,7 +87,6 @@ def _moss_attention_wrap():
                 q_bits=bits["q_bits"],
                 k_bits=bits["k_bits"],
                 v_bits=bits["v_bits"],
-                s_bits=bits["s_bits"],
                 p_bits=bits["p_bits"],
             )
             if self.use_cache:

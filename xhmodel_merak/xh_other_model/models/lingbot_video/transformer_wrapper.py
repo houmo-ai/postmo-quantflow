@@ -147,7 +147,7 @@ def register_transformer_wrap_modules(
     symbols = _lingbot_symbols()
     if not hasattr(transformer, "lingbot_export_sequence_length"):
         raise RuntimeError("Call install_export_geometry() before wrapping the transformer.")
-    required_bits = {"q_bits", "k_bits", "v_bits", "s_bits", "p_bits"}
+    required_bits = {"q_bits", "k_bits", "v_bits", "p_bits"}
     if set(flash_attention_bits) != required_bits:
         raise ValueError(
             f"flash_attention_bits must define exactly {sorted(required_bits)}, got {sorted(flash_attention_bits)}."
@@ -398,7 +398,6 @@ class _LingBotVideoAttention(DynamicModule):
             q_bits=bits["q_bits"],
             k_bits=bits["k_bits"],
             v_bits=bits["v_bits"],
-            s_bits=bits["s_bits"],
             p_bits=bits["p_bits"],
         )
         return self

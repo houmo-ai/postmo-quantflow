@@ -3,7 +3,7 @@
 适用范围：当前 Merak 的 Qwen3.5/Next hybrid attention、GLM-5.3、Gemma4 视觉和 Kokoro ALBERT 路径。
 这些是有具体使用方的契约，不是所有 attention 或所有芯片的统一限制。
 
-## FlashAttention：布局与五路精度
+## FlashAttention：布局与四路输入精度
 
 [HybridGatedAttentionMixin](../../../xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py)
 在 `_setup()` 中构造 `xhquant.nn.FlashAttention`，将
@@ -14,7 +14,7 @@
 | Q / K / V | `[B, Hq, Sq, D]` / `[B, Hkv, Skv, D]` / `[B, Hkv, Skv, D]`，GQA 的 head 数分别传递；cache 路径中 `Sq` 与 `Skv` 可不同 |
 | FA 输出 | `[B, Hq, Sq, D]`，先 transpose 为 `[B, Sq, Hq, D]`，再合并 head 轴 |
 | `q_bits`, `k_bits`, `v_bits` | 三路输入精度，wrapper 分别接受 8 或 16 |
-| `s_bits`, `p_bits` | score/probability 的独立精度，不能从 Q 的精度推断两者相同 |
+| `p_bits` | PV matmul 左输入的 SEFP8/SEFP16 精度；score 和 LUT exp 输入输出保持 FP16 |
 | enable 开关 | `flash_attention.enable`；旧 `bfp_flash_attention` 不再启用该路径 |
 
 普通 matmul 分支手工使用缩放；FA 构造传入同一语义的 scale，避免重复缩放。
@@ -24,7 +24,7 @@
 参考配置：[Qwen3.6 MoE 全 FA16](../../../configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen3_6_35b_a3b_full_fa_all16.yaml)。
 历史细粒度断言在 [precision wrapper test](../../../tests/qwen3_5/test_flash_attention_precision_wrapper.py)，
 不属于当前 CI。当前 [Qwen block 导出](../../../benchmark_test/ci_test_transformer5.16.0/test_qwen35_35b_a3b_block_export.py)
-检查其固定配置的导出链路，并不穷举五路精度组合；新增这类回归应在当前 CI 内补用例与 impact。
+检查其固定配置的导出链路，并不穷举四路精度组合；新增这类回归应在当前 CI 内补用例与 impact。
 
 ## MLA：权重融合不等于共享量化 cache
 

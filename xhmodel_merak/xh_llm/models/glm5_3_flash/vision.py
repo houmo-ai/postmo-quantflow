@@ -44,7 +44,6 @@ class StaticVisionBlock(nn.Module):
             q_bits=16,
             k_bits=16,
             v_bits=16,
-            s_bits=16,
             p_bits=16,
         )
 

@@ -36,7 +36,7 @@ class XHLing3FlashModelConfig(XHQwen3NextModelConfig):
         if flash_attention is not None and bool(flash_attention.get("enable", False)):
             unsupported = {
                 name: int(flash_attention.get(name, 8))
-                for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+                for name in ("q_bits", "k_bits", "v_bits", "p_bits")
                 if int(flash_attention.get(name, 8)) not in (8, 16)
             }
             if unsupported:

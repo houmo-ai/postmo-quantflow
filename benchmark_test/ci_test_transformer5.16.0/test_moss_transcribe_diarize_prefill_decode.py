@@ -26,8 +26,8 @@ def test_parse_flash_attention_yaml_switch():
     assert parse_flash_attention(None) is None
     assert parse_flash_attention({"enable": False, "q_bits": 8}) is None
     assert parse_flash_attention({"enable": True}) == {name: 16 for name in FLASH_ATTENTION_BIT_NAMES}
-    assert parse_flash_attention({"enable": True, "q_bits": 8, "k_bits": 8, "v_bits": 8, "s_bits": 8, "p_bits": 8}) == {
-        "q_bits": 8, "k_bits": 8, "v_bits": 8, "s_bits": 8, "p_bits": 8,
+    assert parse_flash_attention({"enable": True, "q_bits": 8, "k_bits": 8, "v_bits": 8, "p_bits": 8}) == {
+        "q_bits": 8, "k_bits": 8, "v_bits": 8, "p_bits": 8,
     }
     with pytest.raises(ValueError, match="q_bits"):
         parse_flash_attention({"enable": True, "q_bits": 4})
@@ -65,7 +65,7 @@ def test_checked_in_16k_64k_and_128k_workflows_enable_flash_attention():
         assert model["export"]["model"]["max_pe_length"] == 262144
     for model in (fa16, fa64, fa128):
         bits = model["export"]["model"]["flash_attention"]
-        assert {bits[name] for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")} == {8}
+        assert {bits[name] for name in ("q_bits", "k_bits", "v_bits", "p_bits")} == {8}
 
 def test_yaml_fused_embedding_abi_has_no_input_ids_or_audio():
     data = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
@@ -125,7 +125,7 @@ def test_model_puts_yaml_flash_attention_on_wrap_cfg():
 
     cfg = XHMossTranscribeDiarizeConfig(
         model_name="moss_tiny",
-        flash_attention={"enable": True, "q_bits": 16, "k_bits": 16, "v_bits": 16, "s_bits": 16, "p_bits": 16},
+        flash_attention={"enable": True, "q_bits": 16, "k_bits": 16, "v_bits": 16, "p_bits": 16},
         convert_hmonnx=False,
     )
     model = XHMossTranscribeDiarizeModel(cfg)

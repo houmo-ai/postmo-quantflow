@@ -51,7 +51,6 @@ export:
       q_bits: 8
       k_bits: 8
       v_bits: 8
-      s_bits: 8
       p_bits: 8
     sliding_kv_cache_input_mode: slice_window
     quant_scheme:

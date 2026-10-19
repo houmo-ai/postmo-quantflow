@@ -217,7 +217,7 @@ class _LingMLAAttention(DynamicModule):
         if self.use_flash_attention:
             bits = {
                 name: int(cfg_get(name, 8))
-                for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+                for name in ("q_bits", "k_bits", "v_bits", "p_bits")
             }
             if any(value not in (8, 16) for value in bits.values()):
                 raise ValueError(f"Ling FlashAttention bits must be 8 or 16, got {bits}")

@@ -13,7 +13,7 @@ from .encoder import LLM_HIDDEN_SIZE
 PREFILL_LENGTH = 512
 CACHE_LENGTH = 2048
 MOSS_VOCAB_SIZE = 151936
-FLASH_ATTENTION_BIT_NAMES = ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+FLASH_ATTENTION_BIT_NAMES = ("q_bits", "k_bits", "v_bits", "p_bits")
 
 
 def parse_flash_attention(config: Any) -> dict[str, int] | None:

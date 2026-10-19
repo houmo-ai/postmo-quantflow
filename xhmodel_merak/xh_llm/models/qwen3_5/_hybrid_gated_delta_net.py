@@ -187,20 +187,18 @@ class HybridGatedAttentionMixin:
                 self.flash_q_bits = cfg_get("q_bits", cfg_get("q_manbit", legacy_manbit))
                 self.flash_k_bits = cfg_get("k_bits", cfg_get("k_manbit", 8))
                 self.flash_v_bits = cfg_get("v_bits", cfg_get("v_manbit", 8))
-                self.flash_s_bits = cfg_get("s_bits", cfg_get("p_manbit", self.flash_q_bits))
-                self.flash_p_bits = cfg_get("p_bits", cfg_get("p_manbit", self.flash_s_bits))
+                self.flash_p_bits = cfg_get("p_bits", cfg_get("p_manbit", 8))
                 flash_bits = {
                     "q_bits": self.flash_q_bits,
                     "k_bits": self.flash_k_bits,
                     "v_bits": self.flash_v_bits,
-                    "s_bits": self.flash_s_bits,
                     "p_bits": self.flash_p_bits,
                 }
                 invalid_bits = {name: value for name, value in flash_bits.items() if value not in (8, 16)}
                 if invalid_bits:
                     invalid = ", ".join(f"{name}={value}" for name, value in invalid_bits.items())
                     raise ValueError(
-                        f"flash_attention q_bits/k_bits/v_bits/s_bits/p_bits must be 8 or 16, got {invalid}"
+                        f"flash_attention q_bits/k_bits/v_bits/p_bits must be 8 or 16, got {invalid}"
                     )
         if self.use_flash_attention:
             self.flash_attn = FlashAttention(
@@ -211,7 +209,6 @@ class HybridGatedAttentionMixin:
                 q_bits=self.flash_q_bits,
                 k_bits=self.flash_k_bits,
                 v_bits=self.flash_v_bits,
-                s_bits=self.flash_s_bits,
                 p_bits=self.flash_p_bits,
             )
         self.use_cache = cfg.use_cache

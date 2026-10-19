@@ -12,7 +12,7 @@ from typing import Any
 import onnx
 
 
-FLASH_BITS = ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+FLASH_BITS = ("q_bits", "k_bits", "v_bits", "p_bits")
 ACTIVATION_OPS = {"Linear", "MatMul"}
 SEFP16_ACTIVATION_ATTRIBUTES = {
     "hmfp_act_man_bit": 16,

@@ -250,7 +250,8 @@ def test_multimodal_w8_export_move_reload_generate(tmp_path, monkeypatch):
         assert not any(node.op_type in ("MatMul", "Softmax") for node in graph.graph.node)
         attrs = {a.name: onnx.helper.get_attribute_value(a) for a in attention[0].attribute}
         assert attrs["is_causal"] == 0
-        for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits"):
+        assert "s_bits" not in attrs
+        for name in ("q_bits", "k_bits", "v_bits", "p_bits"):
             assert attrs[name] == 16
     monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
     model = AutoLLMHONNXModel.from_pretrained(str(meta_path), device_map=["cuda:0"])

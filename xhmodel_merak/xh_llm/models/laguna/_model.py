@@ -299,13 +299,11 @@ class _LagunaAttention(DynamicModule):
             q_bits = int(_cfg_get(flash_attention_cfg, "q_bits", 8))
             k_bits = int(_cfg_get(flash_attention_cfg, "k_bits", 8))
             v_bits = int(_cfg_get(flash_attention_cfg, "v_bits", 8))
-            s_bits = int(_cfg_get(flash_attention_cfg, "s_bits", q_bits))
-            p_bits = int(_cfg_get(flash_attention_cfg, "p_bits", s_bits))
+            p_bits = int(_cfg_get(flash_attention_cfg, "p_bits", 8))
             bits = {
                 "q_bits": q_bits,
                 "k_bits": k_bits,
                 "v_bits": v_bits,
-                "s_bits": s_bits,
                 "p_bits": p_bits,
             }
             invalid = {name: value for name, value in bits.items() if value not in (8, 16)}

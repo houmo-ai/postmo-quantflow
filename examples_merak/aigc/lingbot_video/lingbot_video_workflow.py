@@ -62,7 +62,7 @@ def _config_overrides(args: argparse.Namespace) -> dict[str, object]:
         for component in ("text_encoder", "visual_encoder", "transformer"):
             for schema in ("act_scheme", "act_schema_2"):
                 overrides[f"export.components.{component}.ops.MatMul.{schema}.bits"] = activation_bits
-        for operand in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits"):
+        for operand in ("q_bits", "k_bits", "v_bits", "p_bits"):
             overrides[f"export.components.transformer.flash_attention.{operand}"] = activation_bits
     return overrides
 

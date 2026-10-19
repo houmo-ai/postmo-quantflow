@@ -91,13 +91,13 @@ class DFlashCrossAttention(nn.Module):
         self.use_flash_attention = bool(flash_attention.get("enable", False))
         if self.use_flash_attention:
             flash_bits = {
-                name: int(flash_attention.get(name, 8)) for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+                name: int(flash_attention.get(name, 8)) for name in ("q_bits", "k_bits", "v_bits", "p_bits")
             }
             invalid_bits = {name: value for name, value in flash_bits.items() if value not in (8, 16)}
             if invalid_bits:
                 invalid = ", ".join(f"{name}={value}" for name, value in invalid_bits.items())
                 raise ValueError(
-                    f"DFlash flash_attention q_bits/k_bits/v_bits/s_bits/p_bits must be 8 or 16, got {invalid}"
+                    f"DFlash flash_attention q_bits/k_bits/v_bits/p_bits must be 8 or 16, got {invalid}"
                 )
             # DFlash predicts its complete masked-token block in parallel.
             # Every query sees the same target-prefix + noise-token K/V range,

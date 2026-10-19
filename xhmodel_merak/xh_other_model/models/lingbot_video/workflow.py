@@ -259,11 +259,11 @@ class LingBotVideoWorkflow(BaseOtherModelWorkflow):
             )
         invalid_flash_bits = {
             name: flash_cfg.get(name)
-            for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+            for name in ("q_bits", "k_bits", "v_bits", "p_bits")
             if int(flash_cfg.get(name, 0)) not in (8, 16)
         }
         if invalid_flash_bits:
-            raise ValueError(f"LingBot FlashAttention q/k/v/s/p bits must be 8 or 16; got {invalid_flash_bits}.")
+            raise ValueError(f"LingBot FlashAttention q/k/v/p bits must be 8 or 16; got {invalid_flash_bits}.")
 
     @staticmethod
     def _validate_model_dir(model_dir: Path) -> None:

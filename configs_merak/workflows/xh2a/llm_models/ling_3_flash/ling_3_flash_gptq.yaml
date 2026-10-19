@@ -32,7 +32,6 @@ export:
       q_bits: 8
       k_bits: 8
       v_bits: 8
-      s_bits: 8
       p_bits: 8
 
 quant:

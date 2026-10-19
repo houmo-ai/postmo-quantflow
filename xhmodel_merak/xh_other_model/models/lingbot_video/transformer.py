@@ -158,7 +158,7 @@ def _flash_attention_bits(component_cfg: dict[str, Any]) -> dict[str, int]:
         )
     quant_type = str(component_cfg.get("quant_type", "w8a8h1_sefp"))
     default_bits = 16 if "a16" in quant_type.lower() else 8
-    return {name: int(flash_cfg.get(name, default_bits)) for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")}
+    return {name: int(flash_cfg.get(name, default_bits)) for name in ("q_bits", "k_bits", "v_bits", "p_bits")}
 
 
 def _transformer_timestep_values(

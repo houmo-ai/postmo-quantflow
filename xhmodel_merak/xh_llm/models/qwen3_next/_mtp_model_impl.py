@@ -145,7 +145,7 @@ class MTPGatedAttention(nn.Module):
         if self.use_flash_attention:
             flash_bits = {
                 name: int(flash_attention.get(name, 8))
-                for name in ("q_bits", "k_bits", "v_bits", "s_bits", "p_bits")
+                for name in ("q_bits", "k_bits", "v_bits", "p_bits")
             }
             invalid_bits = {
                 name: value for name, value in flash_bits.items() if value not in (8, 16)
@@ -155,7 +155,7 @@ class MTPGatedAttention(nn.Module):
                     f"{name}={value}" for name, value in invalid_bits.items()
                 )
                 raise ValueError(
-                    "MTP flash_attention q_bits/k_bits/v_bits/s_bits/p_bits "
+                    "MTP flash_attention q_bits/k_bits/v_bits/p_bits "
                     f"must be 8 or 16, got {invalid}"
                 )
             self.flash_attn = xhnn.FlashAttention(

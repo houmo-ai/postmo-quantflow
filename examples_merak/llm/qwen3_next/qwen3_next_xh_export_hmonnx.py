@@ -33,7 +33,6 @@ def build_config(args: argparse.Namespace) -> XHQwen3NextModelConfig:
             "q_bits": args.flash_attention_bits,
             "k_bits": args.flash_attention_bits,
             "v_bits": args.flash_attention_bits,
-            "s_bits": args.flash_attention_bits,
             "p_bits": args.flash_attention_bits,
         },
         fuse_gdr_ops=args.fuse_gdr_ops,
