@@ -24,6 +24,13 @@
 不更新 ONNX 引用。尺寸含义和轴顺序由模型 README 说明，不凭目录数字猜测。
 同一组件存在多个部署档位时分别登记；参考浮点图不替代实际运行的 HMONNX。
 
+DeepSeek V4 和 GLM5.3 Flash 的统一导出将主模型 prefill/decode 中同类型、同形状、
+同内容的外部张量流式合并。两个阶段各保留 `weights.bin`，通过硬链接共享磁盘数据；
+图只引用阶段内的文件，不引入根目录权重或专用加载协议。DeepSeek 的 DSpark 组件
+保持独立，不参加这次整理。其他模型不自动启用该步骤。
+交付使用 `tar -cf model.tar -C <父目录> <产物目录>`，解包用 `tar -xf model.tar`；
+不要使用 `--hard-dereference`。普通 ZIP 不能保留这份硬链接共享关系。
+
 ```text
 <output_dir>/
 ├── encode/<release_prefix>_encode_with_act.onnx

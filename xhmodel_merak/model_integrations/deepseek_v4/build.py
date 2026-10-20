@@ -4,10 +4,20 @@ import hashlib
 from pathlib import Path
 
 from xhmodel_merak.model_integrations.autoregressive.build import (
-    normalize_export, package_runtime as package_autoregressive_runtime, sanitize_artifact,
+    normalize_export as normalize_autoregressive_export,
+    package_runtime as package_autoregressive_runtime, sanitize_artifact,
     validate_artifact as validate_autoregressive_artifact,
 )
 from xhmodel_merak.model_artifact.files import confined_file
+
+
+def normalize_export(stage_path, export_result, plan):
+    """Share only target prefill/decode weights; DSpark components stay independent."""
+    from xhmodel_merak.model_integrations.shared_weights import compact_language_weights
+
+    result = normalize_autoregressive_export(stage_path, export_result, plan)
+    compact_language_weights(stage_path)
+    return result
 
 
 def inspect_auxiliary_checkpoint_weights(root, plan):

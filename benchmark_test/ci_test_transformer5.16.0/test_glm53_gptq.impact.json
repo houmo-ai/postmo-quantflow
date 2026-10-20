@@ -16,7 +16,8 @@
         "xhmodel_merak/xh_llm/models/deepseek_v4/moe.py",
         "xhmodel_merak/model_integrations/autoregressive/build.py",
         "xhmodel_merak/model_integrations/autoregressive/export_info.py",
-        "xhmodel_merak/model_artifact/export_info.py"
+        "xhmodel_merak/model_artifact/export_info.py",
+        "xhmodel_merak/model_integrations/shared_weights.py"
       ]
     }
   ]

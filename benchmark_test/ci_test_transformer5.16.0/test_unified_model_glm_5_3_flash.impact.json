@@ -24,7 +24,8 @@
         "xhmodel_merak/xh_llm/models/glm5_3_flash/**",
         "xhmodel_merak/model_integrations/glm53/**",
         "benchmark_test/ci_test_transformer5.16.0/_glm53_packed_fixture.py",
-        "benchmark_test/ci_test_transformer5.16.0/test_glm53_multimodal.py"
+        "benchmark_test/ci_test_transformer5.16.0/test_glm53_multimodal.py",
+        "xhmodel_merak/model_integrations/shared_weights.py"
       ]
     },
     {
