@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-exp-mtp",
+      "patterns": [
+        "xhmodel_merak/xh_llm/mrope.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/mtp*.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/modeling.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/cache_contract.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/qsa_host_controls.py",
+        "xhmodel_merak/xh_llm/sparse_attention.py",
+        "xhmodel_merak/xh_llm/sparse_attention_controls.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/hmonnx_export.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/serving_workflow.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/serving_export.py",
+        "xhmodel_merak/xh_llm/shared_head.py",
+        "xhmodel_merak/exec_backends/__init__.py",
+        "xhmodel_merak/exec_backends/factory.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/host_ple_runtime.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/xhquant_extensions.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/autoround_hybrid.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py"
+      ]
+    }
+  ]
+}

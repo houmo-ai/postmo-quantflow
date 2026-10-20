@@ -28,13 +28,16 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         super().__init__(meta_info, **kwargs)
         self.visual_meta = meta_info.visual_config
         enable_golden = kwargs.get("enable_golden", False)
-        if not getattr(self.visual_meta, "gears", None):
-            raise ValueError("Qwen3.5 MoE visual metadata must contain patch-token gears")
-        self.visual = VisualTokenGearHMONNXModel(
-            self.visual_meta,
-            device=self.prefill_model.device,
-            enable_golden=enable_golden,
-        )
+        if self.visual_meta is None:
+            self.visual = None
+        else:
+            if not getattr(self.visual_meta, "gears", None):
+                raise ValueError("Qwen3.5 MoE visual metadata must contain patch-token gears")
+            self.visual = VisualTokenGearHMONNXModel(
+                self.visual_meta,
+                device=self.prefill_model.device,
+                enable_golden=enable_golden,
+            )
         self._kvcache_mixin = Qwen3_5HMONNXKVCacheMixin(self.kvcache_config)
         self._kvcache_mixin.split_conv_cache = bool(getattr(meta_info.model_config, "split_conv_cache", False))
         self._sync_page_attention_mode_to_kvcache()
@@ -49,12 +52,14 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
 
     def _set_device(self, device):
         super()._set_device(device)
-        self.visual.to(device)
+        if self.visual is not None:
+            self.visual.to(device)
         return self
 
     def _set_dtype(self, dtype):
         super()._set_dtype(dtype)
-        self.visual._set_dtype(dtype)
+        if self.visual is not None:
+            self.visual._set_dtype(dtype)
         return self
 
     def _get_spec_decode_verify_steps(self) -> int:
@@ -69,6 +74,8 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
         return self._get_spec_decode_verify_steps()
 
     def get_tf_processor(self):
+        if self.visual_meta is None:
+            return self.get_tokenizer()
         processor = XHQwen3_5Processor.from_pretrained(self.hf_model_dir)
         processor.config.patch_size = self.visual_meta.patch_size
         processor.config.visual_input_mode = VISUAL_INPUT_PATCHES
@@ -95,6 +102,9 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
 
     def _get_data_preprocessor(self) -> Qwen3_5_DataPreprocess:
         input_sequence_length = self.get_input_sequence_length()
+        spatial_merge_size = getattr(self.meta_info.model_config, "spatial_merge_size", None)
+        if spatial_merge_size is None:
+            spatial_merge_size = 1
 
         data_preprocess = Qwen3_5_DataPreprocess(
             token_embedding=self.embed_tokens,
@@ -103,20 +113,21 @@ class XHQwen3_5MoeHMONNXModel(VisonLLMHMONNXModel):  # noqa: N801
             past_value_caches=self.past_value_caches,
             past_conv_caches=self.past_conv_caches,
             past_recurrent_states=self.past_recurrent_states,
-            patch_size=self.visual_meta.patch_size,
+            patch_size=getattr(self.visual_meta, "patch_size", 16),
             # temporal_patch_size=self.visual_meta.temporal_patch_size,
             image_token_id=self.meta_info.model_config.image_token_id,
             video_token_id=self.meta_info.model_config.video_token_id,
             vision_start_token_id=self.meta_info.model_config.vision_start_token_id,
             vision_end_token_id=self.meta_info.model_config.vision_end_token_id,
-            spatial_merge_size=self.meta_info.model_config.spatial_merge_size,
+            spatial_merge_size=spatial_merge_size,
             enable_page_attention=self.enable_page_attention,
         )
         return data_preprocess
 
     def _set_enable_golden(self, enable: bool) -> None:
         super()._set_enable_golden(enable)
-        self.visual.enable_golden = enable
+        if self.visual is not None:
+            self.visual.enable_golden = enable
 
     def _make_position_ids(self, seq_length: int, past_seq_length: int, device: torch.device):
         pos = torch.arange(past_seq_length, past_seq_length + seq_length, dtype=torch.long, device=device)

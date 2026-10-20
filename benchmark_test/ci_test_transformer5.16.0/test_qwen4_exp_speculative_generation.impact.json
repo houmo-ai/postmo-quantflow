@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-speculative-generation",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/generation.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/mtp_runtime.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/qwen4_exp_hmonnx_inference.py"
+      ]
+    }
+  ]
+}

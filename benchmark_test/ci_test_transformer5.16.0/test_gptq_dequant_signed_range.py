@@ -1,10 +1,15 @@
-"""Reject incompatible GPTQ codes rather than hide a corrupt checkpoint."""
+"""Preserve GPTQ checkpoint reader selection and signed integer codes."""
+
+import json
 
 import pytest
 import torch
 from torch import nn
+from transformers import AutoConfig
+from transformers.utils.quantization_config import GPTQConfig, QuantizationMethod
 
 from xhmodel_merak.xh_llm._dequant_converter import gptqmodel_torch_qlinear_converter
+from xhmodel_merak.xh_llm.base_model import XHBaseModel
 
 
 class _PackedLinear(nn.Module):
@@ -43,3 +48,32 @@ def test_gptq_out_of_signed_range_is_rejected_without_requantization(zero):
         gptqmodel_torch_qlinear_converter(linear)
     assert hasattr(linear, "qweight")
     assert not hasattr(linear, "weight")
+
+
+@pytest.mark.parametrize(
+    "producer",
+    [
+        {"provider": "auto-round"},
+        {"provider": "auto_round", "packing_format": "auto_round:auto_gptq"},
+        {"packing_format": "auto_round:gptq"},
+    ],
+)
+@pytest.mark.parametrize("typed", [False, True])
+def test_autoround_gptq_checkpoint_retains_gptq_reader(tmp_path, producer, typed):
+    # These fields are emitted by AutoRound but still describe GPTQ packed
+    # tensors. HF's generic loader would instantiate its own GPTQ quantizer.
+    quantization = {"quant_method": "gptq", "bits": 4, "group_size": 32, **producer}
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "qwen3_5", "quantization_config": quantization})
+    )
+    config = AutoConfig.from_pretrained(tmp_path).quantization_config
+    if typed:
+        config = GPTQConfig.from_dict(config)
+        for key, value in producer.items():
+            setattr(config, key, value)
+    assert XHBaseModel._get_quantization_method(config) == "gptq"
+
+
+@pytest.mark.parametrize("method", ["auto-round", QuantizationMethod.AUTOROUND])
+def test_native_autoround_checkpoint_retains_autoround_reader(method):
+    assert XHBaseModel._get_quantization_method({"quant_method": method}) == "auto-round"

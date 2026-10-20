@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test-qwen4-exp-precision",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/**",
+        "benchmark_test/ci_test_transformer5.16.0/test_qwen4_exp_precision.py"
+      ]
+    }
+  ]
+}

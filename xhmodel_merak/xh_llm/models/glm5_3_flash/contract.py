@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from ...sparse_attention_controls import build_sparse_attention_controls
+
 
 LINEAR = "linear_attention"
 DSA = "deepseek_sparse_attention"
@@ -17,14 +19,13 @@ CONTROL_NAMES = (
     "pool_new_count",
     "pool_write_start",
     "query_validity",
-    "tail_indices",
     "dsa_attention_mask",
 )
 
 
 def validate_state_abi(version):
-    if version != 3:
-        raise ValueError(f"Unsupported GLM-5.3 state ABI {version!r}; expected 3. Re-export the older graph.")
+    if version != 4:
+        raise ValueError(f"Unsupported GLM-5.3 state ABI {version!r}; expected 4. Re-export the older graph.")
 
 
 def validate_state_graph(graph, spec, stage):
@@ -37,11 +38,23 @@ def validate_state_graph(graph, spec, stage):
     inputs = {value.name: value for value in graph.input}
     mask = inputs.get("dsa_attention_mask")
     if mask is None:
-        raise ValueError(f"{stage}: GLM state ABI 3 requires dsa_attention_mask; re-export the older graph")
+        raise ValueError(f"{stage}: GLM state ABI 4 requires dsa_attention_mask; re-export the older graph")
     query_length = graph.input[0].type.tensor_type.shape.dim[1].dim_value
     shape = [dim.dim_value for dim in mask.type.tensor_type.shape.dim]
     if shape != [1, query_length, 1, spec.selected_pools * 4 + 3]:
-        raise ValueError(f"{stage}: invalid GLM state ABI 3 attention mask shape: {shape}")
+        raise ValueError(f"{stage}: invalid GLM state ABI 4 attention mask shape: {shape}")
+    if "tail_indices" in inputs:
+        raise ValueError(f"{stage}: GLM state ABI 4 uses a streaming tail cache, not tail_indices")
+    outputs = {value.name: value for value in graph.output}
+    for index, kind in enumerate(spec.layer_types):
+        if kind == DSA:
+            for values, suffix in ((inputs, "input"), (outputs, "output")):
+                name = f"layer_{index}_latent_tail_{suffix}"
+                entry = values.get(name)
+                if entry is None or [dim.dim_value for dim in entry.type.tensor_type.shape.dim] != [
+                    1, 1, spec.pool_size - 1, spec.latent_dim,
+                ]:
+                    raise ValueError(f"{stage}: GLM state ABI 4 requires {name}")
     for name in ("valid_length", "current_length"):
         length = inputs.get(name)
         if length is None or length.type.tensor_type.elem_type != onnx.TensorProto.INT32:
@@ -51,7 +64,7 @@ def validate_state_graph(graph, spec, stage):
     selections = [node for node in graph.node if node.op_type == "SparseAttentionSelectKV"]
     if len(selections) != expected:
         raise ValueError(
-            f"{stage}: GLM state ABI 3 requires TE SelectKV for all {expected} DSA layers; "
+            f"{stage}: GLM state ABI 4 requires TE SelectKV for all {expected} DSA layers; "
             "re-export legacy TopK selection graphs"
         )
     for node in selections:
@@ -66,7 +79,7 @@ def validate_state_graph(graph, spec, stage):
             or node.input[3] != "valid_length"
             or node.input[5] != "current_length"
         ):
-            raise ValueError(f"{stage}: invalid GLM state ABI 3 TE SelectKV ports; re-export the older graph")
+            raise ValueError(f"{stage}: invalid GLM state ABI 4 TE SelectKV ports; re-export the older graph")
 
 
 @dataclass(frozen=True)
@@ -146,11 +159,14 @@ class Glm53CacheSpec:
             (1, 1, self.pool_capacity, self.index_dim),
             (1, self.pool_size, self.index_dim),
             (1, self.pool_size, self.index_dim),
+            (1, 1, self.pool_size - 1, self.latent_dim),
         )
 
     @staticmethod
     def cache_suffixes(kind):
-        return ("conv", "recurrent") if kind == LINEAR else ("latent", "pool", "index_key", "index_score")
+        return ("conv", "recurrent") if kind == LINEAR else (
+            "latent", "pool", "index_key", "index_score", "latent_tail",
+        )
 
     def initial_caches(self, *, device="cpu", dtype=torch.float32):
         from xhquant.core import CacheTensor
@@ -159,7 +175,7 @@ class Glm53CacheSpec:
         for kind in self.layer_types:
             state = [torch.zeros(s, device=device, dtype=dtype) for s in self.cache_shapes(kind)]
             if kind == DSA:
-                state[-1].fill_(-32768.0)
+                state[3].fill_(-32768.0)
                 state[0], state[1] = CacheTensor(state[0]), CacheTensor(state[1])
             else:
                 state[1] = CacheTensor(state[1])
@@ -203,39 +219,13 @@ class Glm53CacheSpec:
 
 def build_transition(spec, past_length, current_length, input_length, *, device="cpu", dtype=torch.float32):
     """One descriptor from committed length L and real length n; right padding only."""
-    if past_length < 0 or not 0 < current_length <= input_length:
-        raise ValueError("require L >= 0 and 0 < n <= fixed input length")
-    if past_length + current_length > spec.max_context_length:
-        raise ValueError("request exceeds the configured context capacity")
-    r = spec.pool_size
-    query_slots = torch.arange(input_length, device=device)
-    real = query_slots < current_length
-    visible = past_length + query_slots + 1
-    complete = visible // r
-    pool_valid = torch.where(real, complete, 0).unsqueeze(0).to(torch.int32)
-    tail_slots = torch.arange(r - 1, device=device)
-    tail_valid = (tail_slots[None, :] < (visible % r)[:, None]) & real[:, None]
-    tail = complete[:, None] * r + tail_slots[None, :]
-    tail = torch.where(tail_valid, tail, 0).to(torch.int32)
-    selected_slots = torch.arange(spec.selected_pools * r, device=device)
-    selected_valid = selected_slots[None, :] < (pool_valid[0].clamp(max=spec.selected_pools) * r)[:, None]
-    attention_valid = torch.cat((selected_valid, tail_valid), dim=-1)
-    # SelectKV puts the valid selections first, so Host can prepare this mask
-    # without reading the selected indices or receiving another operator output.
-    attention_mask = torch.zeros_like(attention_valid, dtype=dtype).masked_fill(~attention_valid, -65504.0)
-
+    controls = build_sparse_attention_controls(
+        past_length, current_length, input_length, spec.max_context_length, spec.selected_pools,
+        pool_size=spec.pool_size, device=device, dtype=dtype,
+    )
     def scalar(value):
         return torch.tensor([value], device=device, dtype=torch.int32)
-
-    values = (
-        scalar(past_length),
-        scalar(current_length),
-        scalar(current_length - 1),
-        scalar(r - past_length % r),
-        scalar((past_length % r + current_length) // r),
-        scalar(past_length // r),
-        real[None].to(dtype),
-        tail[None],
-        attention_mask[None, :, None, :],
-    )
+    values = (scalar(past_length), scalar(current_length), scalar(current_length - 1),
+              controls["pool_offset"], controls["pool_new_count"], controls["pool_write_start"],
+              controls["query_validity"], controls["attention_mask"])
     return dict(zip(CONTROL_NAMES, values, strict=True))

@@ -51,13 +51,12 @@ from ..qwen3_5 import split_conv_cache_utils as _split_conv_cache_utils
 from ..qwen3_5._hybrid_gated_delta_net import (
     HybridDecoderLayerMixin,
     HybridGatedAttentionMixin,
-    HybridGatedDeltaNetMixin,
     HybridRMSNormGatedMixin,
     HybridRMSNormMixin,
 )
-from ..qwen3_5._hybrid_moe import HybridSparseMoeMixin
 from ..qwen3_5._hybrid_registry import ensure_hybrid_fused_rms_norm_registered
 from ..qwen3_5._hybrid_text_model import HybridTextModelMixin
+from .autoround_hybrid import AutoRoundGatedDeltaNetMixin, AutoRoundSparseMoeMixin
 
 
 _regroup_split_conv_cache_inputs = _split_conv_cache_utils._regroup_flat_split_conv_cache
@@ -217,7 +216,7 @@ class _Qwen3_5MoeAttention(HybridGatedAttentionMixin, DynamicModule):  # noqa: N
 # GatedDeltaNet (linear attention)
 # ============================================================================
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeGatedDeltaNet: "Qwen3_5MoeGatedDeltaNet"})
-class _Qwen3_5MoeGatedDeltaNet(HybridGatedDeltaNetMixin, DynamicModule):  # noqa: N801
+class _Qwen3_5MoeGatedDeltaNet(AutoRoundGatedDeltaNetMixin, DynamicModule):  # noqa: N801
     """Registered Qwen3.5-MoE adapter for the shared hybrid GDN path."""
 
     pass
@@ -227,7 +226,7 @@ class _Qwen3_5MoeGatedDeltaNet(HybridGatedDeltaNetMixin, DynamicModule):  # noqa
 # SparseMoeBlock (packed Experts + shared expert)
 # ============================================================================
 @XHLLM_TRACEABLE_MODULES.register_module({Qwen3_5MoeSparseMoeBlock: "Qwen3_5MoeSparseMoeBlock"})
-class _Qwen3_5MoeSparseMoeBlock(HybridSparseMoeMixin, DynamicModule):  # noqa: N801
+class _Qwen3_5MoeSparseMoeBlock(AutoRoundSparseMoeMixin, DynamicModule):  # noqa: N801
     """Registered adapter for the shared sparse-MoE implementation."""
 
     pass

@@ -565,13 +565,20 @@ def test_every_public_vlm_variant_declares_the_registered_visual_contract():
     for recipe in list_recipes():
         if recipe.vision_profile is None:
             continue
-        assert recipe.config_resolver is not None
-        planning_module, _, _ = recipe.config_resolver.partition(":")
-        validate_visual_workflow = importlib.import_module(planning_module)._validate_visual_workflow
+        validate_visual_workflow = None
+        if recipe.config_resolver is not None:
+            planning_module, _, _ = recipe.config_resolver.partition(":")
+            validate_visual_workflow = importlib.import_module(planning_module)._validate_visual_workflow
         for variant in recipe.variants:
             for workflow in {variant.workflow_config, *(path for _, path in variant.context_workflows)}:
                 data = yaml.safe_load(resolve_workflow_config(workflow).read_text(encoding="utf-8"))
-                validate_visual_workflow(recipe, data)
+                if validate_visual_workflow is not None:
+                    validate_visual_workflow(recipe, data)
+                else:
+                    visual = data["export"]["model"]["visual_config"]
+                    assert visual["enable"] is True
+                    assert tuple(visual["image_token_gears"]) == recipe.vision_gears
+                    assert visual["quant_scheme"]["quant_type"] == recipe.deployment_precision["visual"]
 
 
 @pytest.mark.parametrize(

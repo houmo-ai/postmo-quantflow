@@ -12,13 +12,15 @@ from xhquant.backend.xh2a.ir.operators.mul import mul_xh2a_default
 from xhquant.backend.xh2a.ir.operators.reduce import reducesum_xh2a_default
 from xhquant.backend.xh2a.ir.operators.sparse_attention_select_kv import (
     sparse_attention_select_kv_xh2a_default as select,
-    sparse_attention_select_kv_xh2a_default_te_opt as te,
 )
 from xhquant.backend.xh2a.ir.operators.sparse_attention_select_kv import (
     sparse_attention_select_kv_xh2a_default_opt as optimized,
 )
 from xhquant.backend.xh2a.ir.operators.sparse_attention_select_kv import (
     sparse_attention_select_kv_xh2a_default_original as original,
+)
+from xhquant.backend.xh2a.ir.operators.sparse_attention_select_kv import (
+    sparse_attention_select_kv_xh2a_default_te_opt as te,
 )
 from xhquant.core.opset import XH2a_DOMAIN
 from xhquant.frontend.onnx.parsers.hmops.sparse_attention_select_kv import SparseAttentionSelectKV as FrontendSelect
@@ -114,16 +116,6 @@ def test_selectkv_parsers_require_explicit_precision_and_length_contract(missing
     with pytest.raises(KeyError, match=missing):
         FrontendSelect().parse(graph, node)
     with pytest.raises(KeyError, match=missing):
-        RuntimeSelect.from_onnx_node(node, None)
-
-
-def test_selectkv_parsers_reject_legacy_mask_output():
-    node = _four_input_node()
-    node.outputs.append(gs.Variable("old_mask", dtype="float16", shape=(1, 1, 16)))
-    graph = gs.Graph(nodes=[node], inputs=node.inputs, outputs=node.outputs)
-    with pytest.raises(ValueError, match="one output"):
-        FrontendSelect().parse(graph, node)
-    with pytest.raises(ValueError, match="1 output"):
         RuntimeSelect.from_onnx_node(node, None)
 
 

@@ -196,6 +196,7 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
             }
         elif not model.startswith(("macaron", "qwen", "ornith")) or model in {
             "qwen3-next-80b-a3b",
+            "qwen3.5-moe-text",
             "qwen-image-2.1",
             "qwen-image-2.1-turbo",
         }:
@@ -329,6 +330,7 @@ def test_registry_covers_each_public_artifact_kind():
         "qwen_image21",
         "flux3_klein",
         "wall_oss",
+        "qwen4-exp",
         "minicpm_v_4_7",
         "minicpm_o_4_5",
         "sol_h3",

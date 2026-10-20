@@ -36,16 +36,35 @@ def test_every_registered_variant_has_a_unique_integration_case():
 def test_variants_have_compatible_dependencies_within_their_transformers_environment():
     from xhmodel_merak.model_catalog.dependencies import dependency_profile, merge_requirements
 
-    requirements = {}
+    environments = {}
     for recipe in list_recipes():
         for variant in recipe.variants:
             profile = dependency_profile(recipe, variant)
-            for phase in ("build", "inference"):
-                values = profile[phase]["pip"]
-                version = next(r for r in values if r.startswith("transformers=="))
-                requirements.setdefault(version, []).extend(values)
-    for values in requirements.values():
-        merge_requirements(tuple(values))
+            # Model/phase profiles run in separate environments: Qwen4 visual
+            # export needs Torch 2.11 while its SDK inference uses Torch 2.8.
+            # Every executable profile must still be internally consistent;
+            # models may declare different Transformers environments.
+            phases = {
+                phase: profile[phase] for phase in ("build", "inference", "checkpoint_build")
+            }
+            phases.update({f"quantization/{method}": requirements
+                           for method, requirements in profile["quantization"].items()})
+            for phase, requirements in phases.items():
+                values = requirements["pip"]
+                transformers_pins = tuple(value for value in values if value.startswith("transformers=="))
+                assert len(transformers_pins) == 1, (
+                    recipe.model_id, variant.name, phase
+                )
+                merge_requirements(tuple(values))
+                if phase in {"build", "inference"}:
+                    torch_pins = tuple(value for value in values if value.startswith("torch=="))
+                    assert len(torch_pins) == 1
+                    environment = (profile["python"], torch_pins, transformers_pins)
+                    environments.setdefault(environment, []).extend(values)
+    # Preserve the shared-environment compatibility gate for all profiles that
+    # use the same Python/Torch/Transformers versions, including other families.
+    for requirements in environments.values():
+        merge_requirements(tuple(requirements))
 
 
 def _selected_cases(paths):
@@ -81,7 +100,7 @@ def test_private_model_and_adapter_changes_select_related_cases():
         }
     assert _selected_cases(["xhmodel_merak/model_integrations/pi05/inference.py"]) == {"pi0.5-libero/lerobot-h50"}
     assert _selected_cases(["xhmodel_merak/xh_llm/models/qwen3_5_moe/_moe_model.py"]) == {
-        c.id for c in CASES if c.fixture in {"qwen_moe", "macaron"}
+        c.id for c in CASES if c.fixture in {"qwen_moe", "qwen_moe_text", "macaron"}
     }
     assert _selected_cases(["xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py"]) == {
         c.id
@@ -167,7 +186,9 @@ def test_helpers_select_only_actual_model_consumers():
     }
     assert selected("_unified_fixtures/deepseek_v4.py") == {case.id for case in CASES if case.fixture == "deepseek_v4"}
     assert selected("_unified_fixtures/minicpm_v47.py") == {case.id for case in CASES if case.fixture == "minicpm_v47"}
-    assert selected("fixtures/unified/qwen_dense.json") == {case.id for case in CASES if case.fixture in {"qwen_dense", "bonsai"}}
+    assert selected("fixtures/unified/qwen_dense.json") == {
+        case.id for case in CASES if case.fixture in {"qwen_dense", "bonsai"}
+    }
     assert selected("fixtures/depthsplat/release.json") == {case.id for case in CASES if case.fixture == "depthsplat"}
     for helper in ("_unified_runner.py", "_unified_e2e_worker.py", "_unified_preparation.py"):
         assert selected(helper) == {case.id for case in CASES}

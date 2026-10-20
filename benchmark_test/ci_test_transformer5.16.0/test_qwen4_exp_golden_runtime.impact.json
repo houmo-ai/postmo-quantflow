@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-exp-real-sdk-golden",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/golden_runtime.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/golden_package.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/generation.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/host_ple_inputs.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/ple_demo.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_qwen4_exp_golden_runtime.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/mtp_runtime.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/qwen4_exp_hmonnx_inference.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/hmonnx_validation.py",
+        "examples_merak/llm/qwen4_exp/qwen4_exp_xh_hmonnx_generate.py"
+      ]
+    }
+  ]
+}

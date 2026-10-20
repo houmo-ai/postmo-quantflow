@@ -37,7 +37,7 @@ def run(model_dir, layer, device, dtype, output, lengths=(78, 1, 1, 1, 256, 55))
     cache = DynamicCache(config=config)
     states = [torch.zeros(s, device=device, dtype=dtype) for s in spec.cache_shapes(config.layer_types[layer])]
     if not linear:
-        states[-1].fill_(-32768)
+        states[3].fill_(-32768)
     past = 0
     rows = []
     with torch.inference_mode():
@@ -64,8 +64,6 @@ def run(model_dir, layer, device, dtype, output, lengths=(78, 1, 1, 1, 256, 55))
                     t["pool_new_count"],
                     t["pool_write_start"],
                     t["query_validity"],
-                    t["pool_valid_length"],
-                    t["tail_indices"],
                     t["dsa_attention_mask"],
                     *states,
                 )

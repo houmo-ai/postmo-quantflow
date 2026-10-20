@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-exp-explicit-build-entry",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/build_entry.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/checkpoint_patch.py",
+        "examples_merak/llm/qwen4_exp/build.py",
+        "xhmodel_merak/model_build/checkpoint.py",
+        "xhmodel_merak/model_build/resolver.py"
+      ]
+    }
+  ]
+}

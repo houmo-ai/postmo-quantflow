@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-autoround-hybrid-payloads",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/autoround_hybrid.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/_moe_model.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/modeling.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py"
+      ]
+    }
+  ]
+}

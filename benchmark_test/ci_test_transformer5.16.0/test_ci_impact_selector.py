@@ -146,6 +146,12 @@ def test_moe_source_selects_its_registered_block_export(filename, expects_layout
         f"{SUITE_RELATIVE}/test_qwen35_moe_lora_low_memory.py",
         f"{SUITE_RELATIVE}/test_macaron_runtime_model_inputs.py",
     })
+    if filename in {"qwen3_5_moe_model.py", "xh_qwen3_5_moe_config.py", "qwen3_5_moe_hmonnx_inference.py"}:
+        text_model = f"{SUITE_RELATIVE}/test_unified_model_qwen3_5_moe_text.py"
+        expected.add(text_model)
+        assert f"rule:qwen35-moe-text-public-checkpoint:{changed}" in selection.reasons[text_model]
+    if filename in {"qwen3_5_moe_model.py", "xh_qwen3_5_moe_config.py"}:
+        expected.add(f"{SUITE_RELATIVE}/test_qwen35_autoround_checkpoint_import.py")
     if filename == "qwen3_5_moe_model.py":
         expected.add(f"{SUITE_RELATIVE}/test_hmonnx_export_boundary.py")
     if filename == "_vision_model_impl.py":
@@ -164,6 +170,9 @@ def test_moe_source_selects_its_registered_block_export(filename, expects_layout
         safe_prune = f"{SUITE_RELATIVE}/test_qwen35_safe_prune.py"
         expected.add(safe_prune)
         assert f"rule:qwen35-safe-decode:{changed}" in selection.reasons[safe_prune]
+        autoround_frontend = f"{SUITE_RELATIVE}/test_qwen35_autoround_frontend_quant_policy.py"
+        expected.add(autoround_frontend)
+        assert f"rule:qwen35-autoround-frontend-weight-schemas:{changed}" in selection.reasons[autoround_frontend]
     assert set(selection.tests) == expected
     assert f"rule:qwen35-moe-source:{changed}" in selection.reasons[target]
     assert selection.full_suite is False

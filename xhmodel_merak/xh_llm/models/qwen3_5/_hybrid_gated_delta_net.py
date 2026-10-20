@@ -71,9 +71,12 @@ class HybridRMSNormMixin:
 class HybridRMSNormGatedMixin:
     """Shared gated RMSNorm adapter used by the hybrid GDN output."""
 
+    def _apply_output_gate(self, normalized, gate, hidden_states):
+        del hidden_states
+        return normalized * F.silu(gate)
+
     def forward(self, hidden_states, gate=None):
-        hidden_states = self.norm(hidden_states)
-        return hidden_states * F.silu(gate)
+        return self._apply_output_gate(self.norm(hidden_states), gate, hidden_states)
 
     def _setup(self, cfg: Optional[Dict] = None):
         del cfg
@@ -371,6 +374,8 @@ def _resolve_python_int_length(value) -> Optional[int]:
     """
     if value is None:
         return None
+    if isinstance(value, int):
+        return value
     proxy_type_name = value.__class__.__name__
     if proxy_type_name in {"Proxy", "Attribute"}:
         return None

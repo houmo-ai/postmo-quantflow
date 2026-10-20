@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "qwen4-exp-mtp-snapshot",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/qwen4_exp/mtp_snapshot.py",
+      "xhmodel_merak/xh_llm/models/qwen4_exp/mtp_runtime.py",
+      "xhmodel_merak/xh_llm/models/qwen4_exp/generation.py",
+      "xhmodel_merak/xh_llm/models/qwen4_exp/cache_contract.py"
+    ]
+  }]
+}

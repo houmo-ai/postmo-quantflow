@@ -297,3 +297,15 @@ python examples_merak/llm/qwen3_5/qwen3_5_workflow.py \
 
 DFlash/DFlash2 保留各自 assistant 配置和导出 ABI，仅 head 继承目标模型。
 各 HMONNX 图分别携带继承的 head 权重；运行时 session 独立加载，不要求底层存储共享。
+
+## 文本 AutoRound checkpoint 的消费校验
+
+独立 `Qwen3_5MoeForCausalLM` 的 GPTQ-v2 导入识别完整的
+`qweight/qzeros/scales/g_idx`，包括 untied packed `lm_head`；已有 packed head
+优先于额外提供的原始 head。四张量残缺时报格式错误。
+
+当前 SSFP 消费接口同时使用整数码和浮点权重推导 group scale。若 checkpoint 同时
+保存浮点副本，两份必须一致；scale 和整数码还必须能通过该接口精确保留，否则导入
+提前拒绝。负 scale 仅在符号吸收不越过 W4/W8 范围时接受，禁止静默饱和。
+这是一项已有量化产物的消费约束，不在导出过程中重新校准或修复 producer 权重。
+调用方显式传入的 `trust_remote_code=False` 同时约束配置和模型加载。

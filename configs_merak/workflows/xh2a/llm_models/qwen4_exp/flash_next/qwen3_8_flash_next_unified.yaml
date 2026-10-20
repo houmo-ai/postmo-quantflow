@@ -1,0 +1,75 @@
+quant:
+  algorithm: gptqmodel
+  method: rtn
+  output_format: gptqmodel_hf
+  artifact_format: gptqmodel_hf
+  bits: 8
+  group_size: 64
+  rotation: false
+  vision_quarot: null
+  calibration:
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    text_key: text
+    nsamples: 128
+    seqlen: 2048
+  runtime:
+    batch_size: 1
+    device: cuda:0
+    auto_forward_data_parallel: false
+    moe_routing_batch_size: 128
+    wait_for_submodule_finalizers: true
+    gc_mode: on_stage_end
+    trust_remote_code: false
+    dry_run: false
+    skip_eval: true
+  iters: 0
+  disable_opt_rtn: true
+  seed: 42
+  preserve_mtp: true
+  moe:
+    attention_bits: 8
+    linear_attention_bits: 8
+    shared_expert_bits: 8
+    expert_bits: 4
+    routing: bypass
+export:
+  model:
+    chip_arch: XH2a
+    hf_model: null
+    model_type: Qwen4ExpForConditionalGeneration
+    # Host PLE table precision is independent of the W8A8 graph scheme.
+    ple_quant_type: sefp4
+    model_name: qwen3_8_flash_next
+    export_mode: serving
+    device_map: cpu
+    batch_size: 1
+    context_max_length: 262144
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    support_long_context_over_fp16_limit: true
+    use_cache: true
+    num_logits_to_keep: 1
+    validation_prompt: 你好，请简要介绍一下你自己。
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops:
+        GPTQPackedLinear:
+          quant_type: w8a8h1_sefp
+        GPTQPackedMoeBlock:
+          quant_type: w4a8h0_ssfp
+        MoeBlock:
+          quant_type: w4a8h0_ssfp
+    visual_config:
+      enable: true
+      image_token_gears:
+      - 96
+      - 196
+      - 384
+      - 704
+      - 1536
+      quant_scheme:
+        quant_type: w8a8h1_sefp
+    use_fused_gdr: true

@@ -111,3 +111,51 @@ def test_assembly_rejects_invalid_executable_tuple_indices(tmp_path, invalid_ind
     placeholder = next(node for node in model.graph.node if node.op_type == "PlaceHolder")
     with pytest.raises(RuntimeError, match="index|indices"):
         replace_placeholder_node(placeholder, model, sub_file, "main_external_data", tmp_path / "main_external_data")
+
+
+def _opset_fixture(version, op="HMIdentity", domain="ai.houmo.xh2a"):
+    import importlib
+
+    importlib.import_module("xhquant.export.onnx.onnx_opset")
+    return onnx.helper.make_model(
+        onnx.helper.make_graph([onnx.helper.make_node(op, ["x"], ["y"], domain=domain)], "opset", [], []),
+        opset_imports=[onnx.helper.make_opsetid(domain, version)],
+    )
+
+
+@pytest.mark.parametrize("main_version,block_version", [(1, 2), (2, 1)])
+def test_assembly_rejects_mixed_opsets_even_for_unchanged_operators(main_version, block_version):
+    from xhmodel_merak.xh_llm.big_hf_model_helper import _merge_opset_imports
+
+    main, block = _opset_fixture(main_version), _opset_fixture(block_version)
+    higher = main if main_version == 2 else block
+    higher.graph.node[0].op_type = "TopK"
+    with pytest.raises(RuntimeError, match="Incompatible ONNX opset"):
+        _merge_opset_imports(main, block)
+    assert main.opset_import[0].version == main_version
+    assert block.opset_import[0].version == block_version
+
+
+@pytest.mark.parametrize("main_version,block_version", [(1, 2), (2, 1)])
+@pytest.mark.parametrize("op,domain", [("TopK", "ai.houmo.xh2a"),
+                                     ("UnknownOperator", "ai.houmo.xh2a"), ("Identity", "private")])
+def test_assembly_rejects_changed_or_unproven_opset_upgrade(main_version, block_version, op, domain):
+    from xhmodel_merak.xh_llm.big_hf_model_helper import _merge_opset_imports
+
+    main, block = _opset_fixture(main_version, op, domain), _opset_fixture(block_version, op, domain)
+    with pytest.raises(RuntimeError, match="Incompatible ONNX opset"):
+        _merge_opset_imports(main, block)
+    assert main.opset_import[0].version == main_version
+
+
+@pytest.mark.parametrize("scope", ["function", "subgraph"])
+def test_assembly_rejects_opset_upgrade_with_unproven_nested_scope(scope):
+    from xhmodel_merak.xh_llm.big_hf_model_helper import _merge_opset_imports
+
+    main, block = _opset_fixture(1), _opset_fixture(2)
+    if scope == "function":
+        main.functions.append(onnx.helper.make_function("private", "fn", ["x"], ["y"], [], []))
+    else:
+        main.graph.node[0].attribute.append(onnx.helper.make_attribute("body", block.graph))
+    with pytest.raises(RuntimeError, match="Incompatible ONNX opset"):
+        _merge_opset_imports(main, block)

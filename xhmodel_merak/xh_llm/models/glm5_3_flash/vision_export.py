@@ -60,7 +60,8 @@ def export_glm53_vision(model_dir, output_dir, capacity, *, device="cuda:0", chi
             index = int(name.split("_")[1])
             reader.load_module(shell.blocks[index], f"model.visual.blocks.{index}.")
             wrapped = StaticVisionBlock(shell.blocks[index], capacity)
-            inputs, input_names = [hidden, cos, sin, valid_length], ["hidden_states", "rotary_cos", "rotary_sin", "valid_length"]
+            inputs = [hidden, cos, sin, valid_length]
+            input_names = ["hidden_states", "rotary_cos", "rotary_sin", "valid_length"]
         wrapped.eval()
         frontend = to_frontend_graph(wrapped, "TorchFX", inputs)
         scheme = QuantScheme(quant_type="w8a16h0_sefp", target_device=chip_arch)
@@ -109,8 +110,8 @@ def attach_glm53_vision(text_meta, model_dir, output_dir, capacity, *, device="c
 
     source_meta = Path(text_meta).resolve()
     original = json.loads(source_meta.read_text())
-    if original.get("glm53_state_abi_version") != 3 or original.get("glm53_vision"):
-        raise ValueError("attach requires an existing GLM-5.3 text artifact with state ABI 3")
+    if original.get("glm53_state_abi_version") != 4 or original.get("glm53_vision"):
+        raise ValueError("attach requires an existing GLM-5.3 text artifact with state ABI 4")
     source_config = AutoConfig.from_pretrained(source_meta.parent / original["hf_config"])
     checkpoint_config = AutoConfig.from_pretrained(model_dir)
     for key in (

@@ -79,6 +79,13 @@ family 用 `DeploymentPrecisionBinding` 声明组件、实际 `export.model.*.qu
 checkpoint 的命名差异通过 `checkpoint_embedding_suffixes` 声明；主层后还有 MTP 层时，
 用 `checkpoint_auxiliary_layers_field` 指向原始模型配置里的数量字段。主层仍必须完整，
 超出声明数量的层仍拒绝。base 导出允许保留这些辅助权重，不等于登记了 MTP 能力。
+普通模型继续使用公共 final-norm 完整性检查。终端结构不同的 family 可以在 build adapter
+提供 `checkpoint_terminal_mismatches(tensor_shapes, plan)`，返回缺失或不匹配的终端权重明细；
+该检查只替代终端条件，公共分片、层数、embedding 和尺寸完整性检查仍执行。
+Qwen4 的自有 recipe 用 `checkpoint_terminal_tensors` 声明 HC mixer 的 norm、down 和 up 权重，
+由自有 adapter 检查严格 decoder 根及原生形状，不给所有 `ModelRecipe` 增加字段或改变默认校验。
+形状轴仅允许正整数 text config 字段及其乘积（如 `hc_count*hidden_size`）；
+不伪造不存在的 final norm，也不放弃完整性检查。
 公共尺寸检查只把直接属于 decoder 层的残差流 norm 与 hidden_size 对齐；
 Q/K norm、MLA 内部 norm 等形状由具体模型加载和导出检查，不能一概当成 hidden_size。
 

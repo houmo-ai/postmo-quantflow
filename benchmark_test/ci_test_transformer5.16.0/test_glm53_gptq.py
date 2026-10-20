@@ -31,8 +31,8 @@ def autoround_packed_checkpoint(tmp_path):
 
 
 def test_packed_loading_preserves_words_and_clamped_experts(packed_checkpoint):
-    from xhquant.nn.modules.gptq_packed import GPTQPackedLinear
     from xhmodel_merak.xh_llm.models.glm5_3_flash.modeling import StaticMoE
+    from xhquant.nn.modules.gptq_packed import GPTQPackedLinear
 
     _, checkpoint, reference, names = packed_checkpoint
     reader = Glm53Checkpoint(checkpoint)
@@ -160,6 +160,7 @@ def test_public_glm53_plan_requires_low_memory_export(tmp_path):
 
 def test_workflow_quant_calls_public_recipe_and_preserves_owned_root(tmp_path, monkeypatch):
     import gptqmodel.recipes.glm5_3_flash_autoround as producer
+
     from xhmodel_merak.workflows import AutoWorkflow
 
     execute = producer.quantize_glm5_3_flash_autoround
@@ -188,8 +189,9 @@ def test_workflow_quant_calls_public_recipe_and_preserves_owned_root(tmp_path, m
 
 def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoint, tmp_path, monkeypatch):
     from test_glm53_multimodal import processor_inputs
-    from xhmodel_merak.model_build import build_model
-    from xhmodel_merak.model_build import checkpoint as checkpoint_api, resolver
+
+    from xhmodel_merak.model_build import build_model, resolver
+    from xhmodel_merak.model_build import checkpoint as checkpoint_api
     from xhmodel_merak.model_integrations.glm53.artifact import audit_glm53_hmonnx, validate_glm53_bundle
     from xhmodel_merak.xh_llm.hmonnx.auto_llm_hmonnx_model import AutoLLMHONNXModel
 
@@ -264,7 +266,7 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
     }
     assert report["vision_components"] == 3
     assert meta["glm53_dsa_selection"] == "te_pool"
-    assert meta["glm53_state_abi_version"] == 3
+    assert meta["glm53_state_abi_version"] == 4
     # A saved constant projection silently left at W16 used to escape the
     # Linear/MoE-only audit. Corrupt its real graph attribute, then restore it.
     import onnx
@@ -397,6 +399,7 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
     import av
     import numpy as np
     from PIL import Image
+
     from xhmodel_merak.model_inference import api as inference_api
 
     monkeypatch.setattr(inference_api, "get_recipe", lambda _: recipe)
@@ -431,7 +434,6 @@ def test_public_streamed_build_move_load_and_generate(autoround_packed_checkpoin
 
 def test_pooled_build_requires_frontend_only_when_building(monkeypatch):
     import xhquant.nn as xhnn
-
     from xhmodel_merak.xh_llm.models.glm5_3_flash.glm53_model import XHGlm53Model
 
     monkeypatch.delattr(xhnn, "SparseAttentionSelectKV")

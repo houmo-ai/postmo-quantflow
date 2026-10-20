@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-exp-serving-workflow",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/**",
+        "examples_merak/llm/qwen4_exp/debug_scripts/export_qwen4_exp_serving_hmonnx.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py",
+        "xhmodel_merak/xh_llm/shared_head.py"
+      ]
+    }
+  ]
+}

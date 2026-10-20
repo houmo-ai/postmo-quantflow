@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-autoround-frontend-weight-schemas",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/qwen3_5_moe_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/xh_qwen3_5_moe_config.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/__init__.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/autoround_hybrid.py"
+      ]
+    }
+  ]
+}

@@ -157,7 +157,7 @@ class XHGlm53Model(TextLLMModel):
 
     def _extra_export_metadata(self, output_dir, meta_info):
         meta_info.glm53_cache_spec = asdict(self.cache_spec)
-        meta_info.glm53_state_abi_version = 3
+        meta_info.glm53_state_abi_version = 4
         meta_info.glm53_export_mode = "streamed_ffn"
         meta_info.glm53_dsa_selection = "te_pool"
         meta_info.supported_modalities = ["text"]

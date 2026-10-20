@@ -29,20 +29,22 @@ def _add_bool_override_args(
     parser: argparse.ArgumentParser,
     *,
     dest: str,
-    enable_flag: str,
-    disable_flag: str,
+    enable_flag: str | tuple[str, ...],
+    disable_flag: str | tuple[str, ...],
     help_name: str,
 ) -> None:
+    enable_flags = (enable_flag,) if isinstance(enable_flag, str) else enable_flag
+    disable_flags = (disable_flag,) if isinstance(disable_flag, str) else disable_flag
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
-        enable_flag,
+        *enable_flags,
         dest=dest,
         action="store_true",
         default=None,
         help=f"Enable {help_name} for this export run.",
     )
     group.add_argument(
-        disable_flag,
+        *disable_flags,
         dest=dest,
         action="store_false",
         default=None,
@@ -119,8 +121,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dump-golden",
-        action="store_true",
-        help="Dump golden data after export.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Dump golden data after export. Defaults to enabled when "
+            "--export-from-quanted-model is used."
+        ),
     )
     parser.add_argument(
         "--golden-device-map",
@@ -182,8 +188,8 @@ def parse_args() -> argparse.Namespace:
     _add_bool_override_args(
         parser,
         dest="fuse_gdr_ops",
-        enable_flag="--enable-fuse-gdr-ops",
-        disable_flag="--disable-fuse-gdr-ops",
+        enable_flag=("--enable-fuse-gdr-ops", "--fuse-gdr-ops", "--fuse_gdr_ops"),
+        disable_flag=("--disable-fuse-gdr-ops", "--no-fuse-gdr-ops", "--no_fuse_gdr_ops"),
         help_name="fuse_gdr_ops",
     )
     _add_bool_override_args(
@@ -198,6 +204,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.dump_golden is None:
+        args.dump_golden = args.export_from_quanted_model
 
     # 初始化工作流
     from xhmodel_merak.xh_llm.workflows import AutoLLMWorkflow
@@ -267,13 +275,17 @@ def main() -> None:
 
     # dump golden
     if args.dump_golden:
+        if export_result.meta.visual_config is None:
+            input_messages = {"text": "用中文简单介绍 Qwen3.5。"}
+        else:
+            input_messages = {
+                "text": "描述这张图片",
+                "image": "data/images/qwen2_vl_demo.jpeg",
+            }
         workflow.dump_golden(
             export_result=export_result,
             device=args.device,
-            input_messages={
-                "text": "描述这张图片",
-                "image": "data/images/qwen2_vl_demo.jpeg",
-            },
+            input_messages=input_messages,
             device_map=args.golden_device_map,
             resource_tight_mode=args.resource_tight_mode,
         )

@@ -1,6 +1,6 @@
 """GLM uses its own cache geometry with the shared single-request lifecycle."""
 
-import importlib.util
+import importlib
 import json
 import subprocess
 import sys
@@ -11,9 +11,17 @@ import torch
 from torch import nn
 
 
+def _vllm_abi_available():
+    try:
+        importlib.import_module("vllm._C")
+    except BaseException:
+        return False
+    return True
+
+
 pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("vllm") is None,
-    reason="vLLM adapter checks require the independently installed plugin environment",
+    not _vllm_abi_available(),
+    reason="vLLM adapter checks require a compatible native vLLM extension",
 )
 
 
@@ -239,7 +247,9 @@ def test_glm53_registered_and_uses_glm_cache_geometry(tmp_path, monkeypatch, glm
     assert spec is runtime.cache_spec
     assert spec.layer_types == ("linear_attention", "deepseek_sparse_attention")
     assert spec.cache_shapes("linear_attention") == ((1, 48, 4), (1, 2, 8, 8))
-    assert spec.cache_shapes("deepseek_sparse_attention") == ((1, 1, 4096, 16), (1, 1, 1024, 8), (1, 4, 8), (1, 4, 8))
+    assert spec.cache_shapes("deepseek_sparse_attention") == (
+        (1, 1, 4096, 16), (1, 1, 1024, 8), (1, 4, 8), (1, 4, 8), (1, 1, 3, 16),
+    )
 
 
 @pytest.fixture(params=["glm53", "deepseek_v4"])

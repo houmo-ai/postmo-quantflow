@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen35-autoround-checkpoint-import",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/autoround_checkpoint.py",
+        "xhmodel_merak/model_integrations/qwen/plugin.py",
+        "xhmodel_merak/model_build/checkpoint.py",
+        "xhmodel_merak/model_build/resolver.py",
+        "xhmodel_merak/model_build/workflow.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/qwen3_5_moe_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/xh_qwen3_5_moe_config.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_small_model.py",
+        "benchmark_test/ci_test_transformer5.16.0/_qwen35_moe_text_checkpoint.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/unified/qwen_moe.json",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/122b_a10b/qwen3_6_122b_a10b_reap90_autoround.yaml",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/35b_a3b/qwen_agentworld_35b_a3b_autoround_attn8_shared4_expert4.yaml",
+        "xhmodel_merak/model_integrations/qwen3_5_moe_text/*",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/workflow.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/data_preprocess.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/autoround_hybrid.py"
+      ]
+    }
+  ]
+}

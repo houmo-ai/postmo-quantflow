@@ -5,6 +5,8 @@
       "id": "glm53-static-hybrid-contract",
       "patterns": [
         "xhmodel_merak/xh_llm/models/glm5_3_flash/**",
+        "xhmodel_merak/xh_llm/sparse_attention.py",
+        "xhmodel_merak/xh_llm/sparse_attention_controls.py",
         "xhmodel_merak/xh_llm/models/ling_3_flash/_kda_rule.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/_gdr_ops.py",
         "xhmodel_merak/xh_llm/models/deepseek_v4/static_cache.py",

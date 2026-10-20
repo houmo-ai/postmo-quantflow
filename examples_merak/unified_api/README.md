@@ -46,6 +46,31 @@ Ling 默认开启。Gemma 和 Qwen LoRA 暂不支持开启；这不改变推理�
 返回 `BuildResult`，脚本将它转成 JSON。主要看 `output_dir`、`manifest_file`、`components` 和 `loadable`。
 这些脚本只展示常用参数；精度、LoRA 等设置可以直接在 `build_model()` 调用处补充，不需要改 YAML。
 
+## Qwen3.5 MoE 原生文本 checkpoint
+
+`qwen3.5-moe-text` 接受原生 `Qwen3_5MoeForCausalLM` / `qwen3_5_moe_text`
+配置及对应权重，复用 Qwen35 workflow、prefill/decode 产物和文本推理接口。
+它是架构级入口，不是 REAP90 或 Agentworld 产品尺寸的认证 ID；不猜测剪枝后的专家数量。
+源模型与量化 checkpoint 仍检查配置一致性、主层、embedding、终端 norm 和权重形状。
+
+```bash
+python -m examples_merak.unified_api.build \
+  --model-id qwen3.5-moe-text \
+  --model-dir /path/to/native-text-model \
+  --quant-checkpoint /path/to/autoround-gptq-v2 \
+  --output-dir ./work_dirs/qwen35_moe_text_api \
+  --device cuda:0
+```
+
+仅消费已有 AutoRound GPTQ-v2 W4 checkpoint，不在统一入口重跑权重量化；
+不依赖 GPTQModel 加载器。保留完整的 `lm_head.weight`，不能在公开入口拼接另一来源的输出头。
+默认 `w4a8h0_ssfp` 对应现有 REAP90 YAML；Agentworld YAML 的基础图精度通过
+`--deployment-precision '{"prefill":"w8a8h1_sefp"}'` 选择，decode 同步应用，
+checkpoint 本身的混合位宽与输出头例外保持不变。产物统一使用中性名称 `qwen3_5_moe_text`。
+原生浮点权重也可不传 `--quant-checkpoint` 直接导出。
+当前仅公开 standard/full 文本路径，不登记 MTP、视觉或 Golden 能力。
+导出后用下方 `generate` 示例，将 `--artifact-dir` 改为上述目录。
+
 ## 用产物推理
 
 推理只传产物目录，不用再指定模型名或某个 ONNX 文件：

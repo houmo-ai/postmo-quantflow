@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-exp-workflow-quant-adapter",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/**",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py",
+        "configs_merak/workflows/xh2a/llm_models/qwen4_exp/**"
+      ]
+    }
+  ]
+}

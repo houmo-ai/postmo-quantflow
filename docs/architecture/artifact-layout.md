@@ -18,11 +18,19 @@
 | TTS | `text_duration_t0032/`、`frame_acoustic_f0160/`、`phase_core_f0160/`、`generator_istft_f0160/` | 按实际角色和 T/F 档位命名；CPU 相位图单独保留 |
 | AIGC | `text_encode/`、`denoise_<档位>/`、`vae_encode/`、`vae_decode/` | 只交付实际使用的角色；VAE decode 不属于自回归 decode |
 | VLA | `visual_<档位>/`、`gemma_prefill/`、`gemma_decode/`、`expert_prefill/`、`expert_decode/`、`action_in_proj/`、`action_out_proj/`、`time_mlp/` | 多主干用语义前缀区分，不用 `Other/` 聚合不相关图 |
-| 投机解码 | `mtp_draft_*/`、`dflash_draft_*/`、`dspark_*/` | 沿现有扁平命名；DSpark 的 context、context_decode、draft_decode、markov 按角色平铺 |
+| 投机解码 | `mtp_prefill/`、`mtp_decode/`、`decode_m2/`，或 family 既有 `mtp_draft_*/`、`dflash_draft_*/`、`dspark_*/` | 草稿预填充、草稿解码和目标验证按真实角色平铺；DSpark 保留 context、context_decode、draft_decode、markov |
 
 每个组件目录放实际图与其 external_data 权重。图文件沿用发布前缀；不能只改权重文件名而
 不更新 ONNX 引用。尺寸含义和轴顺序由模型 README 说明，不凭目录数字猜测。
 同一组件存在多个部署档位时分别登记；参考浮点图不替代实际运行的 HMONNX。
+
+Qwen4-Exp 的 MTP 运行契约 v3 使用三张独立图：`mtp_prefill/` 的序列长度与目标
+prefill chunk 一致，`mtp_decode/` 的序列长度为 1，`decode_m2/` 的目标 verify
+长度为 2，对应每轮一个候选。运行 metadata 的 `spec_decode.draft` 声明两张草稿图与
+档位，`spec_decode.target` 声明 verify 图与档位；不能把同一单步图登记成三个角色。
+目标主模型的 `prefill/`、`decode/` 仍独立交付。三张目标图的外置 PLE 资源分别在
+`qwen4_exp_ple.prefill`、`decode`、`decode_m2` 登记，所有引用都相对发布根目录。
+草稿图不携带目标的 PLE 表。旧 v2 的单步 MTP 包按原契约读取，不伪报为 v3。
 
 DeepSeek V4 和 GLM5.3 Flash 的统一导出将主模型 prefill/decode 中同类型、同形状、
 同内容的外部张量流式合并。两个阶段各保留 `weights.bin`，通过硬链接共享磁盘数据；
@@ -48,6 +56,12 @@ DeepSeek V4 和 GLM5.3 Flash 的统一导出将主模型 prefill/decode 中同�
 构建不生成 Golden；显式生成时 `step_N/` 放在对应组件下。日志、临时子图、校准工作文件、
 无运行用途的浮点参考图不进入交付。保留必要 Host 常量；不要把 voice pack、归一化统计或
 lm_head 权重伪装成 tokenizer/embedding，它们仍在运行元数据与 Manifest 中登记。
+
+Qwen4-Exp v3 的 MTP Golden 沿真实运行分别保存 `mtp_prefill/step_N/`、
+`mtp_decode/step_N/` 和 `decode_m2/step_N/`，每步包含该图实际输入、输出及执行前后
+缓存状态。选中 MTP 采集时，三图都执行后才能记录完成；缺少图或使用其他阶段的
+数据不能作为该角色的 Golden。Host PLE 的 packed/指数二进制、索引样本和 NumPy
+重放脚本随 Golden 一起保存，verify 对应 `decode_m2` 的 PLE 资源与输入样本。
 
 ## export_meta_info.json
 

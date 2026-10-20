@@ -75,11 +75,11 @@ def tiny_config():
     )
 
 
-@pytest.mark.parametrize("version", [None, 1, 2])
+@pytest.mark.parametrize("version", [None, 1, 2, 3])
 def test_old_glm_state_abi_is_rejected_before_loading(version, tmp_path):
     from xhmodel_merak.model_integrations.glm53.artifact import validate_glm53_bundle
 
-    message = "state ABI.*expected 3"
+    message = "state ABI.*expected 4"
     with pytest.raises(ValueError, match=message):
         validate_glm53_bundle(tmp_path, {"glm53_state_abi_version": version})
     with pytest.raises(ValueError, match=message):
@@ -90,9 +90,9 @@ def test_old_glm_state_abi_is_rejected_before_loading(version, tmp_path):
 @pytest.mark.parametrize(
     "past,length,fixed,valid_slots",
     [
-        (0, 5, 8, [[8], [8, 9], [8, 9, 10], [0, 1, 2, 3], [0, 1, 2, 3, 8], [], [], []]),
+        (0, 5, 8, [[10], [9, 10], [8, 9, 10], [0, 1, 2, 3], [0, 1, 2, 3, 10], [], [], []]),
         (7, 1, 1, [list(range(8))]),
-        (9, 3, 8, [list(range(10)), list(range(11)), list(range(8)), [], [], [], [], []]),
+        (9, 3, 8, [list(range(8)) + [9, 10], list(range(11)), list(range(8)), [], [], [], [], []]),
     ],
 )
 def test_host_dsa_mask_covers_selected_pool_tail_and_padding(dtype, past, length, fixed, valid_slots):
@@ -157,7 +157,7 @@ def test_inplace_step_staging_backs_up_only_written_dsa_rows():
     spec = Glm53CacheSpec((DSA, DSA), 12, 2, 8, 4, 3, 2, 4, 8)
     cache = Glm53CacheMixin(spec, object(), inplace_step_staging=True)
     cache.caches = spec.initial_caches(dtype=torch.float16)
-    for layer in (0, 4):
+    for layer in (0, 5):
         cache.caches[layer].data[:, :, :3].fill_(layer + 1)
     before = tuple(value.clone() for value in cache.caches)
 
@@ -174,10 +174,10 @@ def test_inplace_step_staging_backs_up_only_written_dsa_rows():
     assert len(cache._staged_rows) == 2  # No complete pool is written on this step.
     logits = torch.ones(1, 1)
     outputs = list(staged)
-    for i in (0, 1, 4, 5):
+    for i in (0, 1, 5, 6):
         outputs[i] = staged[i].data
     assert cache.commit((logits, *outputs)) is logits
-    assert all(isinstance(cache.caches[i], CacheTensor) for i in (0, 1, 4, 5))
+    assert all(isinstance(cache.caches[i], CacheTensor) for i in (0, 1, 5, 6))
     assert all(cache.caches[i].data_ptr() == staged[i].data_ptr() for i in (0, 1, 4, 5))
     assert cache._staged_rows is None
 
@@ -344,7 +344,7 @@ def test_mhc_and_clamped_moe(hf_model):
     with torch.no_grad():
         expected = original.attn_hc(streams)
         actual = StaticHyperConnection(original.attn_hc)(streams)
-        for a, b in zip(actual, expected):
+        for a, b in zip(actual, expected, strict=True):
             torch.testing.assert_close(a, b)
         inputs = streams.mean(2) * 20
         torch.testing.assert_close(StaticMoE(original.mlp)(inputs), original.mlp(inputs), rtol=1e-4, atol=2e-5)
@@ -376,7 +376,7 @@ def test_dsa_streaming_selects_original_tokens(hf_model):
     original = hf_model.layers[3].self_attn
     spec = Glm53CacheSpec.from_config(hf_model.config, 64)
     cache = DynamicCache(config=hf_model.config)
-    state = spec.initial_caches()[-4:]
+    state = spec.initial_caches()[-5:]
     past = 0
     with torch.no_grad():
         for n in (7, 1, 1, 8, 5, 8, 1, 8, 8, 8, 6, 3):
@@ -393,7 +393,6 @@ def test_dsa_streaming_selects_original_tokens(hf_model):
                 t["pool_new_count"],
                 t["pool_write_start"],
                 t["query_validity"],
-                t["tail_indices"],
                 t["dsa_attention_mask"],
                 *state,
             )
@@ -461,9 +460,8 @@ def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_sco
             t["pool_new_count"],
             t["pool_write_start"],
             t["query_validity"],
-            t["tail_indices"],
             t["dsa_attention_mask"],
-            *spec.initial_caches()[-4:],
+            *spec.initial_caches()[-5:],
         )
         valid = torch.arange(spec.pool_capacity) < (torch.arange(1, 17) // 4)[None, :, None]
         # Scale a real indexer's learned head weights to exercise scores
@@ -478,9 +476,8 @@ def test_dsa_negative_scores_keep_raw_topk_values_and_mask(hf_model, minimum_sco
             t["pool_new_count"],
             t["pool_write_start"],
             t["query_validity"],
-            t["tail_indices"],
             t["dsa_attention_mask"],
-            *spec.initial_caches()[-4:],
+            *spec.initial_caches()[-5:],
         )
         pool = outputs[2].squeeze(1)
         query = original.indexer.wq_b(core.q_norm(core.q_a_proj(x))).reshape(1, 16, 8, 8)
@@ -522,9 +519,8 @@ def test_dsa_tied_scores_select_valid_pools(hf_model):
             t["pool_new_count"],
             t["pool_write_start"],
             t["query_validity"],
-            t["tail_indices"],
             t["dsa_attention_mask"],
-            *spec.initial_caches()[-4:],
+            *spec.initial_caches()[-5:],
         )[0]
         selected = chosen["indices"]
         valid = selected < (torch.arange(1, 17) // 4)[None, :, None]
@@ -532,7 +528,9 @@ def test_dsa_tied_scores_select_valid_pools(hf_model):
         assert bool((selected[..., 0] != selected[..., 1]).all())
         raw = (selected[..., None] * 4 + torch.arange(4)).flatten(-2)
         raw = raw.masked_fill(~valid[..., None].expand(1, 16, 2, 4).flatten(-2), -1)
-        raw = torch.cat((raw, t["tail_indices"].masked_fill(t["dsa_attention_mask"][:, :, 0, -3:] != 0, -1)), -1).int()
+        tail = (torch.arange(1, 17)[:, None] - 3 + torch.arange(3))[None]
+        tail = tail.masked_fill(t["dsa_attention_mask"][:, :, 0, -3:] != 0, -1)
+        raw = torch.cat((raw, tail), -1).int()
         ref_hook = original.indexer.register_forward_hook(lambda m, a, v: raw)
         expected = original(x, attention_mask=torch.ones(1, 16, dtype=torch.bool))[0]
         ref_hook.remove()
@@ -550,7 +548,7 @@ def test_ling_normalization_default_preserved():
     actual = chunk_kda(
         q, k, v, g, beta, state, chunk_size=8, block_tri_inverse_op=None, chunk_scan_op=None, eye_block_batched=None
     )
-    for a, b in zip(actual, expected):
+    for a, b in zip(actual, expected, strict=True):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-5)
 
 
@@ -815,11 +813,12 @@ def test_w8_export_reload_and_generation(tmp_path, monkeypatch, mlp_type):
             tail_gather = [
                 node for node in graph.node if node.op_type == "Gather" and node.input[0] == "layer_1_latent_output"
             ]
-            assert len(tail_gather) == 1
-            assert next(a.i for a in tail_gather[0].attribute if a.name == "axis") == 2
+            assert not tail_gather
+            assert "layer_1_latent_tail_input" in {value.name for value in graph.input}
+            assert "layer_1_latent_tail_output" in {value.name for value in graph.output}
         scan_type = "GDRChunkScan" if stage == "prefill" else "GDRRecurrentScan"
         assert sum(node.op_type == scan_type for node in graph.node) == (1 if mlp_type == "sparse" else 2)
-        assert len(graph.output) == (7 if mlp_type == "sparse" else 5)
+        assert len(graph.output) == (8 if mlp_type == "sparse" else 5)
         assert all(o.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16 for o in graph.output)
     monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
     model = AutoLLMHONNXModel.from_pretrained(str(meta_path), device_map=["cuda:0"])

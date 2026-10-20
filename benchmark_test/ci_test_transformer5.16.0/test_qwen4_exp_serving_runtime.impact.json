@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test-qwen4-exp-serving-runtime",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/**",
+        "xhmodel_merak/xh_llm/sparse_attention.py",
+        "xhmodel_merak/xh_llm/sparse_attention_controls.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_qwen4_exp_serving_runtime.py",
+        "examples_merak/llm/qwen4_exp/qwen4_exp_xh_hmonnx_generate.py",
+        "examples_merak/llm/qwen4_exp/debug_scripts/export_qwen4_exp_serving_hmonnx.py"
+      ]
+    }
+  ]
+}

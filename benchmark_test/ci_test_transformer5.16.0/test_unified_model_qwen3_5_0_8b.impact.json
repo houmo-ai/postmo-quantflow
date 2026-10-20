@@ -21,6 +21,7 @@
     {
       "id": "test_unified_model_qwen3_5_0_8b-unified-qwen-shared",
       "patterns": [
+        "xhmodel_merak/xh_llm/mrope.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/**",
         "xhmodel_merak/model_integrations/qwen/**"
       ]

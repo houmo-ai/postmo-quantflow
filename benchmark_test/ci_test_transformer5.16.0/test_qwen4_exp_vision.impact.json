@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-exp-real-vision",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/vision.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/multimodal.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_vision_model_impl.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/visual_token_gears.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_vision_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py"
+      ]
+    }
+  ]
+}

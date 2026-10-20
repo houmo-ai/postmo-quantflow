@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-exp-xhquant-regression",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/**",
+        "configs_merak/workflows/xh2a/llm_models/qwen4_exp/**"
+      ]
+    }
+  ]
+}

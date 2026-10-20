@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "test-qwen4-exp-hmonnx-export",
+      "patterns": [
+        "xhmodel_merak/xh_llm/mrope.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/**",
+        "benchmark_test/ci_test_transformer5.16.0/test_qwen4_exp_hmonnx_export.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/autoround_hybrid.py"
+      ]
+    }
+  ]
+}

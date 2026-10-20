@@ -38,6 +38,8 @@ from torch import Tensor
 from xhquant.nn.modules import Cos, Sin
 from xhquant.utils.registry import DynamicModule
 
+from ...mrope import combine_mrope_axes
+from ...mrope import compute_rotary_cache as _compute_qwen3_5_rotary_cache
 from ...register import XHLLM_TRACEABLE_MODULES
 from ._hybrid_gated_delta_net import (
     HybridDecoderLayerMixin,
@@ -79,27 +81,6 @@ def _with_hf_alias(local_cls, registry_name: str):
     if hf_cls is not None and hf_cls is not local_cls:
         mapping[hf_cls] = registry_name
     return mapping
-
-
-def _get_safe_autocast_device_type(device: torch.device) -> str:
-    device_type = device.type if isinstance(device.type, str) else "cpu"
-    return device_type if device_type != "mps" else "cpu"
-
-
-def _compute_qwen3_5_rotary_cache(
-    inv_freq: Tensor,
-    attention_scaling: float,
-    max_seq_len: int,
-) -> tuple[Tensor, Tensor]:
-    inv_freq_expanded = inv_freq[None, None, :, None].float().expand(1, max_seq_len, -1, 1)
-    positions = torch.arange(max_seq_len, device=inv_freq.device, dtype=torch.float32)[None, :, None, None]
-    device_type = _get_safe_autocast_device_type(inv_freq.device)
-    with torch.autocast(device_type=device_type, enabled=False):
-        freqs = (inv_freq_expanded @ positions).transpose(2, 3)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        cos = emb.cos() * attention_scaling
-        sin = emb.sin() * attention_scaling
-    return cos[0].to(dtype=inv_freq.dtype), sin[0].to(dtype=inv_freq.dtype)
 
 
 # noqa: E402
@@ -390,14 +371,8 @@ class _Qwen3_5TextModel(HybridTextModelMixin, _Qwen3_5TextModelBase):  # noqa: N
             width_cos, width_sin = self._compute_qwen3_5_rotary_from_position_ids(
                 width_position_ids, inv_freq, attention_scaling
             )
-        time_cos = time_cos * time_mask
-        time_sin = time_sin * time_mask
-        hight_cos = hight_cos * hight_mask
-        hight_sin = hight_sin * hight_mask
-        width_cos = width_cos * width_mask
-        width_sin = width_sin * width_mask
-        combined_cos = time_cos + hight_cos + width_cos
-        combined_sin = time_sin + hight_sin + width_sin
+        combined_cos = combine_mrope_axes(time_cos, hight_cos, width_cos, time_mask, hight_mask, width_mask)
+        combined_sin = combine_mrope_axes(time_sin, hight_sin, width_sin, time_mask, hight_mask, width_mask)
         combined_cos = combined_cos.squeeze(1).unsqueeze(0).unsqueeze(0)
         combined_sin = combined_sin.squeeze(1).unsqueeze(0).unsqueeze(0)
         return combined_cos, combined_sin

@@ -11,6 +11,7 @@ from torch import nn
 
 from xhquant import nn as xhnn
 
+from ...sparse_attention import StaticSparseAttention
 from ..deepseek_v4.moe import ExactClampedSwiGLURoutedExperts
 from ..deepseek_v4.norm import build_xh_rms_norm, rms_norm_from_hf
 from ..deepseek_v4.static_cache import FixedCapacityCacheWriter
@@ -194,11 +195,11 @@ class StaticKPool(nn.Module):
         return (grouped_keys * probabilities).sum(2), self.tail(keys, current_length), self.tail(scores, current_length)
 
 
-class StaticDSA(nn.Module):
+class StaticDSA(StaticSparseAttention):
     """TopK pools expand into original token latents; exact MLA factorization."""
 
     def __init__(self, source, spec, input_length):
-        super().__init__()
+        super().__init__(spec.selected_pools, source.indexer.softmax_scale, input_length, spec.pool_size)
         self.length, self.heads = input_length, source.num_heads
         self.q_dim, self.v_dim, self.latent_dim = source.qk_nope_head_dim, source.v_head_dim, source.kv_lora_rank
         self.scaling = source.scaling
@@ -215,14 +216,6 @@ class StaticDSA(nn.Module):
         self.indexer = source.indexer
         self.pool = StaticKPool(source.indexer, input_length)
         self.writer = FixedCapacityCacheWriter(keep_cache_dims=True)
-        self.gather = xhnn.Gather(axis=2)
-        self.select_kv = xhnn.SparseAttentionSelectKV(
-            spec.selected_pools,
-            source.indexer.softmax_scale,
-            spec.pool_size,
-            compression_ratio=spec.pool_size,
-        )
-        self.mask_add = xhnn.MaskedAdd(saturate=True)
         self.pool_size = spec.pool_size
 
     def forward(
@@ -234,12 +227,12 @@ class StaticDSA(nn.Module):
         new_count,
         write_start,
         query_valid,
-        tail_indices,
         attention_mask,
         latent_cache,
         pool_cache,
         key_state,
         score_state,
+        latent_tail,
     ):
         resid = self.q_norm(self.q_a_proj(x))
         query = self.q_b_proj(resid).reshape(1, self.length, self.heads, self.q_dim)
@@ -257,12 +250,9 @@ class StaticDSA(nn.Module):
             head_weight.to(iq.dtype).transpose(1, 2).unsqueeze(-1),
             current_length,
         )
-        # Gather rows on axis 2 directly from the unchanged four-dimensional
-        # cache. Only the selected rows are reshaped into query slots.
-        selected_tail = self.gather(full_latent, tail_indices.reshape(-1)).reshape(
-            1, self.length, self.pool_size - 1, self.latent_dim
+        selected_latent, next_latent_tail = self.append_selected_tail(
+            selected_latent, latent.unsqueeze(1), latent_tail, current_length, has_kv_heads=False,
         )
-        selected_latent = torch.cat((selected_latent, selected_tail), -2)
         # Absorb only the per-head K factor. No compressed index key participates in attention.
         latent_query = self.k_projection(query.transpose(1, 2), self.k_weight).transpose(1, 2)
         scores = torch.matmul(latent_query.float(), selected_latent.float().transpose(-1, -2)) * self.scaling
@@ -271,7 +261,7 @@ class StaticDSA(nn.Module):
         context = torch.matmul(probabilities.to(selected_latent.dtype), selected_latent)
         values = self.v_projection(context.transpose(1, 2), self.v_weight.transpose(-1, -2)).transpose(1, 2)
         output = self.o_proj(values.reshape(1, self.length, -1)) * query_valid.unsqueeze(-1)
-        return output, full_latent, full_pool, next_key, next_score
+        return output, full_latent, full_pool, next_key, next_score, next_latent_tail
 
 
 class StaticMoE(nn.Module):
@@ -321,13 +311,13 @@ class StaticDecoder(nn.Module):
         )
 
     def forward(self, streams, controls, caches):
-        past, length, _, offset, count, start, valid, tail, attention_mask = controls
+        past, length, _, offset, count, start, valid, attention_mask = controls
         post, comb, x = self.attn_hc(streams)
         x = self.input_norm(x)
         if self.kind == LINEAR:
             result = self.attention(x, length, valid, *caches)
         else:
-            result = self.attention(x, past, length, offset, count, start, valid, tail, attention_mask, *caches)
+            result = self.attention(x, past, length, offset, count, start, valid, attention_mask, *caches)
         streams = post.unsqueeze(-1) * result[0].unsqueeze(2) + comb.transpose(-1, -2) @ streams
         post, comb, x = self.ffn_hc(streams)
         streams = post.unsqueeze(-1) * self.mlp(self.ffn_norm(x)).unsqueeze(2) + comb.transpose(-1, -2) @ streams
@@ -363,7 +353,6 @@ class StaticGlm53ForCausalLM(nn.Module):
         pool_new_count,
         pool_write_start,
         query_validity,
-        tail_indices,
         dsa_attention_mask,
         caches,
     ):
@@ -378,13 +367,12 @@ class StaticGlm53ForCausalLM(nn.Module):
             pool_new_count,
             pool_write_start,
             query_validity,
-            tail_indices,
             dsa_attention_mask,
         )
         streams = inputs_embeds.unsqueeze(2).expand(1, -1, self.hc_mult, -1)
         cursor, next_caches = 0, []
         for index, layer in enumerate(self.layers):
-            count = 2 if layer.kind == LINEAR else 4
+            count = len(self.spec.cache_suffixes(layer.kind))
             streams, updated = layer(streams, controls, caches[cursor : cursor + count])
             streams = self.layer_tags[index](streams)
             next_caches.extend(updated)

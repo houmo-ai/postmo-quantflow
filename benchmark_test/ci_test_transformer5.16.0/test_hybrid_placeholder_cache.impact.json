@@ -1,18 +1,21 @@
 {
   "version": 1,
-  "rules": [{
-    "id": "hybrid-placeholder-cache",
-    "patterns": [
-      "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_placeholder.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5/_qwen3_5_big_export.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5/_llm_model_impl.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5/_delta_rule.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5_moe/_qwen3_5_moe_big_export.py",
-      "xhmodel_merak/xh_llm/wrap_model.py",
-      "xhmodel_merak/xh_llm/big_hf_model_helper.py",
-      "xhmodel_merak/xh_llm/hmonnx/deterministic_export.py"
-    ]
-  }]
+  "rules": [
+    {
+      "id": "hybrid-placeholder-cache",
+      "patterns": [
+        "xhmodel_merak/xh_llm/mrope.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_placeholder.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_qwen3_5_big_export.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_llm_model_impl.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_delta_rule.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/_qwen3_5_moe_big_export.py",
+        "xhmodel_merak/xh_llm/wrap_model.py",
+        "xhmodel_merak/xh_llm/big_hf_model_helper.py",
+        "xhmodel_merak/xh_llm/hmonnx/deterministic_export.py"
+      ]
+    }
+  ]
 }

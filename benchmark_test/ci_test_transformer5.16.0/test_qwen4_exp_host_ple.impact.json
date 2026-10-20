@@ -1,0 +1,1 @@
+{"version":1,"rules":[{"id":"qwen4-host-ple","patterns":["xhmodel_merak/xh_llm/models/qwen4_exp/host_ple_runtime.py","xhmodel_merak/xh_llm/models/qwen4_exp/qwen4_exp_hmonnx_inference.py","xhmodel_merak/xh_llm/models/qwen4_exp/golden_runtime.py","xhmodel_merak/xh_llm/hmonnx/base_llm_hmonnx_model.py","xhmodel_merak/xh_llm/hmonnx/hmonnx_model.py"]}]}
