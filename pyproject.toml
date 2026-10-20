@@ -90,13 +90,9 @@ packages = [
   { include = "hm_eval" },
 ]
 include = [
-  { path = "configs_merak/workflows/xh2a/llm_models/qwen3_5/**/*.yaml", format = ["sdist", "wheel"] },
-  { path = "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe/**/*.yaml", format = ["sdist", "wheel"] },
-  { path = "configs_merak/workflows/xh2a/llm_models/qwen3_next/**/*.yaml", format = ["sdist", "wheel"] },
-  { path = "configs_merak/workflows/xh2a/llm_models/gemma4_series/**/*.yaml", format = ["sdist", "wheel"] },
-  { path = "configs_merak/workflows/xh2a/llm_models/ling_3_flash/**/*.yaml", format = ["sdist", "wheel"] },
-  { path = "configs_merak/workflows/xh2a/other_models/pi05/**/*.yaml", format = ["sdist", "wheel"] },
-  { path = "configs_merak/workflows/xh2a/other_models/kokoro/**/*.yaml", format = ["sdist", "wheel"] },
+  # Published workflows: new models and targets need no per-model packaging entry.
+  { path = "configs_merak/workflows/**/*.yaml", format = ["sdist", "wheel"] },
+  { path = "configs_merak/workflows/**/*.yml", format = ["sdist", "wheel"] },
   { path = "data/calib_data/NeelNanda-pile-10k.jsonl", format = ["sdist", "wheel"] },
 ]
 
