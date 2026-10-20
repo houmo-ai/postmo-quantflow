@@ -297,9 +297,18 @@ def _register_deepseek_v4_layer_type() -> None:
     # import time rather than only while merging merak_config.json.
     import transformers.configuration_utils as transformers_config
 
-    allowed = transformers_config.ALLOWED_LAYER_TYPES
-    if "hash_moe" not in allowed:
-        transformers_config.ALLOWED_LAYER_TYPES = (*allowed, "hash_moe")
+    # Transformers 5.16 separates attention and MLP validation. vLLM's
+    # tokenizer config still derives from generic PretrainedConfig, so register
+    # both source MLP labels in the registry that its validator actually uses.
+    registry = (
+        "ALLOWED_MLP_LAYER_TYPES"
+        if hasattr(transformers_config, "ALLOWED_MLP_LAYER_TYPES")
+        else "ALLOWED_LAYER_TYPES"
+    )
+    allowed = getattr(transformers_config, registry)
+    additions = tuple(label for label in ("hash_moe", "moe") if label not in allowed)
+    if additions:
+        setattr(transformers_config, registry, (*allowed, *additions))
 
 
 _register_deepseek_v4_layer_type()

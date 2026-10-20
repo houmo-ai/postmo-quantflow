@@ -54,6 +54,50 @@ def test_vllm_merak_entry_points_resolve_to_declared_source_symbols():
     assert "register" in platform_functions
 
 
+@pytest.mark.parametrize("legacy_registry", [False, True])
+def test_deepseek_tokenizer_registration_accepts_source_mlp_labels(
+    monkeypatch, legacy_registry
+):
+    from transformers import configuration_utils as config
+
+    # Execute the real registration without importing the unrelated vLLM runtime.
+    source = PACKAGE_ROOT / "config.py"
+    definition = next(
+        node for node in ast.parse(source.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_register_deepseek_v4_layer_type"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[definition], type_ignores=[]), str(source), "exec"), namespace)
+    register = namespace[definition.name]
+    registry = (
+        "ALLOWED_MLP_LAYER_TYPES"
+        if hasattr(config, "ALLOWED_MLP_LAYER_TYPES")
+        else "ALLOWED_LAYER_TYPES"
+    )
+    if legacy_registry:
+        monkeypatch.delattr(config, "ALLOWED_MLP_LAYER_TYPES", raising=False)
+        registry = "ALLOWED_LAYER_TYPES"
+    allowed = tuple(
+        value for value in getattr(config, registry, ("full_attention", "dense"))
+        if value not in {"hash_moe", "moe"}
+    )
+    monkeypatch.setattr(config, registry, allowed, raising=False)
+    attention_types = getattr(config, "ALLOWED_ATTN_LAYER_TYPES", None)
+
+    register()
+    register()
+    assert getattr(config, registry) == (*allowed, "hash_moe", "moe")
+    assert getattr(config, "ALLOWED_ATTN_LAYER_TYPES", None) == attention_types
+    if not legacy_registry:
+        value = config.PreTrainedConfig(
+            num_hidden_layers=2,
+            layer_types=["full_attention"] * 2,
+            mlp_layer_types=["hash_moe", "moe"],
+        )
+        value.validate_layer_type()
+
+
 @requires_vllm
 def test_native_wemm_registration_is_lazy_and_only_overrides_qwen_when_selected(
     monkeypatch: pytest.MonkeyPatch,
