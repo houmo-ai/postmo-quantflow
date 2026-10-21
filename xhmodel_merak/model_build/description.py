@@ -112,27 +112,38 @@ def describe_build_parameters(recipe: ModelRecipe) -> dict[str, Any]:
     if len(recipe.profiles) > 1:
         parameters["profile"] = {"default": recipe.default_profile, "choices": list(recipe.profiles)}
 
-    speculative_modes = list(dict.fromkeys(variant.speculative_mode for variant in recipe.variants if variant.speculative_mode))
+    speculative_modes = list(
+        dict.fromkeys(variant.speculative_mode for variant in recipe.variants if variant.speculative_mode)
+    )
     if speculative_modes:
         parameters["speculative"] = {
             "default": None,
             "mode": {"choices": speculative_modes},
             "num_draft_tokens": {"default": None, "minimum": 1},
-            "description": "None disables speculative decoding. LoRA combinations must be registered by the model recipe.",
+            "description": (
+                "None disables speculative decoding. LoRA combinations must be registered by the model recipe."
+            ),
         }
     if any(variant.requires_lora for variant in recipe.variants):
         parameters["lora"] = {
             "default": None,
             "paths": {"required": True, "description": "Non-empty list of local LoRA directories."},
-            "description": "None disables LoRA. Speculative LoRA requires a registered combination and a shared quant_checkpoint.",
+            "description": (
+                "None disables LoRA. Speculative LoRA requires a registered combination and a shared quant_checkpoint."
+            ),
         }
     sources = {variant.name: list(variant.required_sources) for variant in recipe.variants if variant.required_sources}
-    if sources:
+    optional_sources = {
+        variant.name: list(variant.optional_sources) for variant in recipe.variants if variant.optional_sources
+    }
+    if sources or optional_sources:
         parameters["sources"] = {
             "default": None,
             "required_by_variant": sources,
             "description": "Source name to local directory; only the selected variant's names are accepted.",
         }
+        if optional_sources:
+            parameters["sources"]["optional_by_variant"] = optional_sources
     if recipe.required_resources:
         parameters["resources"] = {
             "required": True,

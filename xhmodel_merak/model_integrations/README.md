@@ -182,6 +182,12 @@ python benchmark_test/ci_test_transformer5.16.0/select_tests.py --format report
 
 ## 参数怎么加
 
+可选的具名输入目录由 `VariantRecipe.optional_sources` 声明，通过统一
+`build_model(sources={...})` 传入；省略不构建该组件。它与 `required_sources`
+互斥，未知名称仍拒绝。family 的 config resolver 负责验证组件身份和互斥选择，
+并将实际目录绑定到 workflow；来源指纹和发布仍由公共构建事务维护。
+FLUX 的 `prompt_upsampler`、`upsampler_bundle` 和 `image_bundle` 是组合构建示例。
+
 先区分用户选择和部署约束。可选精度、档位、来源和资源放进 recipe；只有一种合法
 取值的设置不必变成开关。新的通用参数需要确实有跨模型含义，模型私有参数不要塞进
 公共入口的任意 `**kwargs`。

@@ -188,7 +188,9 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
                 "static_profiles": [],
             }
         elif not model.startswith(("macaron", "qwen", "ornith")) or model in {
-            "qwen3-next-80b-a3b", "qwen-image-2.1", "qwen-image-2.1-turbo"
+            "qwen3-next-80b-a3b",
+            "qwen-image-2.1",
+            "qwen-image-2.1-turbo",
         }:
             assert description["vision"] is None
         else:
@@ -313,6 +315,7 @@ def test_registry_covers_each_public_artifact_kind():
         "vla",
         "glm53",
         "qwen_image21",
+        "flux3_klein",
         "minicpm_v_4_7",
         "minicpm_o_4_5",
     }

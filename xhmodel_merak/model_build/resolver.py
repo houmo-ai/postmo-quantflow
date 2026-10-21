@@ -82,10 +82,14 @@ def resolve_build_plan(
     resource_refs.update(_resolve_bundled_resources(recipe))
 
     checkpoint_precision = False
-    if (quant_checkpoint and precision is None
-            and ("wmix", recipe.default_precision.activation) in recipe.supported_precisions
-            and (Path(quant_checkpoint).expanduser() / "config.json").is_file()):
+    if (
+        quant_checkpoint
+        and precision is None
+        and ("wmix", recipe.default_precision.activation) in recipe.supported_precisions
+        and (Path(quant_checkpoint).expanduser() / "config.json").is_file()
+    ):
         from .checkpoint import checkpoint_has_mixed_precision
+
         if checkpoint_has_mixed_precision(quant_checkpoint, model=model_id):
             precision = {"weight": "wmix", "activation": recipe.default_precision.activation}
             checkpoint_precision = True
@@ -328,9 +332,17 @@ def _select_variant(
     lora: LoRARequest | None,
     profile: str | None = None,
 ) -> VariantRecipe:
-    variant_name = (f"lora_{speculative.mode}" if speculative and lora else
-                    "lora" if lora else speculative.mode if speculative else
-                    profile if recipe.get_variant(profile) is not None else recipe.default_variant.name)
+    variant_name = (
+        f"lora_{speculative.mode}"
+        if speculative and lora
+        else "lora"
+        if lora
+        else speculative.mode
+        if speculative
+        else profile
+        if recipe.get_variant(profile) is not None
+        else recipe.default_variant.name
+    )
     variant = recipe.get_variant(variant_name)
     if variant is None:
         allowed_variants = [item.name for item in recipe.variants]
@@ -534,7 +546,7 @@ def _validate_sources(
     variant: VariantRecipe,
     sources: Mapping[str, SourceRef | Mapping[str, Any] | str],
 ) -> None:
-    unknown = sorted(set(sources) - set(variant.required_sources))
+    unknown = sorted(set(sources) - set(variant.required_sources) - set(variant.optional_sources))
     if unknown:
         raise invalid_parameter(
             model, "sources", list(sources), f"unknown sources for variant {variant.name!r}: {unknown}"

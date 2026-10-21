@@ -1407,3 +1407,28 @@ Imported and modified files:
 Modifications cover configuration validation, Transformers cache/mask and
 typing compatibility, and packed Linear dtype handling. Model weights are not
 redistributed by this repository.
+
+FLUX 3 Image Klein reference inference code
+----------------------------------------------------------------------
+Source: https://github.com/black-forest-labs/flux-3-image-klein
+Revision: e53f4ea697fe45db8f38fca91a90f5623f7f8f37
+Copyright: Black Forest Labs; HOUMO AI (configuration-only constructor extension)
+License: Apache-2.0 (code only; pretrained weights have their own license)
+License text: licenses/flux-3-image-klein/LICENSE
+Files: xhmodel_merak/xh_other_model/models/flux3_klein/native_dit.py, native_autoencoder.py, native_text_encoder.py
+Changes: configurable constructor dimensions for small-model validation and code formatting; default execution is unchanged.
+No pretrained weights are bundled.
+
+FLUX 3 Image Klein prompt upsampler input protocol
+----------------------------------------------------------------------
+Source: https://github.com/black-forest-labs/flux-3-image-klein/blob/e53f4ea697fe45db8f38fca91a90f5623f7f8f37/src/flux3/pup.py
+Revision: e53f4ea697fe45db8f38fca91a90f5623f7f8f37
+Copyright: Black Forest Labs; HOUMO AI (modifications)
+License: Apache-2.0
+License text: licenses/flux-3-image-klein/LICENSE
+Files: xhmodel_merak/xh_other_model/models/flux3_klein/upsampler.py
+Changes: reference-image geometry/color/JPEG policy and task scaffolds retained;
+generation executed with packaged Qwen3.5 HMONNX prefill/decode/visual graphs,
+explicit generated-token presence penalty, capacity checks and bounded Golden.
+The official system prompts are copied from the user-supplied checkpoint only
+when building the optional component. No pretrained weights are committed.

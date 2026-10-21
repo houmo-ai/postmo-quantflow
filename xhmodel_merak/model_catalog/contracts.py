@@ -34,8 +34,15 @@ class VariantRecipe:
     # First entry is the default; only list modes implemented by this variant.
     export_modes: tuple[str, ...] = ("standard",)
     dependencies: DependencySpec = field(default_factory=DependencySpec)
+    optional_sources: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if (
+            any(not isinstance(name, str) or not name for name in self.optional_sources)
+            or len(set(self.optional_sources)) != len(self.optional_sources)
+            or set(self.optional_sources) & set(self.required_sources)
+        ):
+            raise ValueError("optional sources must be unique names disjoint from required sources")
         if (
             not self.export_modes
             or len(set(self.export_modes)) != len(self.export_modes)
@@ -46,6 +53,10 @@ class VariantRecipe:
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["required_sources"] = list(self.required_sources)
+        if self.optional_sources:
+            data["optional_sources"] = list(self.optional_sources)
+        else:
+            data.pop("optional_sources")
         data["extra_components"] = list(self.extra_components)
         data["export_modes"] = list(self.export_modes)
         data["context_workflows"] = [
@@ -210,8 +221,7 @@ class ModelRecipe:
             "dependencies": {
                 "schema_version": 1,
                 "profiles": {
-                    variant.name: {"status": dependency_profile(self, variant)["status"]}
-                    for variant in self.variants
+                    variant.name: {"status": dependency_profile(self, variant)["status"]} for variant in self.variants
                 },
             },
         }
@@ -232,8 +242,7 @@ class ModelRecipe:
             "artifact_format": self.artifact_format,
             "dependencies": describe_dependencies(self),
             "workflow_variants": [
-                {**variant.to_dict(), "dependencies": dependency_profile(self, variant)}
-                for variant in self.variants
+                {**variant.to_dict(), "dependencies": dependency_profile(self, variant)} for variant in self.variants
             ],
             "supported_precisions": [
                 {"weight": weight, "activation": activation} for weight, activation in self.supported_precisions
