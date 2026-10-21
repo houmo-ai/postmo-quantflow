@@ -11,6 +11,31 @@ export:
     max_pe_length: 262144
     convert_hmonnx: true
     quant_type: w8a8_sefp
+    # lm_head runs inside the decoder graph, so it publishes vocabulary logits
+    # instead of the final hidden state, as every other registered model does.
+    # The greedy pick stays on the host, also as elsewhere in this repository;
+    # that keeps room for the planned timestamp upper-bound mask.
+    quant_scheme:
+      quant_type: w8a8_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8_sefp
+      ops:
+        # Both MatMul operands are activations (QK^T and PV have no weight), so
+        # the w8a8 default would quantize attention scores to 8 bit. Keep them
+        # at 16 bit, as qwen3_0_6b_xh2a_w8a16 does.
+        #
+        # The field is act_schema, not act_scheme: MatMulSchema.key_hook only
+        # aliases i_cfg/i_cfg_2, and unknown keys pass through addict silently
+        # instead of raising. The reference YAML misspells the first operand, so
+        # only its act_schema_2 ever took effect.
+        MatMul:
+          act_schema:
+            bits: 16
+            fp_mode: sefp
+          act_schema_2:
+            bits: 16
+            fp_mode: sefp
     wrap_cfg:
       use_cache: true
       num_logits_to_keep: 1
@@ -30,8 +55,10 @@ export:
         - current_input_length
         - past_key_cache
         - past_value_cache
+      # Inert: config.export_cfg is never read. get_export_cfg() in model.py is
+      # what names the graph outputs. Kept in sync so the file is not misleading.
       output_names:
-        - last_hidden_state
+        - logits
         - present_key_cache
         - present_value_cache
     encode_config:

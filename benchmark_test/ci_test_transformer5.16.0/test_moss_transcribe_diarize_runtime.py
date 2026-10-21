@@ -243,6 +243,47 @@ def test_fa_on_converts_beside_published_graphs_and_reuses(tmp_path: Path, monke
     assert second._graph_overrides["prefill"].name == "prefill_page_attention_cached.onnx"
 
 
+@pytest.mark.parametrize(
+    ("k_bits", "v_bits", "k_dtype", "v_dtype"),
+    ((8, 8, torch.int8, torch.int8), (16, 16, torch.int16, torch.int16), (16, 8, torch.int16, torch.int8)),
+)
+def test_paged_kv_cache_qdata_follows_page_attention_bits(k_bits, v_bits, k_dtype, v_dtype, monkeypatch):
+    module = types.SimpleNamespace(num_kv_heads=2, head_size=64, k_bits=k_bits, v_bits=v_bits)
+    runtime = MossHMONNXRuntime.__new__(MossHMONNXRuntime)
+    runtime.device = "cpu"
+    runtime._paged_kv_caches = None
+    runtime._page_attention_loaded = True
+    runtime._page_attention_block_size = 64
+    runtime._decoder_component = lambda phase: {"num_layers": 1, "n_kv_head": 2, "head_dim": 64, "cache_length": 64}
+    runtime.decoder_cache_length = lambda: 64
+    runtime._session = lambda phase: object()
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.moss_transcribe_diarize.hmonnx_runtime._page_attention_modules",
+        lambda session: [module],
+    )
+    caches = runtime.ensure_paged_kv_caches()
+    assert caches[0].k_qdata.dtype == k_dtype
+    assert caches[0].v_qdata.dtype == v_dtype
+
+
+def test_paged_kv_cache_rejects_unsupported_bits(monkeypatch):
+    module = types.SimpleNamespace(num_kv_heads=2, head_size=64, k_bits=4, v_bits=8)
+    runtime = MossHMONNXRuntime.__new__(MossHMONNXRuntime)
+    runtime.device = "cpu"
+    runtime._paged_kv_caches = None
+    runtime._page_attention_loaded = True
+    runtime._page_attention_block_size = 64
+    runtime._decoder_component = lambda phase: {"num_layers": 1, "n_kv_head": 2, "head_dim": 64}
+    runtime.decoder_cache_length = lambda: 64
+    runtime._session = lambda phase: object()
+    monkeypatch.setattr(
+        "xhmodel_merak.xh_llm.models.moss_transcribe_diarize.hmonnx_runtime._page_attention_modules",
+        lambda session: [module],
+    )
+    with pytest.raises(RuntimeError, match="cache bits must be 8 or 16"):
+        runtime.ensure_paged_kv_caches()
+
+
 def test_stitch_requires_published_hmonnx_graphs(tmp_path: Path):
     from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.configuration import XHMossTranscribeDiarizeConfig
     from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.model import XHMossTranscribeDiarizeModel
@@ -1136,3 +1177,107 @@ def _package_fixture_resources(root, meta):
     for name in REQUIRED_RUNTIME_FILES:
         (root / name).rename(destination / name)
     meta["hf_config"] = "hf_config"
+
+
+def test_export_advertises_vocabulary_logits_without_a_token_output():
+    """lm_head always runs in the graph, so "logits" names a real distribution."""
+    from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.configuration import (
+        XHMossTranscribeDiarizeConfig,
+    )
+    from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.model import (
+        XHMossTranscribeDiarizeModel,
+    )
+
+    config = XHMossTranscribeDiarizeConfig(
+        model_name="moss_transcribe_diarize_09b", hf_model=None,
+    )
+    output_names = XHMossTranscribeDiarizeModel(config).get_export_cfg()["output_names"]
+
+    assert output_names == ["logits"]
+    # The greedy pick stays on the host, so the graph publishes no token id.
+    assert "next_token" not in output_names
+    # No opt-in flag remains: in-graph lm_head is the only supported shape.
+    assert not hasattr(config, "in_graph_logits")
+
+
+def test_attach_lm_head_unties_projection_from_token_embedding():
+    """MOSS ties lm_head to embed_tokens; quantizing in place would corrupt the embedding."""
+    from torch import nn
+
+    from xhmodel_merak.xh_llm.models.moss_transcribe_diarize._llm_model_impl import attach_lm_head
+
+    class Language(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = nn.Embedding(8, 4)
+
+    class Backbone(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.language_model = Language()
+
+    class CausalLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = Backbone()
+            self.lm_head = nn.Linear(4, 8, bias=False)
+            self.lm_head.weight = self.model.language_model.embed_tokens.weight
+
+    root = CausalLM()
+    language = root.model.language_model
+    assert attach_lm_head(root) is True
+    assert torch.equal(language.lm_head.weight.detach(), root.lm_head.weight.detach())
+    # Same values, separate storage: quantizing the attached copy leaves the
+    # tied token embedding that the host still uses for lookup untouched.
+    assert language.lm_head.weight.data_ptr() != root.lm_head.weight.data_ptr()
+    assert attach_lm_head(root) is False
+
+
+def test_greedy_token_does_not_reproject_in_graph_logits():
+    """A vocab-wide decoder output already went through lm_head on device."""
+    from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.prefill_decode import MossLMHead
+    from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.transcribe import (
+        greedy_token,
+        is_vocab_logits,
+        project_lm_head,
+    )
+
+    head = MossLMHead(hidden_size=4, vocab_size=8).eval()
+
+    hidden = torch.randn(1, 1, 4)
+    assert is_vocab_logits(hidden, head) is False
+    expected = torch.argmax(project_lm_head(hidden, head), dim=-1).reshape(-1)
+    assert torch.equal(greedy_token(hidden, head), expected)
+
+    logits = torch.randn(1, 1, 8)
+    assert is_vocab_logits(logits, head) is True
+    picked = greedy_token(logits, head)
+    assert torch.equal(picked, torch.argmax(logits, dim=-1).reshape(-1))
+    # Guard the actual failure mode: projecting a second time reads the logits as
+    # if they were hidden state and selects a different token.
+    reprojected = torch.argmax(project_lm_head(logits[..., :4], head), dim=-1).reshape(-1)
+    assert not torch.equal(picked, reprojected)
+
+
+def test_decoder_output_accepts_either_published_name():
+    from xhmodel_merak.errors import ModelError
+    from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.transcribe import decoder_output
+
+    hidden = torch.zeros(1, 1, 4)
+    logits = torch.zeros(1, 1, 8)
+    assert decoder_output({"last_hidden_state": hidden}) is hidden
+    assert decoder_output({"logits": logits}) is logits
+    # Aliased graphs expose both; the hidden-state name wins for compatibility.
+    assert decoder_output({"last_hidden_state": hidden, "logits": hidden}) is hidden
+    with pytest.raises(ModelError, match="missing output"):
+        decoder_output({"present_key_cache": hidden})
+
+
+def test_runtime_does_not_alias_vocab_logits_to_hidden_state():
+    """Aliasing real logits to last_hidden_state would feed them to the host projection."""
+    from xhmodel_merak.xh_llm.models.moss_transcribe_diarize.hmonnx_runtime import _is_vocab_logits
+
+    assert _is_vocab_logits(torch.zeros(1, 1, 151936)) is True
+    assert _is_vocab_logits(torch.zeros(1, 1, 1024)) is False
+    assert _is_vocab_logits(torch.zeros(1, 512, 1024)) is False
+    assert _is_vocab_logits(None) is False

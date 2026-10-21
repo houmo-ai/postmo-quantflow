@@ -32,7 +32,8 @@ def test_transcript_validation_accepts_canonical_adjacent_timestamps_and_overlap
         "hello",
         "[1.0][S01]bad[0.5]",
         "[0.0][S01]ok[0.5] trailing",
-        "[1.0][S01]one[2.0] [0.8][S02]out of order[1.4]",
+        # Backstep past the sub-second overlap tolerance: a lost timestamp anchor.
+        "[8.0][S01]one[9.0] [2.5][S02]out of order[3.4]",
         "[0.0][S01]late[30.1]",
     ],
 )

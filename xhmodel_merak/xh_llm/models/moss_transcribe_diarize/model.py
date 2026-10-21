@@ -53,8 +53,18 @@ class XHMossTranscribeDiarizeModel(TextLLMModel):
         )
 
     def init_wrap_model(self, hf_model: Any) -> Any:
-        from ._llm_model_impl import language_model_from_hf, register_wrap_modules, restore_wrap_modules
+        from ._llm_model_impl import (
+            attach_lm_head,
+            language_model_from_hf,
+            register_wrap_modules,
+            restore_wrap_modules,
+        )
 
+        # Attach before registering wraps: register_wrap_modules picks the
+        # lm_head-aware backbone only when the projection is already present.
+        # Wrap the language model rather than the CausalLM root so the fp16 cast
+        # in init_wrap_model leaves the fp32 Whisper encoder untouched.
+        attach_lm_head(hf_model)
         replacements = register_wrap_modules(hf_model)
         try:
             return super().init_wrap_model(language_model_from_hf(hf_model))
@@ -65,6 +75,16 @@ class XHMossTranscribeDiarizeModel(TextLLMModel):
         from ._llm_model_impl import language_model_from_hf
 
         return language_model_from_hf(hf_model)
+
+    def get_export_cfg(self) -> dict[str, list[str]]:
+        """Keep the base ``logits`` output name, which lm_head now makes accurate.
+
+        The base class always names the first output ``logits``. Earlier MOSS
+        graphs stopped at the backbone, so that name described a
+        ``[1, 1, hidden]`` tensor; with lm_head in the graph it is the real
+        vocabulary distribution.
+        """
+        return super().get_export_cfg()
 
 
     def get_export_info(self, output_dir):

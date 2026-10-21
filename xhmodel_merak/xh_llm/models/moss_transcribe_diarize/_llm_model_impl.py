@@ -97,6 +97,72 @@ def _moss_attention_wrap():
     return MossQwen3Attention
 
 
+def _moss_model_wrap():
+    """Qwen3 backbone plus the in-graph output projection.
+
+    Like every other registered model, MOSS applies ``lm_head`` inside the
+    decoder graph, so the graph emits real vocabulary logits instead of the
+    final hidden state.  The greedy pick stays on the host, also as elsewhere in
+    this repository.  ``attach_lm_head`` binds an untied copy of the projection
+    onto the language model before the wrap, keeping the Whisper encoder out of
+    the traced subgraph.
+    """
+    from xhmodel_merak.xh_llm.models.qwen3._model import _Qwen3Model
+
+    class MossQwen3Model(_Qwen3Model):
+        def graph_forward(
+            self,
+            inputs_embeds=None,
+            past_seq_length=None,
+            current_input_length=None,
+            past_key_cache=None,
+            past_value_cache=None,
+        ):
+            hidden_states = super().graph_forward(
+                inputs_embeds=inputs_embeds,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+                past_key_cache=past_key_cache,
+                past_value_cache=past_value_cache,
+            )
+            if getattr(self, "lm_head", None) is None:
+                return hidden_states
+            return self.lm_head(hidden_states)
+
+    return MossQwen3Model
+
+
+def attach_lm_head(hf_model: Any) -> bool:
+    """Bind an untied ``lm_head`` copy onto the language model for in-graph logits.
+
+    MOSS ties ``lm_head.weight`` to ``embed_tokens.weight``.  Quantizing the
+    attached projection in place would also corrupt the token embedding that
+    ``_wraped_post`` later deep-copies for host-side lookup, so copy the weight
+    off the tied storage first.
+    """
+    import torch
+    from torch import nn
+
+    language = language_model_from_hf(hf_model)
+    lm_head = getattr(hf_model, "lm_head", None)
+    if lm_head is None or getattr(language, "lm_head", None) is not None:
+        return False
+    weight = lm_head.weight.detach()
+    # Build on the source device and dtype. nn.Linear would otherwise allocate
+    # fp32 on CPU, leaving the projection inconsistent with the module it is
+    # attached to: a bf16/CUDA checkpoint gets an fp32/CPU child that only works
+    # because init_wrap_model casts the whole language model afterwards, and the
+    # fp32 copy of a 151936 x 1024 matrix costs 622MB of host memory first.
+    untied = nn.Linear(
+        weight.shape[1], weight.shape[0], bias=False,
+        device=weight.device, dtype=weight.dtype,
+    )
+    with torch.no_grad():
+        untied.weight.copy_(weight)
+    language.lm_head = untied
+    return True
+
+
 def _moss_rotary_wrap():
     from xhmodel_merak.xh_llm.models.qwen3._model import _Qwen3RotaryEmbedding
 
@@ -148,7 +214,10 @@ def register_wrap_modules(hf_model: Any | None = None) -> dict[Any, Any]:
         (type(getattr(layer, "input_layernorm", None)), _Qwen3RMSNorm),
         (type(getattr(language, "norm", None)), _Qwen3RMSNorm),
         (type(getattr(language, "rotary_emb", None)), _moss_rotary_wrap()),
-        (type(language), _Qwen3Model),
+        # The lm_head-aware backbone needs the projection already attached. Callers
+        # that trace for export run attach_lm_head first; a bare language model
+        # (CI fixtures, metadata-only paths) keeps the hidden-state Qwen3 wrap.
+        (type(language), _moss_model_wrap() if getattr(language, "lm_head", None) is not None else _Qwen3Model),
     )
     replacements: dict[Any, Any] = {}
     for source, wrap in pairs:
@@ -163,4 +232,4 @@ def register_wrap_modules(hf_model: Any | None = None) -> dict[Any, Any]:
     return replacements
 
 
-__all__ = ["language_model_from_hf", "register_wrap_modules", "restore_wrap_modules"]
+__all__ = ["attach_lm_head", "language_model_from_hf", "register_wrap_modules", "restore_wrap_modules"]

@@ -12,17 +12,39 @@ export:
     max_pe_length: 262144
     convert_hmonnx: true
     quant_type: w8a8_sefp
+    # lm_head runs inside the decoder graph, so it publishes vocabulary logits
+    # instead of the final hidden state. The greedy pick stays on the host.
+    #
+    # No ops.MatMul here: with FlashAttention enabled, attention lowers to a
+    # FlashAttention node and the graph has no GroupMatMul, so that key would be
+    # inert. Attention precision is set by the flash_attention bits below.
+    quant_scheme:
+      quant_type: w8a8_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8_sefp
+      ops: {}
     wrap_cfg:
       use_cache: true
       num_logits_to_keep: 1
       kv_cache:
         cache_axis: 2
+    # 16 bit, not 8. Weights and activations stay w8a8; only the FlashAttention
+    # operands widen. k_bits/v_bits also set the paged KV cache mantissa width,
+    # so 8 bit stores K/V as int8 and, measured on 28 real layers, zeroes 1.34%
+    # of K and 1.54% of V elements because a 64-token SEFP group shares one
+    # exponent. Over ~18k decode steps that cost accumulates: the model loses
+    # the timestamp anchor, then repeats or stops early.
+    #
+    # AliMeeting far, 20 x 30-min clips, paper protocol: 8 bit scores 28.12 CER
+    # with 2 runaway files; 16 bit scores 23.52 with none, against a PyTorch
+    # fp16 baseline of 23.60. Wall time 1.43x, KV cache 3.55 -> 7.05 GB.
     flash_attention:
       enable: true
-      q_bits: 8
-      k_bits: 8
-      v_bits: 8
-      p_bits: 8
+      q_bits: 16
+      k_bits: 16
+      v_bits: 16
+      p_bits: 16
     frontend_type: TorchFX
     export_cfg:
       input_names:
@@ -31,8 +53,10 @@ export:
         - current_input_length
         - past_key_cache
         - past_value_cache
+      # Inert: config.export_cfg is never read. get_export_cfg() in model.py is
+      # what names the graph outputs. Kept in sync so the file is not misleading.
       output_names:
-        - last_hidden_state
+        - logits
         - present_key_cache
         - present_value_cache
     encode_config:

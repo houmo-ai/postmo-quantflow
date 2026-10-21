@@ -63,9 +63,16 @@ def test_checked_in_16k_64k_and_128k_workflows_enable_flash_attention():
     assert fa128["export"]["model"]["context_max_length"] == 131072
     for model in (short, fa16, fa64, fa128):
         assert model["export"]["model"]["max_pe_length"] == 262144
-    for model in (fa16, fa64, fa128):
+    for model in (fa16, fa128):
         bits = model["export"]["model"]["flash_attention"]
         assert {bits[name] for name in ("q_bits", "k_bits", "v_bits", "p_bits")} == {8}
+    # 64k carries the 30-minute recipe, where 8-bit FlashAttention operands cost
+    # accuracy: k_bits/v_bits also set the paged KV cache mantissa width, and the
+    # error accumulates over ~18k decode steps until the timestamp anchor is lost.
+    # Measured on AliMeeting far (20 x 30-min clips, paper protocol): 28.12 CER
+    # with 2 runaway files at 8 bit, 23.52 with none at 16 bit, fp16 being 23.60.
+    bits64 = fa64["export"]["model"]["flash_attention"]
+    assert {bits64[name] for name in ("q_bits", "k_bits", "v_bits", "p_bits")} == {16}
 
 def test_yaml_fused_embedding_abi_has_no_input_ids_or_audio():
     data = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
@@ -81,7 +88,12 @@ def test_yaml_fused_embedding_abi_has_no_input_ids_or_audio():
     ]
     assert "input_ids" not in names
     assert "input_features" not in names
-    assert "last_hidden_state" in outputs
+    # lm_head now runs in the decoder graph, so the first output carries
+    # vocabulary logits rather than the final hidden state. This block of
+    # export_cfg is inert either way (config.export_cfg is never read; the
+    # names come from model.get_export_cfg), but it is kept truthful.
+    assert "logits" in outputs
+    assert "last_hidden_state" not in outputs
 
 def test_workflow_context_override_reaches_model_config(tmp_path):
     from xhmodel_merak.workflows import AutoWorkflow

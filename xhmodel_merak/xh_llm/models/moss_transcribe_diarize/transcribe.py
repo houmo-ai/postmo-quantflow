@@ -21,6 +21,15 @@ _TRANSCRIPT_SEGMENT = re.compile(
     re.DOTALL,
 )
 _TIMESTAMP_GAP = re.compile(r"(?:\[\d+(?:\.\d+)?\]\s*)+")
+# Segment order is not strictly sorted by start time, and the official model does
+# not promise it is: neither the remote-code modules nor the published output
+# format mention ordering. In overlapping speech the model may emit a long turn
+# before a short interjection that began slightly earlier. Measured on PyTorch
+# fp16 AliMeeting far output, this happens 11 times in 14212 segments, always a
+# backstep of 0.03-0.71s on a filler like "对。" or "嗯。". A lost timestamp
+# anchor, by contrast, jumps whole seconds or more, so a sub-second tolerance
+# separates legitimate overlap from real corruption.
+_SEGMENT_ORDER_TOLERANCE = 1.0
 
 def transcribe_artifact(
     *,
@@ -124,10 +133,22 @@ def project_lm_head(hidden: Any, lm_head: Any) -> Any:
     weight = lm_head.projection.weight
     return lm_head(hidden.to(device=weight.device, dtype=weight.dtype))
 
+def is_vocab_logits(value: Any, lm_head: Any) -> bool:
+    """True when a decoder output is already vocabulary-wide, i.e. lm_head ran in the graph."""
+    shape = getattr(value, "shape", None)
+    if shape is None or len(shape) == 0:
+        return False
+    try:
+        return int(shape[-1]) == int(lm_head.projection.weight.shape[0])
+    except (TypeError, ValueError):
+        return False
+
 def greedy_token(hidden: Any, lm_head: Any) -> Any:
+    """Pick the next token id, projecting on the host only if the graph did not."""
     import torch
 
-    logits = project_lm_head(first_output(hidden), lm_head)
+    value = first_output(hidden)
+    logits = value if is_vocab_logits(value, lm_head) else project_lm_head(value, lm_head)
     return torch.argmax(logits, dim=-1).reshape(-1).to(dtype=torch.long)
 
 def token_embedding(token: Any, lm_head: Any, device: str) -> Any:
@@ -136,6 +157,22 @@ def token_embedding(token: Any, lm_head: Any, device: str) -> Any:
     weight = lm_head.projection.weight
     token_ids = token.reshape(-1).to(device=weight.device, dtype=torch.int64)
     return weight.index_select(0, token_ids).reshape(1, 1, -1).to(device=device)
+
+def decoder_output(outputs: Mapping[str, Any]) -> Any:
+    """Read the decoder's step output under either published name.
+
+    Graphs with an in-graph ``lm_head`` publish ``logits``; older graphs publish
+    the final hidden state (named ``logits`` too, aliased to
+    ``last_hidden_state`` by the runtime).  Either way the tensor is what
+    ``greedy_token`` consumes.
+    """
+    for name in ("last_hidden_state", "logits"):
+        if name in outputs:
+            return outputs[name]
+    raise ModelError(
+        ErrorCode.INFERENCE_FAILED,
+        "MOSS decoder runtime is missing output 'last_hidden_state'/'logits'",
+    )
 
 def first_output(output: Any) -> Any:
     if isinstance(output, Mapping):
@@ -209,13 +246,16 @@ def validate_transcript_structure(
                 end=end,
                 overflow_s=overflow,
             )
-        if index and start < previous_start:
+        if index and start < previous_start - _SEGMENT_ORDER_TOLERANCE:
             raise ModelError(
                 ErrorCode.INFERENCE_FAILED,
                 "MOSS transcript segment timestamps are out of order",
                 model=model_id,
+                segment=index,
+                start=start,
+                previous_start=previous_start,
             )
-        previous_start = start
+        previous_start = max(previous_start, start)
         cursor = match.end()
     if normalized[cursor:].strip():
         raise ModelError(
@@ -293,7 +333,7 @@ def generate_hmonnx(
     if not isinstance(outputs, Mapping):
         raise ModelError(ErrorCode.INFERENCE_FAILED, "MOSS prefill runtime returned an invalid output object")
     try:
-        hidden = outputs["last_hidden_state"]
+        hidden = decoder_output(outputs)
         if not inplace_cache:
             key = outputs["present_key_cache"]
             value = outputs["present_value_cache"]
@@ -306,7 +346,7 @@ def generate_hmonnx(
     hidden_states = first_output(hidden)
     if last_valid <= 0:
         raise ModelError(ErrorCode.INFERENCE_FAILED, "MOSS prefill produced no valid tokens")
-    # Published graphs keep num_logits_to_keep=1, so last_hidden is already (1, 1, H).
+    # Published graphs keep num_logits_to_keep=1, so the step output is already (1, 1, W).
     seq = int(hidden_states.shape[1])
     last = min(last_valid, seq) - 1
     if last < 0:
@@ -327,7 +367,7 @@ def generate_hmonnx(
             value,
         )
         current = current + 1
-        hidden = outputs["last_hidden_state"]
+        hidden = decoder_output(outputs)
         if not inplace_cache:
             key = outputs["present_key_cache"]
             value = outputs["present_value_cache"]

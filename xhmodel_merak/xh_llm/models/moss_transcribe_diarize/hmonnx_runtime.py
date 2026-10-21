@@ -14,6 +14,18 @@ from xhmodel_merak.model_artifact.files import confined_file
 
 _LOGGER = logging.getLogger(__name__)
 _DIGEST_CACHE_NAME = re.compile(r"\.xhquant_.*_sha256_.*\.json")
+LLM_HIDDEN_SIZE = 1024
+
+
+def _is_vocab_logits(value: Any) -> bool:
+    """True when a tensor is wider than the hidden size, i.e. real vocabulary logits."""
+    shape = getattr(value, "shape", None)
+    if shape is None or len(shape) == 0:
+        return False
+    try:
+        return int(shape[-1]) > LLM_HIDDEN_SIZE
+    except (TypeError, ValueError):
+        return False
 
 
 def convert_published_graph_to_page_attention(source: Path) -> Path:
@@ -215,8 +227,8 @@ class MossHMONNXRuntime:
         num_layers = int(prefill.get("num_layers") or 0)
         n_kv_head = int(prefill.get("n_kv_head") or 0)
         head_dim = int(prefill.get("head_dim") or 0)
+        modules = _page_attention_modules(self._session("prefill"))
         if num_layers <= 0 or n_kv_head <= 0 or head_dim <= 0:
-            modules = _page_attention_modules(self._session("prefill"))
             if not modules:
                 raise RuntimeError("PageAttention graph has no PageAttention modules")
             num_layers = len(modules)
@@ -224,6 +236,20 @@ class MossHMONNXRuntime:
             head_dim = int(getattr(modules[0], "head_size", 0) or getattr(modules[0], "head_dim", 0) or head_dim)
         if num_layers <= 0 or n_kv_head <= 0 or head_dim <= 0:
             raise RuntimeError("MOSS PageAttention metadata is missing layer/KV geometry")
+        # Never default the width: the page bits decide the cache mantissa dtype,
+        # so falling back to 8 here would hand a 16-bit graph an int8 cache, which
+        # is the silent mismatch this reads k_bits to avoid. A missing module list
+        # is already fatal above when geometry metadata is absent.
+        if not modules:
+            raise RuntimeError("PageAttention graph has no PageAttention modules; cannot read k_bits/v_bits")
+        try:
+            k_bits = int(modules[0].k_bits)
+            v_bits = int(modules[0].v_bits)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise RuntimeError("PageAttention module is missing k_bits/v_bits") from error
+        qdata_dtype = {8: torch.int8, 16: torch.int16}
+        if k_bits not in qdata_dtype or v_bits not in qdata_dtype:
+            raise RuntimeError(f"MOSS PageAttention cache bits must be 8 or 16, got k={k_bits}, v={v_bits}")
         block_size = self._page_attention_block_size
         num_blocks = (context_length + block_size - 1) // block_size
         caches = [
@@ -234,6 +260,8 @@ class MossHMONNXRuntime:
                 head_size=head_dim,
                 head_size_v=head_dim,
                 device=device,
+                k_qdata_dtype=qdata_dtype[k_bits],
+                v_qdata_dtype=qdata_dtype[v_bits],
             )
             for _ in range(num_layers)
         ]
@@ -400,6 +428,7 @@ class MossHMONNXRuntime:
             enable_fast=False,
             enable_auto_offload=auto_offload,
             enable_cuda_graph=enable_cuda_graph,
+            enable_golden=component in self._golden_components,
             exec_devices=list(self.exec_devices),
         )
 
@@ -545,7 +574,11 @@ class MossHMONNXRuntime:
             raise ValueError(f"HMONNX {component} returned one output, expected {len(out_names)}")
         else:
             result = {out_names[0]: outputs}
-        if "logits" in result and "last_hidden_state" not in result:
+        # Graphs without an in-graph lm_head publish the final hidden state under
+        # the name "logits". Alias it so callers can read last_hidden_state, but
+        # never alias a real vocabulary logits tensor: the host would then apply
+        # the output projection a second time.
+        if "logits" in result and "last_hidden_state" not in result and not _is_vocab_logits(result["logits"]):
             result["last_hidden_state"] = result["logits"]
         return result
 
