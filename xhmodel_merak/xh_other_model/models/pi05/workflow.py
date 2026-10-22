@@ -151,6 +151,11 @@ class PI05Workflow(BaseOtherModelWorkflow):
                 raise ValueError("PI05 export.expert_model must be provided when component 'expert' is enabled")
             expert_cfg["hf_model"] = export_model_dir
             _ensure_quant_config(expert_cfg, target_device, str(quant_types.get("expert", "w8a8h1_sefp")))
+            if str(export_cfg.get("variant", "")).startswith("libero"):
+                # Protect only the first DiT down projection's input.
+                expert_cfg["quant_config"]["nodes_cfg"]["model_layers_0_mlp_down_proj"] = {
+                    "act_schema": {"fp_mode": "sefp", "man_bit": 16},
+                }
             result = export_pi05_llm_component(
                 model_cfg=expert_cfg,
                 runtime_cfg=runtime_cfg,
@@ -412,6 +417,11 @@ def export_pi05_other(
     onnx_dir.mkdir(exist_ok=True, parents=True)
     hmonnx_dir.mkdir(exist_ok=True, parents=True)
     quant_config = _build_quant_config(target_device, quant_type)
+    # Action projections are small and sensitive to activation quantization.
+    action_quant_config = copy.deepcopy(quant_config)
+    action_quant_config.ops_cfg["Linear"] = {
+        "act_schema": {"fp_mode": "sefp", "man_bit": 16},
+    }
 
     sequence_length = int(component_cfg.get("sequence_length", policy.config.chunk_size))
     action_dim = int(component_cfg.get("action_dim", policy.config.max_action_dim))
@@ -438,7 +448,7 @@ def export_pi05_other(
         (action_in_input,),
         out_hmonnx_file=action_in_hmonnx,
         device_type=_to_hmonnx_device_type(target_device),
-        quant_config=quant_config,
+        quant_config=action_quant_config,
     )
     graphs.append(
         _simple_graph_meta("action_in_proj", component_dir, action_in_onnx, action_in_hmonnx, action_in_shape)
@@ -464,7 +474,7 @@ def export_pi05_other(
         (action_out_input,),
         out_hmonnx_file=action_out_hmonnx,
         device_type=_to_hmonnx_device_type(target_device),
-        quant_config=quant_config,
+        quant_config=action_quant_config,
     )
     graphs.append(
         _simple_graph_meta("action_out_proj", component_dir, action_out_onnx, action_out_hmonnx, action_out_shape)
