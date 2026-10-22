@@ -11,9 +11,13 @@ from pathlib import Path
 
 
 EXCLUDED_VISDOC_DIAGNOSTICS = {
-    "ViDoSeek-doc",
-    "MMLongBench-doc",
-    "MMLongBench-page",
+    "ViDoRe_biomedical_lectures_v2",
+    "ViDoRe_economics_reports_v2",
+    "ViDoRe_esg_reports_v2",
+}
+VISDOC_ALIASES = {
+    "ViDoSeek-page": "ViDoSeek-page-fixed",
+    "MMLongBench-page": "MMLongBench-page-fixed",
 }
 OFFICIAL_REFERENCE = {
     "V3-All": 55.8,
@@ -124,6 +128,22 @@ def _mean(rows: list[dict[str, object]]) -> float | None:
     return sum(values) / len(values) if len(values) == len(rows) and values else None
 
 
+def _official_name(modality: str, dataset: str) -> str:
+    if modality in {"text", "tool", "memory"}:
+        return dataset.rsplit("/", 1)[-1]
+    return VISDOC_ALIASES.get(dataset, dataset) if modality == "visdoc" else dataset
+
+
+def _archive_errors(run_dir: Path, job: dict[str, object]) -> list[str]:
+    """Verify preserved bytes against the receipt created before cleanup."""
+    errors = []
+    for key in ("score_file", "protocol_file", "config", "source_manifest"):
+        path = run_dir / str(job[key])
+        if not path.is_file() or _sha256(path) != job[f"{key}_sha256"]:
+            errors.append(f"archive_{key}_sha256")
+    return errors
+
+
 def _text_group(dataset: str) -> str:
     if dataset.startswith("text/BRIGHT/") or dataset.startswith("text/R2MED/"):
         return "Reasoning Retrieval"
@@ -154,25 +174,36 @@ def main() -> None:
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("--title", default="WEMM-Embedding MMEB-v3 Report")
     parser.add_argument("--no-official-reference", action="store_true")
+    parser.add_argument("--official-scores", type=Path, help="Published WeMM result JSON for this model size.")
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     manifest = json.loads((run_dir / "run_manifest.json").read_text())
     adapter_sha256 = _sha256(Path(__file__).with_name("mmeb_v3_vllm_merak.py"))
+    archived = bool(manifest.get("result_archive"))
+    official_metrics = json.loads(args.official_scores.read_text())["metrics"] if args.official_scores else None
 
     rows = []
     for job in manifest["jobs"]:
         modality = job["modality"]
         dataset = job["dataset_name"]
         output = Path(job["output"])
-        score_path = output / f"{dataset}_score.json"
-        protocol_path = output / "protocol.json"
+        score_path = run_dir / job["score_file"] if archived else output / f"{dataset}_score.json"
+        protocol_path = run_dir / job["protocol_file"] if archived else output / "protocol.json"
         metric = _primary_metric(modality, dataset)
         score = None
         protocol_errors = ["protocol.json missing"]
         if protocol_path.is_file():
             try:
                 protocol = json.loads(protocol_path.read_text())
-                protocol_errors = _protocol_errors(manifest, job, protocol, adapter_sha256)
+                if archived:
+                    protocol_errors = _archive_errors(run_dir, job)
+                    source_manifest = json.loads((run_dir / job["source_manifest"]).read_text())
+                    archive_job = {**job, "config": str(run_dir / job["config"])}
+                    protocol_errors += _protocol_errors(
+                        source_manifest, archive_job, protocol, job["source_adapter_sha256"]
+                    )
+                else:
+                    protocol_errors = _protocol_errors(manifest, job, protocol, adapter_sha256)
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 protocol_errors = ["protocol.json invalid"]
         if not protocol_errors and score_path.is_file():
@@ -187,9 +218,16 @@ def main() -> None:
                 "score_percent": score,
                 "score_file": str(score_path),
                 "protocol_file": str(protocol_path),
+                "config_file": str(run_dir / job["config"] if archived else Path(job["config"])),
                 "protocol_valid": not protocol_errors,
                 "protocol_errors": ",".join(protocol_errors),
                 "aggregate_included": not (modality == "visdoc" and dataset in EXCLUDED_VISDOC_DIAGNOSTICS),
+                "official_percent": (
+                    float(official_metrics[modality][_official_name(modality, dataset)][metric]) * 100.0
+                    if official_metrics is not None
+                    and not (modality == "visdoc" and dataset in EXCLUDED_VISDOC_DIAGNOSTICS)
+                    else None
+                ),
             }
         )
 
@@ -221,6 +259,20 @@ def main() -> None:
         "Memory": by_modality["memory"],
         "MCMR": mcmr,
     }
+    if official_metrics is not None:
+        matched = {
+            (row["modality"], _official_name(str(row["modality"]), str(row["dataset"])))
+            for row in rows
+            if row["aggregate_included"]
+        }
+        expected = {
+            (modality, dataset)
+            for modality, datasets in official_metrics.items()
+            if modality != "audio"
+            for dataset in datasets
+        }
+        if matched != expected:
+            raise ValueError("Executed task membership differs from the official non-audio task set")
     aggregates = {name: _mean(group) for name, group in aggregate_rows.items()}
     aggregates["Audio"] = 0.0
     v3_rows = mmeb_v2 + text + agent + mcmr
@@ -234,7 +286,17 @@ def main() -> None:
         aggregates["V3-All"] = None
         aggregates["Supported-Only"] = None
 
-    use_official_reference = not args.no_official_reference
+    use_official_reference = not args.no_official_reference and "WeMM-Embedding-2B" in str(
+        manifest.get("source_model", manifest.get("model", ""))
+    )
+    references = dict(OFFICIAL_REFERENCE) if use_official_reference else {}
+    if official_metrics is not None:
+        references = {
+            name: sum(float(row["official_percent"]) for row in group) / len(group)
+            for name, group in aggregate_rows.items()
+        }
+        official_sum = sum(float(row["official_percent"]) for row in v3_rows)
+        references.update({"Audio": 0.0, "V3-All": official_sum / 190, "Supported-Only": official_sum / 179})
     summary = {
         "protocol": {
             "total_reported_tasks": 190,
@@ -243,6 +305,7 @@ def main() -> None:
             "executed_diagnostic_tasks": 3,
             "image_video_agent_metric": "Hit@1",
             "text_visdoc_metric": "NDCG@5",
+            "diagnostic_datasets": sorted(EXCLUDED_VISDOC_DIAGNOSTICS),
         },
         "completed_score_files": sum(row["score_percent"] is not None for row in rows),
         "expected_score_files": len(rows),
@@ -259,12 +322,8 @@ def main() -> None:
         "aggregates": {
             name: {
                 "score": value,
-                "official_wemm_2b": (OFFICIAL_REFERENCE.get(name) if use_official_reference else None),
-                "delta": (
-                    None
-                    if not use_official_reference or value is None or name not in OFFICIAL_REFERENCE
-                    else value - OFFICIAL_REFERENCE[name]
-                ),
+                "official_float": references.get(name),
+                "delta": (None if value is None or name not in references else value - references[name]),
                 "num_tasks": (
                     len(aggregate_rows[name])
                     if name in aggregate_rows
@@ -308,12 +367,12 @@ def main() -> None:
         "",
         f"Completed datasets: {summary['completed_score_files']}/{summary['expected_score_files']}",
         "",
-        f"| Group | Tasks | {_score_column_label(str(manifest.get('backend', '')))} | Official WeMM-2B | Delta |",
+        f"| Group | Tasks | {_score_column_label(str(manifest.get('backend', '')))} | Official float | Delta |",
         "|---|---:|---:|---:|---:|",
     ]
     for name in order:
         item = summary["aggregates"][name]
-        reference = item["official_wemm_2b"]
+        reference = item["official_float"]
         markdown.append(
             f"| {name} | {item['num_tasks']} | {_format(item['score'])} | "
             f"{_format(reference)} | {_format(item['delta'])} |"
@@ -321,8 +380,18 @@ def main() -> None:
     if summary["missing"]:
         markdown.extend(("", "## Pending datasets", ""))
         markdown.extend(f"- {name}" for name in summary["missing"])
+    markdown.extend(
+        (
+            "",
+            "Audio: unsupported; 11 tasks count as zero in V3-All. "
+            "Three VisDoc diagnostic tasks are excluded from all headline aggregates.",
+            "",
+        )
+    )
     (aggregate_dir / "REPORT.md").write_text("\n".join(markdown) + "\n")
     print(json.dumps(summary["aggregates"], indent=2, ensure_ascii=False))
+    if summary["invalid_protocols"] or summary["missing"]:
+        raise SystemExit("Incomplete or invalid results; see aggregate/summary.json")
 
 
 if __name__ == "__main__":

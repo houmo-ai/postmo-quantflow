@@ -13,9 +13,12 @@ import torch.nn.functional as F
 
 
 try:
-    from .native_utils import embed_native_items, load_native_embedder
-    from .runtime_utils import load_hmonnx_embedder
+    from ..native_utils import embed_native_items, load_native_embedder
+    from ..runtime_utils import load_hmonnx_embedder
 except ImportError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from native_utils import embed_native_items, load_native_embedder
     from runtime_utils import load_hmonnx_embedder
 

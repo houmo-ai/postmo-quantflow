@@ -570,9 +570,12 @@
         "dataset",
         "metric",
         "float",
-        "quant",
         "delta",
         "evidence"
+      ],
+      "anyOf": [
+        {"required": ["hmonnx"]},
+        {"required": ["quant"]}
       ],
       "properties": {
         "name": {
@@ -594,6 +597,13 @@
           "type": [
             "string",
             "number"
+          ]
+        },
+        "hmonnx": {
+          "type": [
+            "string",
+            "number",
+            "null"
           ]
         },
         "delta": {

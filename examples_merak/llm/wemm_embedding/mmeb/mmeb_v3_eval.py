@@ -18,6 +18,7 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import torch
 
 
@@ -93,6 +94,167 @@ class HMONNXWeMM:
         return {"qry_reps" if qry is not None else "tgt_reps": reps}
 
 
+def shard_bounds(length: int, index: int, count: int) -> tuple[int, int]:
+    """Return a deterministic contiguous half-open range for one shard."""
+    if length < 0:
+        raise ValueError("length must be non-negative")
+    if count <= 0:
+        raise ValueError("shard count must be positive")
+    if index < 0 or index >= count:
+        raise ValueError(f"shard index {index} is outside [0, {count})")
+    start = length * index // count
+    end = length * (index + 1) // count
+    return start, end
+
+
+def _write_npy_atomic(path: Path, value: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("wb") as handle:
+        np.save(handle, value, allow_pickle=False)
+    temporary.replace(path)
+
+
+def _write_jsonl_atomic(path: Path, values: list[object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        for value in values:
+            handle.write(json.dumps(value, ensure_ascii=False) + "\n")
+    temporary.replace(path)
+
+
+def _write_json_atomic(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def _select_range(dataset, start: int, end: int):
+    if hasattr(dataset, "select"):
+        return dataset.select(range(start, end))
+    return torch.utils.data.Subset(dataset, range(start, end))
+
+
+def _run_embedding_shard(
+    official_eval,
+    options: argparse.Namespace,
+    upstream_args: list[str],
+) -> None:
+    """Encode one query/candidate range without computing a partial score."""
+    from src.arguments import DataArguments, ModelArguments, TrainingArguments
+    from src.data.collator.eval_collator import MultimodalEvalDataCollator
+    from src.data.eval_dataset.base_eval_dataset import AutoEvalPairDataset, generate_cand_dataset
+    from src.model.model import MMEBModel
+    from src.model.processor import load_processor
+    from torch.utils.data import DataLoader
+    from transformers import HfArgumentParser
+
+    old_argv = sys.argv
+    try:
+        sys.argv = [str(Path(official_eval.__file__).resolve()), *upstream_args]
+        model_args, data_args, training_args = HfArgumentParser(
+            (ModelArguments, DataArguments, TrainingArguments)
+        ).parse_args_into_dataclasses()
+    finally:
+        sys.argv = old_argv
+
+    task_configs = __import__("yaml").safe_load(Path(data_args.dataset_config).read_text())
+    if len(task_configs) != 1:
+        raise ValueError("Embedding shard mode requires exactly one dataset in --dataset_config")
+    dataset_name, raw_task_config = next(iter(task_configs.items()))
+    task_config = dict(raw_task_config)
+    for key in (
+        "image_root",
+        "video_root",
+        "frame_root",
+        "clip_root",
+        "audio_root",
+        "data_path",
+        "query_file",
+        "candidate_file",
+        "qrels_file",
+    ):
+        if data_args.data_basedir and task_config.get(key):
+            task_config[key] = os.path.join(data_args.data_basedir, task_config[key])
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    training_args.device = device
+    processor = load_processor(model_args, data_args)
+    model = MMEBModel.load(model_args, is_trainable=False, processor=processor)
+    model.eval()
+    model = model.to(device, dtype=torch.bfloat16)
+
+    full_queries, corpus = AutoEvalPairDataset.instantiate(
+        model_args=model_args,
+        data_args=data_args,
+        **task_config,
+    )
+    full_candidates = generate_cand_dataset(full_queries, corpus)
+    shard_root = Path(data_args.encode_output_path) / "embedding_shard"
+    shard_root.mkdir(parents=True, exist_ok=True)
+    side_results: dict[str, dict[str, int]] = {}
+
+    for encode_side, full_dataset in (("qry", full_queries), ("cand", full_candidates)):
+        start, end = shard_bounds(len(full_dataset), options.embedding_shard_index, options.embedding_shard_count)
+        shard_dataset = _select_range(full_dataset, start, end)
+        batch_size = training_args.per_device_eval_batch_size
+        if dataset_name in {"Charades-STA", "QVHighlight", "MomentSeeker", "YouCook2", "Video-MME"}:
+            batch_size = min(batch_size, 4)
+        collator = MultimodalEvalDataCollator(processor, model_args, data_args, encode_side)
+        loader = DataLoader(
+            shard_dataset,
+            batch_size=batch_size,
+            collate_fn=collator,
+            num_workers=training_args.dataloader_num_workers,
+            timeout=(
+                int(os.environ.get("MMEB_DATALOADER_TIMEOUT", "600")) if training_args.dataloader_num_workers > 0 else 0
+            ),
+        )
+        embeddings, infos = official_eval.encode_embeddings(
+            model,
+            loader,
+            training_args,
+            model_args,
+            shard_dataset,
+            encode_side=encode_side,
+            description=f"{encode_side} shard {options.embedding_shard_index + 1}/"
+            f"{options.embedding_shard_count} for {dataset_name}",
+        )
+        expected = end - start
+        if len(embeddings) != expected or len(infos) != expected:
+            raise RuntimeError(
+                f"{encode_side} shard produced {len(embeddings)} embeddings and {len(infos)} IDs; expected {expected}"
+            )
+        _write_npy_atomic(shard_root / f"{encode_side}.npy", np.asarray(embeddings, dtype=np.float32))
+        _write_jsonl_atomic(shard_root / f"{encode_side}_info.jsonl", infos)
+        side_results[encode_side] = {"start": start, "end": end, "total": len(full_dataset)}
+
+    manifest = {
+        "schema_version": 1,
+        "dataset_name": dataset_name,
+        "dataset_config_sha256": hashlib.sha256(Path(data_args.dataset_config).read_bytes()).hexdigest(),
+        "shard_index": options.embedding_shard_index,
+        "shard_count": options.embedding_shard_count,
+        "query": side_results["qry"],
+        "candidate": side_results["cand"],
+        "embedding_dimension": int(model.rep_dim),
+    }
+    _write_json_atomic(shard_root / "manifest.json", manifest)
+    print(json.dumps(manifest, indent=2, ensure_ascii=False))
+
+
+class _ScoreOnlyModel:
+    rep_dim = 0
+
+    def eval(self):
+        return self
+
+    def to(self, *_args, **_kwargs):
+        return self
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--backend", choices=("hf", "hmonnx", "vllm", "vllm_merak"), required=True)
@@ -108,6 +270,10 @@ def main() -> None:
     parser.add_argument("--video-min-pixels", type=int, default=4 * 32 * 32)
     parser.add_argument("--video-max-pixels", type=int, default=256 * 32 * 32)
     parser.add_argument("--video-total-pixels", type=int, default=8192 * 32 * 32)
+    parser.add_argument("--embedding-shard-count", type=int, default=1)
+    parser.add_argument("--embedding-shard-index", type=int, default=0)
+    parser.add_argument("--embedding-shard-only", action="store_true")
+    parser.add_argument("--score-only", action="store_true")
     options, upstream_args = parser.parse_known_args()
     if options.backend in {"hmonnx", "vllm_merak"} and not options.hmonnx_meta:
         parser.error("--hmonnx-meta is required for HMONNX-backed backends")
@@ -117,6 +283,14 @@ def main() -> None:
         parser.error("vLLM Merak hybrid linear state requires --vllm-max-num-seqs 1")
     if options.image_min_pixels <= 0 or options.image_max_pixels < options.image_min_pixels:
         parser.error("Expected 0 < --image-min-pixels <= --image-max-pixels")
+    if options.embedding_shard_count <= 0:
+        parser.error("--embedding-shard-count must be positive")
+    if not 0 <= options.embedding_shard_index < options.embedding_shard_count:
+        parser.error("--embedding-shard-index must be in [0, --embedding-shard-count)")
+    if options.embedding_shard_only and options.embedding_shard_count < 2:
+        parser.error("--embedding-shard-only requires --embedding-shard-count >= 2")
+    if options.embedding_shard_only and options.score_only:
+        parser.error("--embedding-shard-only and --score-only are mutually exclusive")
     if "--dataset_config" not in upstream_args:
         parser.error("--dataset_config is required")
     dataset_config = upstream_args[upstream_args.index("--dataset_config") + 1]
@@ -170,8 +344,10 @@ def main() -> None:
 
         def load_model(cls, model_args, is_trainable=True, **kwargs):
             if model_args.model_backbone == official_processor.WEMM_EMBEDDING:
+                if options.score_only:
+                    return _ScoreOnlyModel()
                 if options.backend == "vllm":
-                    from examples_merak.llm.wemm_embedding.mmeb_v3_vllm_merak import VLLMWeMM
+                    from examples_merak.llm.wemm_embedding.mmeb.mmeb_v3_vllm_merak import VLLMWeMM
 
                     return VLLMWeMM(
                         model_args.model_name,
@@ -186,7 +362,7 @@ def main() -> None:
                         options.vllm_max_num_seqs,
                     )
                 if options.backend == "vllm_merak":
-                    from examples_merak.llm.wemm_embedding.mmeb_v3_vllm_merak import VLLMMerakWeMM
+                    from examples_merak.llm.wemm_embedding.mmeb.mmeb_v3_vllm_merak import VLLMMerakWeMM
 
                     return VLLMMerakWeMM(
                         options.hmonnx_meta,
@@ -260,6 +436,8 @@ def main() -> None:
         MMEBModel.load = classmethod(load_model)
         MultimodalEvalDataCollator.__call__ = collate
         official_eval.encode_embeddings = encode
+        if options.score_only:
+            official_eval.load_processor = lambda *_args, **_kwargs: object()
 
     if options.protocol_file:
 
@@ -314,6 +492,7 @@ def main() -> None:
                 if options.backend in {"vllm", "vllm_merak"}
                 else None
             ),
+            "mmeb_v3_eval_adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "vllm_wemm_model_sha256": (
                 hashlib.sha256(native_wemm_path.read_bytes()).hexdigest() if native_wemm_path is not None else None
             ),
@@ -351,10 +530,24 @@ def main() -> None:
             "hmonnx_meta": str(meta_path) if meta_path else None,
             "hmonnx_meta_sha256": meta_sha256,
             "upstream_args": upstream_args,
+            "embedding_shard": (
+                {
+                    "index": options.embedding_shard_index,
+                    "count": options.embedding_shard_count,
+                    "shard_only": options.embedding_shard_only,
+                }
+                if options.embedding_shard_only
+                else None
+            ),
+            "score_only": options.score_only,
         }
         path = Path(options.protocol_file)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(protocol, indent=2, ensure_ascii=False) + "\n")
+
+    if options.embedding_shard_only:
+        _run_embedding_shard(official_eval, options, upstream_args)
+        return
 
     sys.argv = [str(Path(official_eval.__file__).resolve()), *upstream_args]
     try:

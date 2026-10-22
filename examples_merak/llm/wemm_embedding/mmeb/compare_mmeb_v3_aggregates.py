@@ -7,6 +7,35 @@ import csv
 import json
 from pathlib import Path
 
+import yaml
+
+
+def _check_task_protocol(left: dict, right: dict) -> None:
+    protocols = [json.loads(Path(row["protocol_file"]).read_text()) for row in (left, right)]
+    for key in (
+        "official_repo_commit",
+        "mmeb_v3_data_revision",
+        "mmeb_v2_media_revision",
+        "hf_config_sha256",
+        "image_preprocessing",
+        "video_preprocessing",
+    ):
+        if protocols[0].get(key) != protocols[1].get(key):
+            raise ValueError(f"Effective input protocol mismatch: {left['dataset']}: {key}")
+    for key in ("max_model_len", "long_text_safety_margin_tokens", "max_images"):
+        if protocols[0]["vllm"].get(key) != protocols[1]["vllm"].get(key):
+            raise ValueError(f"Input limit mismatch: {left['dataset']}: {key}")
+    for option in ("--pooling", "--normalize"):
+        values = []
+        for protocol in protocols:
+            arguments = protocol["upstream_args"]
+            values.append(arguments[arguments.index(option) + 1])
+        if values[0] != values[1]:
+            raise ValueError(f"Output protocol mismatch: {left['dataset']}: {option}")
+    configs = [yaml.safe_load(Path(row["config_file"]).read_text())[row["dataset"]] for row in (left, right)]
+    if configs[0] != configs[1]:
+        raise ValueError(f"Dataset configuration mismatch: {left['dataset']}")
+
 
 def _fmt(value: float | None) -> str:
     return "pending" if value is None else f"{value:.2f}"
@@ -22,8 +51,15 @@ def main() -> None:
 
     float_summary = json.loads((args.float_run / "aggregate/summary.json").read_text())
     quant_summary = json.loads((args.quant_run / "aggregate/summary.json").read_text())
+    for summary in (float_summary, quant_summary):
+        if summary["missing"] or summary["invalid_protocols"]:
+            raise ValueError("Cannot compare incomplete or invalid runs")
+    if float_summary["protocol"] != quant_summary["protocol"]:
+        raise ValueError("Aggregate protocols differ")
     float_tasks = {row["dataset"]: row for row in float_summary["tasks"]}
     quant_tasks = {row["dataset"]: row for row in quant_summary["tasks"]}
+    if len(float_tasks) != len(float_summary["tasks"]) or len(quant_tasks) != len(quant_summary["tasks"]):
+        raise ValueError("Duplicate task names in input summaries")
     if set(float_tasks) != set(quant_tasks):
         raise ValueError("Float and quantized task sets differ")
 
@@ -33,6 +69,7 @@ def main() -> None:
         right = quant_tasks[name]
         if left["metric"] != right["metric"] or left["modality"] != right["modality"]:
             raise ValueError(f"Protocol mismatch for {name}")
+        _check_task_protocol(left, right)
         float_score = left["score_percent"]
         quant_score = right["score_percent"]
         task_rows.append(
@@ -101,6 +138,9 @@ def main() -> None:
 
     lines = [
         f"# {args.title}",
+        "",
+        "Delta = quantized - self-tested float, in percentage points. "
+        "Audio is unsupported (11 zero-score tasks); three VisDoc diagnostics are excluded from aggregates.",
         "",
         "| Group | Tasks | Float vLLM | Quantized vLLM Merak | Delta |",
         "|---|---:|---:|---:|---:|",

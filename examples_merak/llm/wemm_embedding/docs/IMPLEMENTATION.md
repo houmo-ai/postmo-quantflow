@@ -1,5 +1,7 @@
 # WeMM-Embedding 实现说明
 
+本篇中的 2048-token 参数描述基础 recipe；当前独立 256K 产物与全量评测以 [评测说明](EVALUATION.md) 为准。
+
 ## 设计目标
 
 WeMM-Embedding 的适配目标不是复制一套 Qwen3.5，而是在复用已维护的 Qwen3.5 多模态导出、量化和 HMONNX 基础设施的同时，隔离 embedding 模型独有的输出、pooling、接口和验证规则。
@@ -42,7 +44,7 @@ WeMM-Embedding 的适配目标不是复制一套 Qwen3.5，而是在复用已维
 7. 转为 FP32 并执行 L2 normalize；
 8. 校验输出 shape 为 `[batch, embedding_dimension]`。
 
-当前 W4 HMONNX 图的 `prefill_chunk_length` 为 256，metadata 中 `context_max_length` 为 2048。运行时已实现 256-token 图的重复执行，因此 257～2048 processed tokens 会分段处理；超过 2048 会在执行前明确报错。
+基础 2048 recipe 的 W4 HMONNX 图的 `prefill_chunk_length` 为 256，metadata 中 `context_max_length` 为 2048。运行时已实现 256-token 图的重复执行，因此 257～2048 processed tokens 会分段处理；超过 2048 会在执行前明确报错。
 
 ## AutoRound 量化
 
@@ -103,7 +105,7 @@ GPTQ recipe 的统一参数：
 
 GPTQModel 后端生成 `qwen35_quant_recipe_provenance.json`，WeMM workflow 复制一份 `wemm_embedding_gptq_recipe_provenance.json` 作为交付别名。共享脚本的 generate、PPL 和视觉生成校验面向 Qwen3.5 生成模型，因此 GPTQ recipe 使用 `check_quant_vision_demo=false` 和 `skip_inference=true`。导出步骤不自动执行 embedding 精度后验；完整检索和 Native/HMONNX cosine 由独立评测流程承担。
 
-AutoRound 与 GPTQ 使用不同校准参数：AutoRound 的迭代优化使用 256×2048，GPTQ 的 Hessian/误差估计使用 256×1024。二者均不改变 HMONNX 单次 prefill 图的 256-token 长度或单条输入累计 2048-token 上限。
+AutoRound 与 GPTQ 使用不同校准参数：AutoRound 的迭代优化使用 256×2048，GPTQ 的 Hessian/误差估计使用 256×1024。二者均不改变 HMONNX 单次 prefill 图的 256-token 长度；基础 recipe 的累计上限为 2048，独立 256K 导出为 262144。
 
 ## Workflow 组织
 
@@ -177,7 +179,7 @@ Flickr30K 通过通用 `RetrievalDataset` 契约接入。数据集 loader 负责
 
 ## 验证边界
 
-旧产物及其精度结果已清理。当前 AutoRound 配方使用 `int_sym_xh`，2B/4B/9B 的真实量化、HMONNX 导出和图像精度证据见 [精度复测报告](ACCURACY_REPORT.md)。MMEB-v3 本轮仅覆盖 Visual7W 和 ChartQA 两项图像任务。
+旧产物及其精度结果已清理。当前 AutoRound 配方使用 `int_sym_xh`，2B/4B/9B 的 256K 产物已完成 vLLM Merak MMEB-V3 非音频全量评测；实际配置、三阶段合并来源和完整报告位置见 [评测说明](EVALUATION.md)。
 
 GPTQ 当前证明范围是：
 

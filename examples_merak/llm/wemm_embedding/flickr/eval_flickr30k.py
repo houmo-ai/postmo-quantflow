@@ -12,11 +12,14 @@ import torch
 
 
 try:
+    from ..native_utils import embed_native_items, load_native_embedder
+    from ..runtime_utils import load_hmonnx_embedder
     from .flickr30k_utils import retrieval_metrics
-    from .native_utils import embed_native_items, load_native_embedder
     from .retrieval_dataset import load_retrieval_dataset
-    from .runtime_utils import load_hmonnx_embedder
 except ImportError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from flickr30k_utils import retrieval_metrics
     from native_utils import embed_native_items, load_native_embedder
     from retrieval_dataset import load_retrieval_dataset

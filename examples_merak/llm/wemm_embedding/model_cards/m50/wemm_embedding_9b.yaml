@@ -1,0 +1,239 @@
+schema_version: 2
+external:
+  model:
+    id: wemm_embedding_9b
+    family: wemm_embedding
+    display_name: WeMM-Embedding 9B
+  parameters:
+    total: 9407831280
+    active: 9407831280
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: [1, 256]
+    prefill: 4.81681
+    decode: null
+    unit: TFLOPs
+    status: inferred
+    note: 按 2 × checkpoint 参数量 × 256 token 估算的 Dense 上界；embedding runtime 不支持 decode。
+  precision:
+    float_format: BF16
+    quantized_format: w4a8h0_ssfp
+    # 历史 MMEB-V3 手工回填：分数为 0～100，delta = hmonnx - float，单位为百分点。
+    # float：原生 vLLM 自测；hmonnx：vLLM Merak / GPU HMONNX 自测，非板端成绩。
+    # 以下仅对应独立 256K 产物（262144 token），不代表本卡基础 2048 recipe 的实测。
+    # 179 项正式非音频任务参与汇总；3 项 VisDoc 诊断不计入汇总。
+    # V3-All 另按 11 项不支持的音频任务记零；不单列音频实测成绩。
+    # 精简最终报告：examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+    # 分类与逐任务对照来源：work_dirs/wemm_embedding/mmeb_v3_runs/9b/comparison/comparison.json
+    comparisons:
+    - name: mmeb_v3_256k_v3_all
+      dataset: MMEB-V3 / V3-All (179 non-audio tasks + 11 unsupported audio tasks scored zero; context_max_length=262144)
+      metric: Mean task score (%)
+      float: 59.33144172560772
+      hmonnx: 58.79870567749425
+      delta: -0.5327360481134704
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_supported_only
+      dataset: MMEB-V3 / Supported-Only (179 non-audio tasks; context_max_length=262144)
+      metric: Mean task score (%)
+      float: 62.977507976902054
+      hmonnx: 62.41203395935143
+      delta: -0.5654740175506205
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_mmeb_v2
+      dataset: MMEB-V3 / MMEB-v2 (78 tasks; context_max_length=262144)
+      metric: Mean task score (%)
+      float: 80.43708346252745
+      hmonnx: 80.11670804973703
+      delta: -0.32037541279042614
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_image
+      dataset: MMEB-V3 / Image (36 tasks; context_max_length=262144)
+      metric: Mean Hit@1 (%)
+      float: 81.6888888888889
+      hmonnx: 81.16666666666667
+      delta: -0.5222222222222257
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_video
+      dataset: MMEB-V3 / Video (18 tasks; context_max_length=262144)
+      metric: Mean Hit@1 (%)
+      float: 74.24401491604027
+      hmonnx: 74.1363869909174
+      delta: -0.10762792512286978
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_visdoc
+      dataset: MMEB-V3 / VisDoc (24 tasks; context_max_length=262144)
+      metric: Mean ndcg_linear@5 (%)
+      float: 83.20417673285068
+      hmonnx: 83.0270109184573
+      delta: -0.17716581439339052
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_text
+      dataset: MMEB-V3 / Text (53 tasks; context_max_length=262144)
+      metric: Mean ndcg_linear@5 (%)
+      float: 48.85044828896313
+      hmonnx: 48.45460471326457
+      delta: -0.39584357569855655
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_reasoning_retrieval
+      dataset: MMEB-V3 / Reasoning Retrieval (20 tasks; context_max_length=262144)
+      metric: Mean ndcg_linear@5 (%)
+      float: 31.776978472309526
+      hmonnx: 31.624675614942667
+      delta: -0.152302857366859
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_instruction_following
+      dataset: MMEB-V3 / Instruction Following (9 tasks; context_max_length=262144)
+      metric: Mean ndcg_linear@5 (%)
+      float: 52.955254285927
+      hmonnx: 52.391037740069265
+      delta: -0.5642165458577324
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_long_context
+      dataset: MMEB-V3 / Long Context (6 tasks; context_max_length=262144)
+      metric: Mean ndcg_linear@5 (%)
+      float: 64.49170356309092
+      hmonnx: 63.81184029565211
+      delta: -0.6798632674388116
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_multi_condition
+      dataset: MMEB-V3 / Multi Condition (5 tasks; context_max_length=262144)
+      metric: Mean ndcg_linear@5 (%)
+      float: 58.42115539493305
+      hmonnx: 57.663771035940385
+      delta: -0.7573843589926668
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_general_retrieval
+      dataset: MMEB-V3 / General Retrieval (13 tasks; context_max_length=262144)
+      metric: Mean ndcg_linear@5 (%)
+      float: 61.375454072484736
+      hmonnx: 60.99163852999467
+      delta: -0.3838155424900691
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_agent
+      dataset: MMEB-V3 / Agent (47 tasks; context_max_length=262144)
+      metric: Mean Hit@1 (%)
+      float: 50.2249091654789
+      hmonnx: 49.07171620078069
+      delta: -1.1531929646982064
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_tool
+      dataset: MMEB-V3 / Tool (35 tasks; context_max_length=262144)
+      metric: Mean Hit@1 (%)
+      float: 52.99858828857985
+      hmonnx: 51.587170086706884
+      delta: -1.4114182018729693
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_gui
+      dataset: MMEB-V3 / GUI (8 tasks; context_max_length=262144)
+      metric: Mean Hit@1 (%)
+      float: 43.85246652037577
+      hmonnx: 43.30574948996674
+      delta: -0.5467170304090274
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_memory
+      dataset: MMEB-V3 / Memory (4 tasks; context_max_length=262144)
+      metric: Mean Hit@1 (%)
+      float: 38.70010212855181
+      hmonnx: 38.59342812055442
+      delta: -0.10667400799739113
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+    - name: mmeb_v3_256k_mcmr
+      dataset: MMEB-V3 / MCMR (1 tasks; context_max_length=262144)
+      metric: Mean Hit@1 (%)
+      float: 49.23692769577183
+      hmonnx: 48.18613960470353
+      delta: -1.0507880910683056
+      evidence: examples_merak/llm/wemm_embedding/docs/MMEB_V3_REPORT.md#wemm-embedding-9b
+      status: verified
+  owner: jing.huang
+internal:
+  model:
+    type: llm_models
+    modality: [embedding, text, image, video]
+    task: [inference, retrieval]
+    tags: [merak, xh2a, autoround, gptq, w4a8]
+  source:
+    provider: Tencent
+    name: WeMM-Embedding-9B
+    url: https://huggingface.co/tencent/WeMM-Embedding-9B
+    license: Apache-2.0
+    raw_model_path: /data01/datasets/WeMM-Embedding-9B
+  components:
+  - id: model
+    display_name: WeMM-Embedding 9B
+    type: llm_models
+    precision: language_w4a8_visual_w8a8
+    inputs:
+    - name: multimodal_input
+      type: text_image_video
+      required: true
+      description: 文本、图像、视频或混合多模态 item；视觉图使用与 Qwen3.5 相同的动态 patch 档位。
+    outputs:
+    - name: embedding
+      type: tensor
+      required: true
+      description: 4096 维 FP32 L2 归一化 embedding。
+  io:
+    inputs:
+    - name: multimodal_input
+      type: text_image_video
+      required: true
+      description: 文本、图像、视频或混合多模态 item；视觉图使用与 Qwen3.5 相同的动态 patch 档位。
+    outputs:
+    - name: embedding
+      type: tensor
+      required: true
+      description: 4096 维 FP32 L2 归一化 embedding。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/wemm_embedding/9b/wemm_embedding_9b_xh2a_w4a8.yaml
+    model_dir: /data01/datasets/WeMM-Embedding-9B
+    class: auto
+    actions: [quant, export, dump_golden, eval]
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: language_w4a8_visual_w8a8
+      components:
+        model_quant_scheme: w4a8h0_ssfp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 42
+    work_dir: work_dirs/merak_delivery/wemm_embedding_9b
+  release:
+    version_id: wemm_embedding_9b_w4a8h0_ssfp_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models: []
+  presentation:
+    summary: WeMM-Embedding 9B 的 AutoRound/GPTQ W4G64 语言分支与 W8A8 视觉分支 HMONNX workflow；AutoRound int_sym_xh 的独立 256K 导出已完成 vLLM Merak MMEB-V3 非音频全量评测。
+    demo:
+      kind: python
+      path: examples_merak/llm/wemm_embedding/hmonnx_demo.py
+    limitations:
+    - HMONNX embedding API 使用 256-token prefill 图重复执行，每个 item 累计最多支持 2048 个 processed tokens。
+    - 独立 256K 产物已完成 vLLM Merak 视频评测；基础 2048 recipe 与该产物分开记录。
+    - 256K 评测执行 182 项：179 项官方非音频任务及 3 项诊断；音频不支持；配置与报告位置见 examples_merak/llm/wemm_embedding/docs/EVALUATION.md。
+    - GPTQ 旧产物已清理，本轮只重新量化 AutoRound。
+    evidence:
+      examples: [examples_merak/llm/wemm_embedding]
+      readme: [examples_merak/llm/wemm_embedding/README.md, examples_merak/llm/wemm_embedding/docs/EVALUATION.md]

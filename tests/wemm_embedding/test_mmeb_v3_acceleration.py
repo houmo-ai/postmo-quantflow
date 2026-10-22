@@ -2,10 +2,10 @@ from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 
-from examples_merak.llm.wemm_embedding.mmeb_v3_vllm_merak import (
+from examples_merak.llm.wemm_embedding.mmeb.mmeb_v3_vllm_merak import (
     build_vllm_request,
 )
-from examples_merak.llm.wemm_embedding.run_mmeb_v3_vllm_merak_full import (
+from examples_merak.llm.wemm_embedding.mmeb.run_mmeb_v3_vllm_merak_full import (
     OFFICIAL_COMMIT,
     Job,
     Task,
@@ -138,7 +138,7 @@ def test_video_frames_delivered_through_image_channel_are_not_capped_at_16(
     monkeypatch,
 ) -> None:
     import qwen_vl_utils
-    from vllm.model_executor.models import wemm_embedding
+    from vllm_merak.model_executor.model_loader import wemm_embedding_native
 
     observed = {}
 
@@ -148,7 +148,7 @@ def test_video_frames_delivered_through_image_channel_are_not_capped_at_16(
 
     monkeypatch.setattr(qwen_vl_utils, "process_vision_info", process_vision_info)
     monkeypatch.setattr(
-        wemm_embedding,
+        wemm_embedding_native,
         "prepare_wemm_prompt_token_ids",
         lambda *_args, **_kwargs: [1, 2, 3],
     )
@@ -174,9 +174,11 @@ def test_video_frames_delivered_through_image_channel_are_not_capped_at_16(
 
 
 def test_result_reuse_requires_current_adapter_and_vllm_model_hash(tmp_path: Path) -> None:
-    adapter = tmp_path / "examples_merak/llm/wemm_embedding/mmeb_v3_vllm_merak.py"
+    adapter = tmp_path / "examples_merak/llm/wemm_embedding/mmeb/mmeb_v3_vllm_merak.py"
     adapter.parent.mkdir(parents=True)
     adapter.write_text("# current adapter\n")
+    evaluator = adapter.with_name("mmeb_v3_eval.py")
+    evaluator.write_text("# current evaluator\n")
     config = tmp_path / "configs/image/task.yaml"
     config.parent.mkdir(parents=True)
     config.write_text("task: {}\n")
@@ -199,6 +201,7 @@ def test_result_reuse_requires_current_adapter_and_vllm_model_hash(tmp_path: Pat
         "mmeb_v3_data_revision": "4a5560b2b64384204b6fea8a82ea986eba51f5aa",
         "mmeb_v2_media_revision": "e7bbfeb69a70dfe32ff36da3d6d8dbe31fc36af1",
         "wemm_vllm_adapter_sha256": _sha256(adapter),
+        "mmeb_v3_eval_adapter_sha256": _sha256(evaluator),
         "vllm_wemm_model_sha256": "current-vllm-model",
         "vllm_version": "test-vllm",
         "transformers_version": "test-transformers",

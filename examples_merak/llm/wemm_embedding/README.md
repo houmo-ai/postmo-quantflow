@@ -1,5 +1,18 @@
 # WeMM-Embedding 适配、量化与精度验证
 
+目录入口：
+
+| 目录 / 文件 | 用途 |
+|---|---|
+| `wemm_embedding_workflow.py`、`hmonnx_demo.py` | 模型构建与推理示例 |
+| `mmeb/` | MMEB-V3 全量评测、调度、汇总和对比 |
+| `flickr/` | Flickr30K 数据准备、检索评测和 cosine 对齐 |
+| `checks/` | 小样本验证与动态分辨率审计 |
+| `docs/` | 评测配置、报告索引、实现说明和产物清单 |
+| `model_cards/m50/` | M50 目标的公开模型卡；评测后端以卡片说明为准 |
+
+最终分类成绩见 [MMEB-V3 精简报告](docs/MMEB_V3_REPORT.md)，2B、4B、9B 分表展示自测浮点与 W4A8 HMONNX 的对比。完整评测命令及原始报告位置见 [评测说明](docs/EVALUATION.md)。
+
 本目录提供 WeMM-Embedding 2B、4B、9B 在 xh2modelzoo 中的完整交付入口，包括：
 
 - WeMM 专用模型注册、HMONNX 导出和推理接口；
@@ -20,7 +33,7 @@ WeMM-Embedding 复用 Qwen3.5 多模态主干，但面向 embedding 任务而不
 
 ## 支持状态
 
-当前 AutoRound 配方使用 `int_sym_xh`、256 个校准样本、400 次迭代及 patch 视觉档位。2B、4B、9B 均已按此配方重新量化、导出，并完成 Flickr30K-1000 与 MMEB-v3 两项图像任务评测。
+当前 AutoRound 配方使用 `int_sym_xh`、256 个校准样本、400 次迭代及 patch 视觉档位。2B、4B、9B 已完成 256K 导出产物的 MMEB-V3 非音频全量评测，浮点使用 vLLM，W4A8 使用 vLLM Merak。
 
 | 能力 | AutoRound | GPTQ |
 | --- | --- | --- |
@@ -35,11 +48,11 @@ WeMM-Embedding 复用 Qwen3.5 多模态主干，但面向 embedding 任务而不
 | 导出后自动校验 | 未启用 | 未启用 |
 | Flickr30K-1000 精度 | 已复测 | 尚未测试 |
 
-本轮精度结论见 [精度复测报告](ACCURACY_REPORT.md)；MMEB-v3 仅覆盖 Visual7W 和 ChartQA 两项完整图像 test 集，不是全套总分。
+当前评测配置、命令、结果位置与留档规则见 [评测说明](docs/EVALUATION.md)。每轮执行 182 项，其中 179 项进入官方非音频汇总，3 项为 VisDoc 诊断；11 项音频按官方约定记零。
 
 ## 统一 embedding 接口
 
-HMONNX 模型对文本、图像、视频以及混合输入提供同一套 item 接口。当前配方沿用 Qwen3.5 的 patch token 视觉图，导出 `[96, 196, 384, 704, 1536]` 个合并后图像 token 的档位。图片按实际 `image_grid_thw` 选择并补齐档位；视频的扁平 patch 按时间单元分组后调用同一档位图，特征按视频 token 插入语言输入，位置编码保留帧时间戳。单帧超过档位容量会明确报错，每个 item 的 processed tokens 仍受 2048 上限约束。
+HMONNX 模型对文本、图像、视频以及混合输入提供同一套 item 接口。当前配方沿用 Qwen3.5 的 patch token 视觉图，导出 `[96, 196, 384, 704, 1536]` 个合并后图像 token 的档位。图片按实际 `image_grid_thw` 选择并补齐档位；视频的扁平 patch 按时间单元分组后调用同一档位图，特征按视频 token 插入语言输入，位置编码保留帧时间戳。单帧超过档位容量会明确报错，每个 item 的累计 processed-token 上限由产物 metadata 决定：基础 recipe 为 2048，本次全量评测产物为 262144。
 
 ```python
 text_embedding = model.embed({"text": "A dog playing in a park."})
@@ -79,9 +92,11 @@ python -m examples_merak.unified_api.embed \
   --image /path/to/image.jpg
 ```
 
-本轮真实 HMONNX 图像评测使用动态分辨率输入并覆盖多个视觉 token 档位；视频精度仍需单独验证。Native/HF 与 HMONNX 使用相同的 65,536–1,572,864 像素动态范围并保持原图宽高比，详见后文和精度报告。
+256K 导出产物已通过 vLLM Merak 完成图像、视频、文档、文本和 Agent 任务评测。Native/HF 与 HMONNX 使用相同的 65,536–1,572,864 像素动态范围并保持原图宽高比，详见后文和精度报告。
 
 ## 输入长度契约
+
+以下描述基础 2048 recipe。当前 MMEB-V3 使用独立的 `*_256k_context_*` 配方：`context_max_length=262144`、FlashAttention 开启，prefill 图长度仍为 256。实际评测配置以 [评测说明](docs/EVALUATION.md) 为准。
 
 当前 W4A8 HMONNX 导出使用 `prefill_chunk_length: 256`。公开的 embedding 运行时会先为完整 processed-token 序列生成位置编码，再按 256 token 切分并重复调用同一张 prefill 图；各段复用 full-attention KV cache、线性注意力 recurrent state 和卷积 cache，最后只对末段最后一个有效 token 的 hidden state 做 FP32 L2 归一化。
 
@@ -286,7 +301,7 @@ WeMM 复用 Qwen3.5 的 GPTQModel recipe，因此后端会生成带 `qwen35` 名
 export ENABLE_HMINFERENCE_V2=1
 
 python examples_merak/llm/wemm_embedding/hmonnx_demo.py \
-  --export-dir work_dirs/wemm_embedding/2b/wemm_embedding_export \
+  --export-dir work_dirs/wemm_embedding/2b_256k_context/wemm_embedding_export \
   --text "A dog playing in a park." "A cat sitting on a chair." \
   --image work_dirs/wemm_embedding/datasets/flickr30k/flickr30k-images/1007129816.jpg \
   --device cuda:0
@@ -298,31 +313,31 @@ python examples_merak/llm/wemm_embedding/hmonnx_demo.py \
 
 ```bash
 python examples_merak/llm/wemm_embedding/hmonnx_demo.py \
-  --export-dir work_dirs/wemm_embedding/2b/wemm_embedding_export \
+  --export-dir work_dirs/wemm_embedding/2b_256k_context/wemm_embedding_export \
   --text "Represent this video." \
   --video /path/to/video.mp4 \
   --device cuda:0
 ```
 
-视频推理和精度需要基于本轮重新导出的档位图验证。
+本次 MMEB-V3 视频结果来自 vLLM Merak；直接 HMONNX demo 与全量评测为不同入口。
 
 单独运行 Flickr30K 数据准备、评测、汇总和 cosine 对比：
 
 ```bash
-python examples_merak/llm/wemm_embedding/prepare_flickr30k.py \
+python examples_merak/llm/wemm_embedding/flickr/prepare_flickr30k.py \
   --output-dir work_dirs/wemm_embedding/datasets/flickr30k
 
-python examples_merak/llm/wemm_embedding/eval_flickr30k.py \
+python examples_merak/llm/wemm_embedding/flickr/eval_flickr30k.py \
   --backend hmonnx \
-  --export-dir work_dirs/wemm_embedding/2b/wemm_embedding_export \
+  --export-dir work_dirs/wemm_embedding/2b_256k_context/wemm_embedding_export \
   --dataset-dir work_dirs/wemm_embedding/datasets/flickr30k \
   --device cuda:0 \
   --image-min-pixels 65536 --image-max-pixels 1572864 \
   --save-embeddings work_dirs/wemm_embedding/eval_flickr30k_1000/2b_hmonnx_w4a8_dynamic \
   --report work_dirs/wemm_embedding/eval_flickr30k_1000/2b_hmonnx_w4a8_dynamic_flickr1000.json
 
-python examples_merak/llm/wemm_embedding/eval_flickr30k_parallel.py \
-  --export-dir work_dirs/wemm_embedding/9b/wemm_embedding_export \
+python examples_merak/llm/wemm_embedding/flickr/eval_flickr30k_parallel.py \
+  --export-dir work_dirs/wemm_embedding/9b_256k_context/wemm_embedding_export \
   --dataset-dir work_dirs/wemm_embedding/datasets/flickr30k \
   --device cuda:0 \
   --workers 8 \
@@ -334,22 +349,22 @@ python examples_merak/llm/wemm_embedding/eval_flickr30k_parallel.py \
 并行评测按 caption/image 下标切分 worker。合并时要求全部 `worker_XX.pt` 存在、区间无重叠或空洞，并且拼接后的行数等于全集。缺失 shard、区间冲突或 worker 非零退出都会直接失败，不会静默跳过或错序拼接。
 
 ```bash
-python examples_merak/llm/wemm_embedding/compare_full_cosine.py \
+python examples_merak/llm/wemm_embedding/flickr/compare_full_cosine.py \
   --native-dir work_dirs/wemm_embedding/eval_flickr30k_1000/2b_native_dynamic \
   --hmonnx-dir work_dirs/wemm_embedding/eval_flickr30k_1000/2b_hmonnx_w4a8_dynamic \
   --report work_dirs/wemm_embedding/eval_flickr30k_1000/2b_full_cosine_dynamic.json
 
-python examples_merak/llm/wemm_embedding/compare_native_hmonnx.py \
+python examples_merak/llm/wemm_embedding/checks/compare_native_hmonnx.py \
   --model-dir /data01/datasets/WeMM-Embedding-2B \
-  --export-dir work_dirs/wemm_embedding/2b/wemm_embedding_export \
+  --export-dir work_dirs/wemm_embedding/2b_256k_context/wemm_embedding_export \
   --device cuda:0
 
-python examples_merak/llm/wemm_embedding/summarize_accuracy.py \
+python examples_merak/llm/wemm_embedding/flickr/summarize_accuracy.py \
   --report-dir work_dirs/wemm_embedding/eval_flickr30k_1000 \
   --output work_dirs/wemm_embedding/eval_flickr30k_1000/summary.json
 ```
 
-完整 2B/4B/9B Native + HMONNX 套件仍使用 `run_accuracy_suite.sh`。
+完整 2B/4B/9B Native + HMONNX Flickr30K 套件使用 `flickr/run_accuracy_suite.sh`，默认加载 `<size>_256k_context/wemm_embedding_export`。MMEB-V3 使用独立的全量入口，见 [评测说明](docs/EVALUATION.md)。
 
 ## Flickr30K-1000 精度
 
@@ -367,16 +382,16 @@ python examples_merak/llm/wemm_embedding/summarize_accuracy.py \
 准备数据集：
 
 ```bash
-python examples_merak/llm/wemm_embedding/prepare_flickr30k.py \
+python examples_merak/llm/wemm_embedding/flickr/prepare_flickr30k.py \
   --output-dir work_dirs/wemm_embedding/datasets/flickr30k
 ```
 
 复现 2B/4B/9B Native、HMONNX 和全量 cosine：
 
 ```bash
-bash examples_merak/llm/wemm_embedding/run_accuracy_suite.sh
+bash examples_merak/llm/wemm_embedding/flickr/run_accuracy_suite.sh
 
-python examples_merak/llm/wemm_embedding/audit_dynamic_resolution.py \
+python examples_merak/llm/wemm_embedding/checks/audit_dynamic_resolution.py \
   --flickr-dir work_dirs/wemm_embedding/datasets/flickr30k \
   --mmeb-data-root work_dirs/wemm_embedding/mmeb_v3_data \
   --output work_dirs/wemm_embedding/DYNAMIC_IMAGE_PREPROCESSING_AUDIT.json
@@ -393,17 +408,17 @@ HMONNX 导出产物、数据集和结果的根目录。
 work_dirs/wemm_embedding/eval_flickr30k_1000
 ```
 
-本轮结果已写入 `work_dirs/wemm_embedding/eval_flickr30k_1000/summary.json` 和 [精度复测报告](ACCURACY_REPORT.md)。MMEB-v3 图像任务的协议与复现方法见 [评测协议](MMEB_V3_IMAGE_PROTOCOL.md)。
+Flickr30K 是可独立运行的图文检索与 cosine 校验工具；历史 2048 上下文报告及两项图像任务脚本已清理。当前 MMEB-V3 正式结果与配置见 [评测说明](docs/EVALUATION.md)。上述 Flickr30K 输出路径是重新运行时生成的路径。
 
 `native_dynamic` 表示使用原始 BF16 模型作为参考，保持原图宽高比并使用与 HMONNX 相同的动态像素范围。“全量 cosine”表示对所有同序样本逐行计算 HMONNX embedding 与 Native embedding 的 cosine。结果 JSON 同时记录图像预处理协议，报告生成器会拒绝汇总协议不一致的结果。
-动态分辨率审计脚本逐张记录数据集的原始尺寸数、预处理尺寸数、视觉 token 范围和五档视觉图命中数，输出会被精度报告强制校验。
+动态分辨率审计脚本逐张记录数据集的原始尺寸数、预处理尺寸数、视觉 token 范围和五档视觉图命中数。
 
 ## 数据集扩展接口
 
 Flickr30K 通过 `retrieval_dataset.py` 中的通用检索数据集接口注册。后续数据集 loader 只需返回图像路径及每张图像的一条或多条正样本 caption：
 
 ```python
-from examples_merak.llm.wemm_embedding.retrieval_dataset import (
+from examples_merak.llm.wemm_embedding.flickr.retrieval_dataset import (
     RetrievalDataset,
     register_retrieval_dataset,
 )
@@ -454,7 +469,26 @@ python -m pytest \
 checkpoint/HMONNX 产物的 pytest 集成测试，也没有
 `tests/wemm_embedding_integration_test.py`。三规格真实 AutoRound 量化、导出、Flickr30K 和
 MMEB-v3 验证由本目录的运行脚本完成，结果保存在忽略提交的 `work_dirs`，汇总结论保留在
-[精度复测报告](ACCURACY_REPORT.md)。因此报告中的真实产物结果是本轮外部运行证据，不属于默认 CI 覆盖。
+[评测说明](docs/EVALUATION.md)。正式结果归档于 `work_dirs/wemm_embedding/mmeb_v3_runs/{2b,4b,9b}`，不属于默认 CI 的 GPU 测试。
+
+全量评测可把每个数据集作为独立引擎作业放入共享队列，并对已知超大数据集进一步拆分
+query/candidate embedding。下面的例子让四个 GPU 动态领取数据集作业，同时把 BRIGHT leetcode
+拆成四个连续分片：
+
+```bash
+python examples_merak/llm/wemm_embedding/mmeb/run_mmeb_v3_vllm_merak_full.py \
+  --job-mode dataset \
+  --gpus 0,1,2,3 \
+  --shard-dataset text:text/BRIGHT/leetcode \
+  --shards-per-dataset 4 \
+  ...
+```
+
+`--shard-dataset` 可重复指定，既接受 `DATASET`，也接受无歧义的 `MODALITY:DATASET`。每个分片
+保存连续半开区间、协议哈希、embedding 和原始 ID；调度器只有在全部分片范围连续、无重叠且
+行数一致时才按原始顺序合并。最终仍由官方评测器对完整 query 和完整 candidate 池统一排名，
+不会合并或平均分片局部得分。已完成且协议、模型、配置及 adapter 哈希一致的最终结果或分片
+会在续跑时直接复用。
 
 GPTQModel 中的 WeMM 注册可独立验证：
 
@@ -465,10 +499,12 @@ python -m pytest -q tests/test_wemm_embedding_support.py
 
 ## 当前限制
 
-- 公开 HMONNX embedding 接口按 256 token 重复执行 prefill，累计最多支持 2048 processed tokens；
-- decode、生成、page attention 不是 WeMM embedding runtime 的公开能力；
-- 当前 AutoRound 已完成 Flickr30K 与 MMEB-v3 的 Visual7W、ChartQA 图像任务复测；MMEB-v3 全套任务未执行；
-- GPTQ 旧产物已清理，本轮不重新量化 GPTQ；
-- 多段长文本与 Native 的全量精度对齐和视频精度仍需单独验证。
+基础 HMONNX recipe 与已完成全量评测的 256K 产物分别记录，避免混淆：
 
-更多实现细节见 `IMPLEMENTATION.md`，全部交付文件见 `ARTIFACTS.md`，WeMM 与 Qwen3.5 的差异见 `WEMM_VS_QWEN35.md`。
+- HMONNX embedding 接口按 256 token 重复执行 prefill；基础 recipe 的累计上限为 2048，独立 256K 产物为 262144；
+- decode、生成、page attention 不是 WeMM embedding runtime 的公开能力；
+- 2B/4B/9B 的浮点与 W4A8 均已完成 MMEB-V3 非音频全量评测；音频不支持，V3-All 中 11 项音频记零；
+- GPTQ 旧产物已清理，本轮不重新量化 GPTQ；
+- 全量评测输入上限为 262144，长文本截断保留最后的 embedding 锚点；结果不能与旧 2048 配方混用。
+
+更多实现细节见 [实现说明](docs/IMPLEMENTATION.md)，全部交付文件见 [文件索引](docs/ARTIFACTS.md)，WeMM 与 Qwen3.5 的差异见 [模型对比](docs/WEMM_VS_QWEN35.md)。

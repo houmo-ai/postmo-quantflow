@@ -154,7 +154,8 @@ def test_merak_registration_and_selected_loader_do_not_import_other_models():
                     "import importlib.abc, sys",
                     "class BlockUnusedModels(importlib.abc.MetaPathFinder):",
                     "    def find_spec(self, fullname, path=None, target=None):",
-                    "        if fullname in ('vllm_merak.model_executor.model_loader.glm53', 'vllm_merak.model_executor.model_loader.gemma4'):",
+                    "        if fullname in ('vllm_merak.model_executor.model_loader.glm53', "
+                    "'vllm_merak.model_executor.model_loader.gemma4'):",
                     "            raise AssertionError('Imported an unselected model: ' + fullname)",
                     "sys.meta_path.insert(0, BlockUnusedModels())",
                     "from vllm_merak import register_plugins",
@@ -162,7 +163,8 @@ def test_merak_registration_and_selected_loader_do_not_import_other_models():
                     "from vllm import ModelRegistry",
                     "assert 'Glm53MerakForCausalLM' in ModelRegistry.get_supported_archs()",
                     "assert 'Gemma4UnifiedMerakForCausalLM' in ModelRegistry.get_supported_archs()",
-                    "from vllm_merak.model_executor.register import get_registered_model_cls, get_model_registration_paths",
+                    "from vllm_merak.model_executor.register import "
+                    "get_registered_model_cls, get_model_registration_paths",
                     "paths = get_model_registration_paths()",
                     "assert paths['DeepseekV4MerakForCausalLM'].endswith('deepseek_v4:DeepseekV4MerakForCausalLM')",
                     "cls = get_registered_model_cls('DeepseekV4ForCausalLM')",
@@ -191,9 +193,7 @@ def test_merak_loader_discovery_preserves_runtime_class_overrides(monkeypatch):
     )
 
     replacement = type("DeepseekV4MerakForCausalLM", (torch.nn.Module,), {})
-    monkeypatch.setitem(
-        MERAK_MODEL_REGISTRY.module_dict, "DeepseekV4ForCausalLM", replacement
-    )
+    monkeypatch.setitem(MERAK_MODEL_REGISTRY.module_dict, "DeepseekV4ForCausalLM", replacement)
 
     assert get_registered_model_cls("DeepseekV4ForCausalLM") is replacement
     assert get_registered_model_cls("DeepseekV4MerakForCausalLM") is replacement
@@ -304,7 +304,7 @@ def test_native_wemm_video_grid_expands_into_official_frame_bundles():
 
 
 def test_native_wemm_evaluator_selects_only_one_plugin_backend():
-    adapter = (REPO_ROOT / "examples_merak/llm/wemm_embedding/mmeb_v3_vllm_merak.py").read_text(encoding="utf-8")
+    adapter = (REPO_ROOT / "examples_merak/llm/wemm_embedding/mmeb/mmeb_v3_vllm_merak.py").read_text(encoding="utf-8")
 
     assert 'os.environ["VLLM_PLUGINS"] = "merak" if merak else "wemm"' in adapter
     assert 'kwargs["hf_overrides"]' not in adapter
@@ -312,7 +312,7 @@ def test_native_wemm_evaluator_selects_only_one_plugin_backend():
 
 
 def test_native_wemm_provenance_hashes_the_plugin_model_source():
-    source_dir = REPO_ROOT / "examples_merak/llm/wemm_embedding"
+    source_dir = REPO_ROOT / "examples_merak/llm/wemm_embedding/mmeb"
     for name in ("mmeb_v3_eval.py", "run_mmeb_v3_vllm_merak_full.py"):
         source = (source_dir / name).read_text(encoding="utf-8")
         assert "vllm_merak.model_executor.model_loader" in source

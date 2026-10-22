@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$ROOT"
 
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
@@ -27,9 +27,9 @@ IMAGE_MIN_PIXELS="${IMAGE_MIN_PIXELS:-65536}"
 IMAGE_MAX_PIXELS="${IMAGE_MAX_PIXELS:-1572864}"
 NINE_B_WORKERS="${NINE_B_WORKERS:-4}"
 OTHER_WORKERS="${OTHER_WORKERS:-8}"
-EVAL="$ROOT/examples_merak/llm/wemm_embedding/eval_flickr30k.py"
-PARALLEL_EVAL="$ROOT/examples_merak/llm/wemm_embedding/eval_flickr30k_parallel.py"
-COMPARE="$ROOT/examples_merak/llm/wemm_embedding/compare_full_cosine.py"
+EVAL="$ROOT/examples_merak/llm/wemm_embedding/flickr/eval_flickr30k.py"
+PARALLEL_EVAL="$ROOT/examples_merak/llm/wemm_embedding/flickr/eval_flickr30k_parallel.py"
+COMPARE="$ROOT/examples_merak/llm/wemm_embedding/flickr/compare_full_cosine.py"
 
 mkdir -p "$OUT"
 
@@ -43,7 +43,7 @@ run() {
 for size in ${WEMM_SIZES:-2b 4b 9b}; do
   upper_size="${size^^}"
   model_dir="$MODEL_ROOT/WeMM-Embedding-$upper_size"
-  export_dir="$EXPORT_ROOT/$size/wemm_embedding_export"
+  export_dir="$EXPORT_ROOT/${size}_256k_context/wemm_embedding_export"
   native_dir="$OUT/${size}_native_dynamic"
   hmonnx_dir="$OUT/${size}_hmonnx_w4a8_dynamic"
 
@@ -106,7 +106,7 @@ for size in ${WEMM_SIZES:-2b 4b 9b}; do
 done
 
 if [[ "${WEMM_SKIP_SUMMARY:-0}" != 1 ]]; then
-  run "$PY" -u "$ROOT/examples_merak/llm/wemm_embedding/summarize_accuracy.py" \
+  run "$PY" -u "$ROOT/examples_merak/llm/wemm_embedding/flickr/summarize_accuracy.py" \
     --report-dir "$OUT" --output "$OUT/summary.json"
 fi
 

@@ -54,6 +54,16 @@ def _validate_schema_value(
         _validate_schema_value(value, _resolve_ref(root_schema, schema["$ref"]), root_schema, path)
         return
 
+    if "anyOf" in schema:
+        for alternative in schema["anyOf"]:
+            try:
+                _validate_schema_value(value, alternative, root_schema, path)
+                break
+            except ModelCardSchemaValidationError:
+                continue
+        else:
+            raise ModelCardSchemaValidationError(path, "must satisfy at least one allowed schema")
+
     if "const" in schema and value != schema["const"]:
         raise ModelCardSchemaValidationError(path, f"must equal {schema['const']!r}")
     if "enum" in schema and value not in schema["enum"]:
@@ -84,9 +94,7 @@ def _validate_schema_value(
         if len(value) < schema.get("minItems", 0):
             raise ModelCardSchemaValidationError(path, f"must contain at least {schema['minItems']} item(s)")
         if schema.get("uniqueItems") and any(
-            value[index] == value[other]
-            for index in range(len(value))
-            for other in range(index + 1, len(value))
+            value[index] == value[other] for index in range(len(value)) for other in range(index + 1, len(value))
         ):
             raise ModelCardSchemaValidationError(path, "must contain unique items")
         item_schema = schema.get("items")
@@ -269,18 +277,14 @@ def to_v2_model_card(card: dict[str, Any]) -> dict[str, Any]:
                 "family": model.get("family", ""),
                 "display_name": model.get("display_name", ""),
             },
-            "parameters": deepcopy(
-                card.get("parameters", current_external.get("parameters", default_parameters()))
-            ),
+            "parameters": deepcopy(card.get("parameters", current_external.get("parameters", default_parameters()))),
             "compute": deepcopy(card.get("compute", current_external.get("compute", default_compute()))),
             "precision": {
                 "float_format": current_external_precision.get("float_format", ""),
                 "quantized_format": current_external_precision.get(
                     "quantized_format", workflow_precision.get("overall", "")
                 ),
-                "comparisons": deepcopy(
-                    card.get("accuracy", current_external_precision.get("comparisons", []))
-                ),
+                "comparisons": deepcopy(card.get("accuracy", current_external_precision.get("comparisons", []))),
             },
             "owner": owner,
         },

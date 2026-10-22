@@ -1075,14 +1075,14 @@ def test_wemm_preflight_rejects_missing_workflow_config(tmp_path):
 
 
 def test_flickr30k_loader_fails_when_images_are_missing(tmp_path):
-    from examples_merak.llm.wemm_embedding.flickr30k_utils import load_flickr30k
+    from examples_merak.llm.wemm_embedding.flickr.flickr30k_utils import load_flickr30k
 
     with pytest.raises(FileNotFoundError, match="No Flickr30K image directory"):
         load_flickr30k(tmp_path)
 
 
 def test_flickr30k_loader_fails_when_annotations_are_missing(tmp_path):
-    from examples_merak.llm.wemm_embedding.flickr30k_utils import load_flickr30k
+    from examples_merak.llm.wemm_embedding.flickr.flickr30k_utils import load_flickr30k
 
     (tmp_path / "images").mkdir()
     with pytest.raises(RuntimeError, match="No supported Flickr30K annotations"):
@@ -1090,7 +1090,7 @@ def test_flickr30k_loader_fails_when_annotations_are_missing(tmp_path):
 
 
 def test_retrieval_dataset_rejects_empty_rows(tmp_path):
-    from examples_merak.llm.wemm_embedding.retrieval_dataset import (
+    from examples_merak.llm.wemm_embedding.flickr.retrieval_dataset import (
         RetrievalDataset,
         load_retrieval_dataset,
         register_retrieval_dataset,
@@ -1107,7 +1107,7 @@ def test_retrieval_dataset_rejects_empty_rows(tmp_path):
 
 
 def test_resize_with_padding_rejects_corrupt_image(tmp_path):
-    from examples_merak.llm.wemm_embedding.flickr30k_utils import resize_with_padding
+    from examples_merak.llm.wemm_embedding.flickr.flickr30k_utils import resize_with_padding
 
     image_path = tmp_path / "broken.jpg"
     image_path.write_bytes(b"not-an-image")
@@ -1116,7 +1116,7 @@ def test_resize_with_padding_rejects_corrupt_image(tmp_path):
 
 
 def test_summarize_accuracy_fails_when_reports_are_missing(tmp_path):
-    from examples_merak.llm.wemm_embedding.summarize_accuracy import load_accuracy_reports
+    from examples_merak.llm.wemm_embedding.flickr.summarize_accuracy import load_accuracy_reports
 
     missing = tmp_path / "missing-reports"
     with pytest.raises(FileNotFoundError, match="report directory not found"):
@@ -1127,7 +1127,7 @@ def test_summarize_accuracy_fails_when_reports_are_missing(tmp_path):
 
 
 def test_compare_full_cosine_fails_when_embedding_files_are_missing(tmp_path):
-    from examples_merak.llm.wemm_embedding.compare_full_cosine import _load_tensor
+    from examples_merak.llm.wemm_embedding.flickr.compare_full_cosine import _load_tensor
 
     with pytest.raises(FileNotFoundError):
         _load_tensor(tmp_path, "text_emb.pt")

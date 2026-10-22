@@ -1,5 +1,7 @@
 # WeMM-Embedding 与 Qwen3.5 差异说明
 
+本文的 2048-token 上限描述基础 recipe；已完成的 256K 全量评测使用独立 recipe，配置与报告见 [评测说明](EVALUATION.md)。
+
 ## 总览
 
 WeMM-Embedding 使用 Qwen3.5 多模态主干和相近的 remote-code 模块树，因此可以复用 Qwen3.5 的模型加载、视觉编码、线性注意力、量化 recipe 和 HMONNX 导出基础设施。但两者的任务目标、输出语义、运行时接口和精度评价完全不同。

@@ -11,7 +11,14 @@ import pyarrow.parquet as pq
 from PIL import Image
 from qwen_vl_utils import smart_resize
 
-from examples_merak.llm.wemm_embedding.flickr30k_utils import load_flickr30k
+
+try:
+    from ..flickr.flickr30k_utils import load_flickr30k
+except ImportError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "flickr"))
+    from flickr30k_utils import load_flickr30k
 
 
 GEARS = (96, 196, 384, 704, 1536)

@@ -14,10 +14,13 @@ import torch
 
 
 try:
+    from ..runtime_utils import load_hmonnx_embedder, resolve_hmonnx_meta
     from .flickr30k_utils import retrieval_metrics
     from .retrieval_dataset import load_retrieval_dataset
-    from .runtime_utils import load_hmonnx_embedder, resolve_hmonnx_meta
 except ImportError:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from flickr30k_utils import retrieval_metrics
     from retrieval_dataset import load_retrieval_dataset
     from runtime_utils import load_hmonnx_embedder, resolve_hmonnx_meta

@@ -1,8 +1,0 @@
-# Exact Visual7W entry from WeMM mmeb_v3_eval/experiments/public/eval/image.yaml
-# at commit 5f539a2f5196b08bbcf29ac71fc90a95ccad7f11.
-Visual7W:
-  dataset_parser: image_qa
-  dataset_name: Visual7W
-  dataset_split: test
-  image_root: image-tasks/MMEB/
-  eval_type: local
