@@ -1,0 +1,10 @@
+{
+  "variant": "C",
+  "bits": 16,
+  "seed": 17,
+  "steps": 300,
+  "output": "work_dirs/zte_train/runs/C_sefp16_seed17",
+  "relu_path": "nl",
+  "check_only": false,
+  "diagnostic_override": null
+}

@@ -1,0 +1,3 @@
+# Customer originals are local Jira materials, not redistributable source.
+/customer/
+__pycache__/

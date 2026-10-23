@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "zte-isolated-training-entry-contracts",
+      "patterns": [
+        "examples_merak/customer-specific/zte/m50_train/common.py",
+        "examples_merak/customer-specific/zte/m50_train/train.py",
+        "examples_merak/customer-specific/zte/m50_train/diagnose.py",
+        "examples_merak/customer-specific/zte/m50_train/plot.py",
+        "examples_merak/customer-specific/zte/m50_train/configs/*.json",
+        "examples_merak/customer-specific/zte/m50_train/customer_sources.json",
+        "examples_merak/customer-specific/zte/m50_train/runtime.py",
+        "examples_merak/customer-specific/zte/m50_train/trainer.py"
+      ]
+    }
+  ]
+}

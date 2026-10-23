@@ -1,0 +1,17 @@
+{
+  "issue": "CMS-909",
+  "source_url": "http://jira.houmo.ai/browse/CMS-909",
+  "distribution": "Customer attachments have no supplied license; keep originals local and do not commit them.",
+  "files": {
+    "reference": {
+      "path": "torch_native/model.py",
+      "archive_layout": "torch_native/torch_native/model.py",
+      "sha256": "5cd6a73acaae35b2c65bf1a48dd707e9c54fbd8dca225d3b209d570f4b9b66c5"
+    },
+    "autograd": {
+      "path": "torch_integer/engine/bf16_autograd.py",
+      "archive_layout": "torch_integer/torch_integer/engine/bf16_autograd.py",
+      "sha256": "2a1b0d7f0dc8184b22c8fb46875a9d9ea3645aa1a824254302b76679eae81e67"
+    }
+  }
+}
