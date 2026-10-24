@@ -1,0 +1,53 @@
+quant:
+  method: autoround
+  bits: 4
+  group_size: 64
+  iters: 200
+  calibration_file: calibration.pt
+export:
+  conditioner_quant_type: w4a8h0_ssfp
+  model:
+    type: XHNativeH3Model
+    quant_scheme:
+      target_device: XH2a
+      quant_type: w8a8_sefp
+    lora:
+      path: []
+  target_device: XH2a
+  profile: fl2va-native-384p-5s
+  mode: fl2va
+  prompt:
+    max_tokens: 1024
+  qwen3_vl:
+    prefill_chunk_length: 256
+  text_layers: 50
+  text_layers_per_graph: 50
+  draft_size:
+  - 384
+  - 672
+  draft_frames: 124
+  fps: 24
+  draft_attention: dense
+  h3_precision:
+    residual_scale: 1024.0
+    rms_norm_mode: plain
+    rms_norm_eps: 5.960464477539063e-08
+    text_residual_scale: 4.0
+    attention_output_scale: 16.0
+    ffn_product_scale: 512.0
+    ffn_output_scale: 512.0
+  video_tile:
+  - 256
+  - 256
+  video_overlap:
+  - 64
+  - 64
+  calibration_prompt: 'A close-up of Medusa in detailed 3D Chinese animation style,
+    with long black hair, a golden crown and red-and-gold clothing in a warm palace
+    chamber. Fixed camera, natural expression and gentle movement. She speaks clearly
+    in Mandarin: 后摩智能，我的最爱. Quiet room, no background music.'
+  calibration_seed: 42
+  native_sampling:
+    steps: 50
+    video_shift: 12.0
+    audio_shift: 3.0

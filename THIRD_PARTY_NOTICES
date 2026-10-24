@@ -672,6 +672,15 @@ License File:   licenses/diffusers/LICENSE
 --------------------------------------------------------------------------------
 
 --------------------------------------------------------------------------------
+Component Name: diffusers (MiniMax-H3 decoder adaptation)
+Version:        0.41.0
+Upstream URL:   https://github.com/huggingface/diffusers
+License:        Apache-2.0
+License File:   licenses/diffusers/LICENSE
+Adaptation:     xhmodel_merak/xh_other_model/models/sol_h3/native_video.py
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
 Component Name: duquant
 Version:        0.0.0-20241003202154-62c5844638f9
 Upstream URL:   https://proxy.golang.org/github.com/hsu1023/duquant/@v/v0.0.0-20241003202154-62c5844638f9.zip

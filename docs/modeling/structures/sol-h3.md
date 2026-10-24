@@ -926,6 +926,63 @@ checkpoint，通过 strace 验证生成不读取它，不宣称删除了该 chec
 空间边界 Gather 与 Conv3d 时间窗口打包不同，SDK 的 Slice/Conv2d/Add 拆分保持不变。
 已有产物必须重导出参考编码器并更新 metadata、公开索引和 Manifest，源码修改不会改变旧图。
 
+## 原生 H3 与可切换 LoRA
+
+`minimax-h3` recipe 复用 `sol_h3/` 的条件编码与 H3 图，输出由原生 H3 视频、音频
+VAE 解码，不包含 H3→LTX 或 LTX 去噪。新增流程位于 `sol_h3/`；音频解码复用已有
+wrapper，不修改旧 `minimax-h3-fl2va` 模型接入。
+构建和推理命令见 [原生 H3 示例](../../../examples_merak/aigc/h3/README.md)。
+
+统一 API 使用普通 `ModelRecipe`，只公开 `all-native-768p-5s` 默认五模式包及 `full`、
+`lora` 两个变体。两者复用 `h3_native_768p_w4.yaml`；LoRA 路径通过既有
+`export.model.lora.path` 规划覆盖，不再按 profile 组合选择额外 workflow。
+默认输出 768×1344、124 帧、24 FPS；Ref2VA 预算为参考图短边 768、视频/音频各 2 秒。
+模式、输出画布、参考预算属于包的构建契约，加载端按 metadata 拒绝超档请求。
+
+其余静态档位继续保留为 workflow YAML：前四种模式分别提供 384×672、768×1344 输出；
+Ref2VA 各自提供 `image384`、`image768`、`video2s` 档。单模式容量仅按该模式和媒体预算
+推导，可通过既有 `AutoWorkflow.from_config`、`quant/export` 导出，再用 `NativeH3Runtime`
+加载工作流图包。它们不再是统一 API 的可选 profile；具体 YAML 和调用示例见原生 H3 示例。
+LoRA 仍按包内适配器名称切换，标准图和适配器图共享相同的静态档位。
+
+按本机官方 H3 tokenizer/processor、默认 1024 prompt token 实际推导的 DiT 容量如下
+（2026-10-24，CPU 几何规划，不代表 GPU 完整推理验证）：
+
+| 单模式/参考档位 | 384×672 输出 | 768×1344 输出 |
+|---|---:|---:|
+| t2va | 11008 | 38912 |
+| i2va / l2va | 11776 | 40960 |
+| fl2va | 12288 | 43008 |
+| ref2va image384 | 12288 | 40192 |
+| ref2va image768 | 15872 | 43776 |
+| ref2va video2s | 15360 | 54016 |
+
+保留的 all 768p 档 base/ref 分别为 43008/58624；最大 FFN 输出
+`58624 × 28672 = 1680867328` 元素，低于此前触发的 INT32 边界。
+这些数字随 processor 配置变化，应由构建规划重算，不能当作图中硬编码容量。
+这只消除了该已知大预算触发条件，不替代 SDK 其他索引或内存路径的验证。
+
+`native_sampling.steps` 是实际 DiT 调用数；原生 scheduler 接收 `steps+1` 个 sigma 点，
+最后的零不是一次 DiT 调用。标准配置为 50 次、视频/音频 shift=12/3；8 步适配器为
+8 次、shift=6/3。FP32 时间表、条件角色索引及 scheduler.step 沿用原生语义。
+不能把 Sol-H3 的四步常量表用于原生 50 步或 8 步图。
+
+LoRA 按 Qwen3.5 的静态适配器视图组织：共享 Qwen、参考编码和 VAE，每个适配器拥有
+文本 refiner、DiT 及采样表；切换时清理 session/KV，再选择相应图。A/B 独立保留，
+不合并进基权重。FL2V 与 Ref2VA 必须分别绑定对应权重，不能将一种训练分支复用于另一种。
+折叠缩放后的 Linear 需同步变换 LoRA B，否则浮点原层的增量不能直接加到缩放后的图。
+`native_lora.py` 记录原始 rank、alpha、SHA256 及实际绑定目标；未知目标明确拒绝。
+
+原生视频 decoder 是 ViT，Host 保留原生时间窗口与空间分块拼接，图内预计算固定档位
+RoPE。它不同于 LTX decoder，不能复用后者的 latent 布局或反归一化参数。
+
+当前 CI 保留 `test_h3_native_schedule.py` 的原生调度对照、`test_sol_h3_native_lora.py`
+的独立 B×A 补偿及错误权重拒绝、`test_sol_h3_native_video.py` 的原生 RoPE/分块对照和一张真实解码图。
+默认包规划、三种代表性 workflow 预算和加载拒绝合并在 `test_h3_native_api.py`；
+`test_unified_model_h3.py` 仅构建 full/LoRA 两个公开小包，承担五模式、
+公开构建、产物搬迁、删除源权重和适配器切换。小模型数值及 HMONNX 验证不等同于
+完整权重质量或真机验证，完整权重结果须另附配置与证据。
+
 ## LTX 统一最大 guide 档位
 
 首尾一致性由 `export.ltx_reference_conditioning.enabled` 控制，默认开启。

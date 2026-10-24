@@ -20,7 +20,7 @@
 | Qwen-Image-2.1 的特征边界、共享调制、前缀 KV 与浮点诊断 | [接入记录（进行中）](structures/qwen-image21.md) |
 | Qwen-Image-2.1-Turbo 的 8 步采样、模型身份与部署验证 | [Turbo 接入记录](structures/qwen-image21-turbo.md) |
 | FLUX 3 Image Klein 的核心图、三精度、动态多参考、扩写及交付验收 | [FLUX 适配交付总览](structures/flux3-image-klein.md#adaptation-overview) |
-| Sol-H3 的 4+3 步、AdaLN 索引、长序列 FP16 累加与 SEFP8 | [Sol-H3 接入记录](structures/sol-h3.md) |
+| Sol-H3 的 4+3 步、AdaLN、FP16/SEFP8，以及原生 H3 与 8 步 LoRA | [Sol-H3 接入记录](structures/sol-h3.md)／[原生 H3 接入](structures/sol-h3.md#原生-h3-与可切换-lora) |
 | Wall-OSS-0.5 的双专家、三图缓存动作链路与非方图视觉 | [接入记录](structures/wall-oss.md) |
 | M50、YH、XH3 如何选择已有路径或扩展 | [目标设备索引](targets/README.md) |
 

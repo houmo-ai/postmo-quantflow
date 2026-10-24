@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "native-h3-adapter-path-ownership",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/sol_h3/native_assets.py"
+      ]
+    }
+  ]
+}

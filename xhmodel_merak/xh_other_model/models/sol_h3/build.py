@@ -711,8 +711,8 @@ class BundleExporter:
         self.meta["folded_h3_projection_parameters"] = folded.original_projection_parameters
         self._export_h3_draft(source, tables, output_table, schedule=schedule)
 
-    def _export_h3_draft(self, source, tables, output_table, *, schedule=None):
-        """Export the shared H3 text and denoiser graphs for a prepared schedule."""
+    def _export_h3_draft(self, source, tables, output_table, *, schedule=None, adapter=None, variant=None):
+        """Shared H3 graphs and calibration; an optional adapter keeps A/B separate."""
         from copy import copy, deepcopy
         from dataclasses import replace
 
@@ -728,11 +728,22 @@ class BundleExporter:
         source.norm_out.linear = nn.Identity()
         policy = H3PrecisionPolicy(**self.cfg["h3_precision"])
         self.meta["h3_precision"] = policy.to_dict()
-        text = H3TextGraph(source, policy, sdk_ops=True, input_divisor=self.meta["text_feature_divisor"])
+        bindings = []
+
+        def bind(graph, component):
+            graph.cpu().float()
+            if adapter is not None:
+                from .native_lora import bind_native_lora
+
+                bindings.append(bind_native_lora(graph, adapter, component=component, policy=policy))
+            return graph
+
+        suffix = "" if variant is None else "_" + variant
+        text = bind(H3TextGraph(source, policy, sdk_ops=True, input_divisor=self.meta["text_feature_divisor"]), "text")
         text_inputs = (self.text_features, torch.tensor([self.text_length], dtype=torch.int32))
         self.graph(
             "h3_text_refiner",
-            f"text_encode_h3_refine_s{self.cfg['text_capacity']}",
+            f"text_encode_h3_refine_s{self.cfg['text_capacity']}{suffix}",
             text,
             text_inputs,
             ["text_features", "valid_text_length"],
@@ -773,20 +784,25 @@ class BundleExporter:
             draft = draft_type.from_text(size=self.cfg["draft_size"], text_length=self.text_length, **options)
         if fixed_roles:
             self.meta["h3_role_layout"] = draft.layout.metadata()
-        graph = graph_type(
-            source,
-            tables,
-            output_table,
-            plan["video_capacity"],
-            plan["audio_capacity"],
-            policy,
-            sdk_ops=True,
-            **graph_options,
+        graph = bind(
+            graph_type(
+                source,
+                tables,
+                output_table,
+                plan["video_capacity"],
+                plan["audio_capacity"],
+                policy,
+                sdk_ops=True,
+                **graph_options,
+            ),
+            "dit",
         )
+        if adapter is not None and sum(item["target_count"] for item in bindings) != len(adapter.pairs):
+            raise ValueError("H3 adapter was not bound completely across text and DiT graphs")
         size = self.cfg["draft_size"]
         self.graph(
             "h3_denoiser",
-            f"denoise_h3_{size[1]}x{size[0]}x124",
+            f"denoise_h3_{size[1]}x{size[0]}x124{suffix}",
             graph,
             draft.inputs(refined),
             (
@@ -837,6 +853,7 @@ class BundleExporter:
             h3_rope_config=rope,
             h3_packed_inputs=True,
             draft_steps=4 if schedule is None else schedule.steps,
+            lora=None if adapter is None else dict(**adapter.to_dict(), bindings=bindings),
         )
 
     def bridge(self):
