@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch import Tensor
 from transformers import AutoConfig, AutoTokenizer, PreTrainedTokenizerFast
 
+from xhmodel_merak.exec_backends import get_backend
 from xhmodel_merak.xh_llm.llm_data_processor import BaseInputProcessorConfig, BaseLLMInputProcessor
 from xhquant.api import get_xhquant_logger
 from xhquant.core.hmfp_kv_cache import HMFPPagedKVCache
@@ -15,8 +16,6 @@ from xhquant.xhonnxruntime.hmonnx_optimizer import (
     materialize_parallel_linear_fusion,
 )
 from xhquant.xhonnxruntime.parsers import PageAttention, PageAttentionContext
-
-from xhmodel_merak.exec_backends import HMONNXInferenceV2, LLMHMONNXLoader, get_inference_backend
 
 from ..base_llm_model import BaseLLMModel, XHLLMModelProcessor
 from ..kv_cache_mixin import KVCacheMixin
@@ -40,6 +39,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         enable_parallel_linear_fusion: bool = False,
         **kwargs,
     ):
+        self._backend = get_backend()
         super().__init__(**kwargs)
         self.meta_info = meta
         self.hf_model_dir = meta.hf_config
@@ -52,25 +52,15 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         )
         self.use_cache = self.kvcache_config.num_layers > 0
         self.enable_page_attention = enable_page_attention
-        convert_unfused_sliding_kv_cache = (
-            str(getattr(meta, "attention_lowering", ""))
-            == "full_flash_attention"
+        convert_unfused_sliding_kv_cache = str(getattr(meta, "attention_lowering", "")) == "full_flash_attention"
+        prefill_hmonnx, decode_hmonnx = self._backend.prepare_graphs(
+            meta.prefill_hmonnx,
+            meta.decode_hmonnx,
+            prepare=self._prepare_hmonnx_paths,
+            enable_parallel_linear_fusion=enable_parallel_linear_fusion,
+            enable_page_attention=enable_page_attention,
+            convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
         )
-        if get_inference_backend() == "tcim":
-            if enable_parallel_linear_fusion or enable_page_attention:
-                raise NotImplementedError(
-                    "TCIM requires HMMs compiled with the requested graph ABI; "
-                    "runtime HMONNX graph conversion is unsupported"
-                )
-            prefill_hmonnx, decode_hmonnx = str(meta.prefill_hmonnx), str(meta.decode_hmonnx)
-        else:
-            prefill_hmonnx, decode_hmonnx = self._prepare_hmonnx_paths(
-                meta.prefill_hmonnx,
-                meta.decode_hmonnx,
-                enable_parallel_linear_fusion=enable_parallel_linear_fusion,
-                enable_page_attention=enable_page_attention,
-                convert_unfused_sliding_kv_cache=convert_unfused_sliding_kv_cache,
-            )
         prefill_graph, decode_graph, summary = self._load_hmonnx_graphs(prefill_hmonnx, decode_hmonnx)
         self._llm_initializer_pool_summary = dict(summary)
         prefill_cuda_graph = enable_cuda_graph if enable_prefill_cuda_graph is None else enable_prefill_cuda_graph
@@ -83,10 +73,11 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             enable_auto_offload=enable_auto_offload,
             enable_golden=enable_golden,
             device_map=self._valid_devices,
+            backend=self._backend,
         )
 
         layer_infos = None
-        if isinstance(self.prefill_model.hmonnx_session, HMONNXInferenceV2):
+        if self._backend.use_inference_v2:
             layer_infos = self.prefill_model.hmonnx_session.get_layer_infos()
 
         self.decode_model = HMONNXModel(
@@ -96,17 +87,19 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
             enable_cuda_graph=decode_cuda_graph,
             enable_auto_offload=enable_auto_offload,
             device_map=self._valid_devices,
+            backend=self._backend,
             layer_infos=layer_infos,
         )
 
         self._data_processor = None
         self._kvcache_mixin = KVCacheMixin(self.kvcache_config)
+        self._kvcache_mixin.CACHCE_TENSOR_TYPE = self._backend.resolve_class("CacheTensor")
         self._sync_page_attention_mode_to_kvcache()
         self.pad_token_id = self.meta_info.pad_token_id
 
     def _load_hmonnx_graphs(self, prefill_hmonnx: str, decode_hmonnx: str):
         """Allow a family to include speculative graphs in the same weight pool."""
-        loader = LLMHMONNXLoader(prefill_hmonnx, decode_hmonnx)
+        loader = self._backend.resolve_class("LLMHMONNXLoader")(prefill_hmonnx, decode_hmonnx)
         return loader.prefill_graph, loader.decode_graph, loader.initializer_pool.summary()
 
     @property
@@ -157,10 +150,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
         convert_unfused_sliding_kv_cache: bool = False,
     ) -> str:
         input_path = Path(hmonnx_path)
-        digest_source = (
-            f"{input_path.resolve(strict=False)}|"
-            f"mixed={int(convert_unfused_sliding_kv_cache)}"
-        )
+        digest_source = f"{input_path.resolve(strict=False)}|mixed={int(convert_unfused_sliding_kv_cache)}"
         digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:16]
         output_name = f"{input_path.stem}_page_attention_{digest}{input_path.suffix}"
         output_path = input_path.with_name(output_name)
@@ -178,9 +168,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
                 convert_to_page_attention(
                     input_path,
                     temporary_path,
-                    convert_unfused_sliding_kv_cache=(
-                        convert_unfused_sliding_kv_cache
-                    ),
+                    convert_unfused_sliding_kv_cache=(convert_unfused_sliding_kv_cache),
                 )
                 temporary_path.replace(destination)
             finally:
@@ -261,9 +249,7 @@ class BaseLLMHMONNXModel(HMONNXBaseModel):
 
         length_classes = tuple(
             (
-                page_attn_m.capture_cache_length_class(
-                    effective_kv_length, query_length=slot_mapping.numel()
-                )
+                page_attn_m.capture_cache_length_class(effective_kv_length, query_length=slot_mapping.numel())
                 if not self._llm_prefill and slot_mapping.numel() > 1
                 else page_attn_m.capture_cache_length_class(effective_kv_length)
             )

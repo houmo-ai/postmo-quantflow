@@ -14,6 +14,7 @@ import torch
 
 from .path_utils import resolve_tcim_model_path
 
+
 TensorInfo = namedtuple("TensorInfo", ["name", "shape", "dtype"])
 
 ENV_TCIM_BACKEND_NAME = "XHMODEL_TCIM_BACKEND_NAME"
@@ -59,8 +60,10 @@ def _is_torch_tensor(value: Any) -> bool:
 
 
 def _is_cache_tensor(value: Any) -> bool:
-    return isinstance(value, TcimCacheTensor) or value.__class__.__name__ in _CACHE_TENSOR_NAMES or (
-        _is_torch_tensor(value) and bool(getattr(value, "is_custom_tensor", False))
+    return (
+        isinstance(value, TcimCacheTensor)
+        or value.__class__.__name__ in _CACHE_TENSOR_NAMES
+        or (_is_torch_tensor(value) and bool(getattr(value, "is_custom_tensor", False)))
     )
 
 

@@ -9,7 +9,9 @@
         "examples_merak/asr/qwen3_asr/hmonnx_demo_chunk_prefix.py",
         "examples_merak/asr/qwen3_asr/golden_utils.py",
         "xhmodel_merak/xh_other_model/common/hmonnx_model.py",
-        "xhmodel_merak/xh_other_model/llm_onnx_model.py"
+        "xhmodel_merak/xh_other_model/llm_onnx_model.py",
+        "xhmodel_merak/xh_llm/hmonnx/hmonnx_model.py",
+        "xhmodel_merak/xh_llm/hmonnx/base_llm_hmonnx_model.py"
       ]
     }
   ]

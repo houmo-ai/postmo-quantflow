@@ -96,6 +96,19 @@ ModelZoo 的 `quant()` 是用户工作流入口，不表示本仓库拥有 GPTQ/
 稳定复用单位是算子语义、结构契约和产物接口，不是某次重构后的文件夹名字。
 尺寸、精度、图档位用现有配置/plan 表达；语义不同的实现不因代码相似而强行合并。
 
+### 推理后端边界
+
+`exec_backends` 的内置注册入口组合 HMONNX / TCIM 的轻量声明与策略，导入时不加载 SDK。
+`get_backend()` 捕获后端接口映射及 legacy/V2 模式；公共 `HMONNXModel` 持有该选择，
+基础 LLM 的 prefill、decode、loader 和基础 KV cache 使用同一个选择，后续不重新读取环境变量。
+独立调用兼容 facade 仍按调用时环境选择后端；组合 runtime 应显式传递已选择的 backend，
+自定义 cache/loader 也应通过它解析实现，不能重新使用环境分派。
+
+CUDA Graph / auto offload 是所选 runtime 接口的能力，不是芯片通用能力。
+公共模型层查询能力并调用后端的 session 创建及图准备策略，不判断后端名称。
+HMONNX 策略复用现有不可变图派生流程；TCIM 使用预编译 HMM，拒绝运行时图转换请求。
+当前保持 TCIM 静默关闭 CUDA Graph / auto offload 的兼容行为，golden 等限制由其执行实现检查。
+
 ### HMONNX 导出的结束边界
 
 普通模式以 xhquant 输出的图文件作为最终图；ModelZoo 随后记录路径、校验值和发布

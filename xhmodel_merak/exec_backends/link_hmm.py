@@ -10,6 +10,7 @@ from typing import Any
 
 from xhmodel_merak.exec_backends.path_utils import TCIM_SUFFIXES
 
+
 _ONNX_SUFFIX = ".onnx"
 _DEFAULT_SOURCE_META = "golden_meta_info.json"
 _DEFAULT_OUTPUT_META = "hmm_meta_info.json"
@@ -159,9 +160,7 @@ def _hmm_cache_contract(
     key_context = int(key_shape[cache_axis])
     value_context = int(value_shape[cache_axis])
     if key_context != value_context:
-        raise ValueError(
-            f"HMM role {role} has different key/value context lengths: {key_context} vs {value_context}"
-        )
+        raise ValueError(f"HMM role {role} has different key/value context lengths: {key_context} vs {value_context}")
     if key_dtype != value_dtype:
         raise ValueError(f"HMM role {role} has different key/value cache dtypes: {key_dtype} vs {value_dtype}")
     return key_shape, value_shape, key_context, key_dtype

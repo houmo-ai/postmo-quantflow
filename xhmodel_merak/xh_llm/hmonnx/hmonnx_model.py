@@ -1,19 +1,10 @@
-import os
-import warnings
 from pathlib import Path
 from typing import Any
 
 import torch
 
+from xhmodel_merak.exec_backends import HMONNXGoldenInference, get_backend
 from xhquant.api import get_xhquant_logger
-
-from xhmodel_merak.exec_backends import (
-    HMONNXCUDAGraphInference,
-    HMONNXGoldenInference,
-    HMONNXInferenceConfig,
-    HMONNXInferenceV2,
-    get_inference_backend,
-)
 
 from ..device_mixin import DeviceMixin
 from ..infer_mixin import GoldenMixin
@@ -46,70 +37,34 @@ class HMONNXModel(GoldenMixin, DeviceMixin):
         enable_auto_offload=False,
         device_map: str | None | torch.device | list[str | torch.device] = None,
         layer_infos=None,
+        backend=None,
     ):
+        self._backend = backend if backend is not None else get_backend()
+        self._use_inference_v2 = self._backend.use_inference_v2
         self._hmonnx_path = hmonnx
         self._onnx_graph = onnx_graph
         self._session_device_map = device_map
         self._session_layer_infos = layer_infos
         self._requested_cuda_graph = bool(enable_cuda_graph)
-        self._enable_cuda_graph = bool(enable_cuda_graph and get_inference_backend() != "tcim")
+        self._enable_cuda_graph = bool(enable_cuda_graph and self._backend.supports_cuda_graph)
         self._fast_mode = False
 
         self._create_hmonnx_session(enable_golden=enable_golden, enable_auto_offload=enable_auto_offload)
-        self._enable_auto_offload = bool(enable_auto_offload and get_inference_backend() != "tcim")
+        self._enable_auto_offload = bool(enable_auto_offload and self._backend.supports_auto_offload)
         self._dtype = torch.float16
         self._enable_golden = enable_golden
 
     def _create_hmonnx_session(self, enable_golden: bool, enable_auto_offload: bool) -> None:
-        normalized_device_map = self._normalize_device_map(self._session_device_map)
-        use_inference_v2 = self._is_inference_v2_env_enabled()
-        if use_inference_v2:
-            logger = get_xhquant_logger()
-            if get_inference_backend() == "tcim":
-                logger.info("Routing %s through the TCIM HMM backend.", self._hmonnx_path)
-            else:
-                logger.info(
-                    "Environment variable %s is enabled; routing %s through HMONNXInferenceV2.",
-                    self.ENV_ENABLE_INFERENCE_V2,
-                    self._hmonnx_path,
-                )
-            session_config = HMONNXInferenceConfig()
-            session_config.enable_cuda_graph = self._enable_cuda_graph
-            session_config.enable_auto_offload = enable_auto_offload
-            session_config.exec_devices = normalized_device_map
-            session_config.enable_golden = enable_golden
-            session_config.layers = self._session_layer_infos
-            if self._onnx_graph is None:
-                self.hmonnx_session = HMONNXInferenceV2(self._hmonnx_path, session_config)
-            else:
-                self.hmonnx_session = HMONNXInferenceV2.from_onnx_graph(
-                    self._hmonnx_path, self._onnx_graph, session_config
-                )
-            self._device = self.hmonnx_session.device
-        else:
-            logger = get_xhquant_logger()
-            warnings.warn(
-                (
-                    "Legacy HMONNX runtime fallback is deprecated and may be removed in a future release. "
-                    f"Set {self.ENV_ENABLE_INFERENCE_V2}=1 to route compatible single-device models through "
-                    "HMONNXInferenceV2."
-                ),
-                FutureWarning,
-                stacklevel=1,
-            )
-            logger.warning(
-                "Falling back to legacy HMONNX runtime for %s. Set %s=1 to enable HMONNXInferenceV2.",
-                self._hmonnx_path,
-                self.ENV_ENABLE_INFERENCE_V2,
-            )
-            if self.enable_cuda_graph:
-                logger = get_xhquant_logger()
-                logger.info(f"enable CUDA Graph for {self._hmonnx_path}")
-                self.hmonnx_session = HMONNXCUDAGraphInference(self._hmonnx_path)
-            else:
-                self.hmonnx_session = HMONNXGolden(self._hmonnx_path)
-            self._device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-            self.hmonnx_session.to(self._device)
+        self.hmonnx_session, self._device = self._backend.create_session(
+            self._hmonnx_path,
+            onnx_graph=self._onnx_graph,
+            enable_cuda_graph=self._enable_cuda_graph,
+            enable_auto_offload=enable_auto_offload,
+            enable_golden=enable_golden,
+            device_map=self._normalize_device_map(self._session_device_map),
+            layer_infos=self._session_layer_infos,
+        )
+        get_xhquant_logger().info("Loaded %s with backend %s.", self._hmonnx_path, self._backend.name)
 
     @staticmethod
     def _normalize_device_map(device_map: str | torch.device | int | list[Any] | tuple[Any, ...] | None) -> list[Any]:
@@ -121,10 +76,7 @@ class HMONNXModel(GoldenMixin, DeviceMixin):
 
     @classmethod
     def _is_inference_v2_env_enabled(cls) -> bool:
-        if get_inference_backend() == "tcim":
-            return True
-        value = os.getenv(cls.ENV_ENABLE_INFERENCE_V2, "")
-        return value.strip().lower() in {"1", "true", "yes", "on"}
+        return get_backend().use_inference_v2
 
     @property
     def is_enable_cuda_graph(self) -> bool:
@@ -138,7 +90,7 @@ class HMONNXModel(GoldenMixin, DeviceMixin):
         if device == self._device:
             return self
 
-        if not isinstance(self.hmonnx_session, HMONNXInferenceV2):
+        if not self._use_inference_v2:
             if self._enable_cuda_graph and self.device.type == "cuda":
                 logger = get_xhquant_logger()
                 logger.warning(
@@ -180,7 +132,8 @@ class HMONNXModel(GoldenMixin, DeviceMixin):
         self.hmonnx_session.reset_step()
 
     def _set_enable_auto_offload(self, enable: bool) -> None:
-        if enable and self.enable_cuda_graph and not isinstance(self.hmonnx_session, HMONNXInferenceV2):
+        enable = bool(enable and self._backend.supports_auto_offload)
+        if enable and self.enable_cuda_graph and not self._use_inference_v2:
             raise RuntimeError("Cannot enable auto offload when CUDA Graph is enabled.")
 
         session_auto_offload = getattr(self.hmonnx_session, "enable_auto_offload", None)
@@ -193,7 +146,7 @@ class HMONNXModel(GoldenMixin, DeviceMixin):
         else:
             self.hmonnx_session.enable_auto_offload = enable
 
-        self._enable_auto_offload = bool(enable and get_inference_backend() != "tcim")
+        self._enable_auto_offload = bool(enable and self._backend.supports_auto_offload)
 
     def enable_auto_offload(self):
         self._set_enable_auto_offload(True)

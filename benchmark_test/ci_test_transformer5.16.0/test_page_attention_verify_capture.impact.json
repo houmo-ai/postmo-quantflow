@@ -1,7 +1,14 @@
 {
   "version": 1,
-  "rules": [{
-    "id": "page-attention-verify-capture-context",
-    "patterns": ["xhmodel_merak/xh_llm/hmonnx/base_llm_hmonnx_model.py"]
-  }]
+  "rules": [
+    {
+      "id": "page-attention-verify-capture-context",
+      "patterns": [
+        "xhmodel_merak/xh_llm/hmonnx/base_llm_hmonnx_model.py",
+        "xhmodel_merak/exec_backends/backend.py",
+        "xhmodel_merak/exec_backends/hmonnx_backend.py",
+        "xhmodel_merak/exec_backends/tcim_backend.py"
+      ]
+    }
+  ]
 }

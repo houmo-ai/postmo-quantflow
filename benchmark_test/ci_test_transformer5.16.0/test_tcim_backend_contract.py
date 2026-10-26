@@ -35,10 +35,13 @@ def test_qwen3_asr_demo_resolves_config_cache_and_embedding_aliases(tmp_path, de
 
     assert module._resolve_cache_len({}, 77) == 77
     assert module._resolve_cache_len({"kv_cache_shape": [1, 8, 2048, 128]}, None) == 2048
-    assert module._resolve_cache_len(
-        {"kv_cache": {"shape": [[1, 8, 4096, 128], [1, 8, 4096, 128]], "cache_axis": 2}},
-        None,
-    ) == 4096
+    assert (
+        module._resolve_cache_len(
+            {"kv_cache": {"shape": [[1, 8, 4096, 128], [1, 8, 4096, 128]], "cache_axis": 2}},
+            None,
+        )
+        == 4096
+    )
     with pytest.raises(ValueError, match="must provide kv_cache_shape"):
         module._resolve_cache_len({}, None)
 
@@ -167,14 +170,88 @@ def test_backend_factory_is_lazy_and_defaults_to_hmonnx(monkeypatch):
 
     assert factory.get_inference_backend() == "hmonnx"
     assert factory.resolve_backend_class("HMONNXInference") is NativeHMONNXInference
-    assert all(name != ".tcim_hmonnx" for name, _ in imported)
+    assert all("tcim_hmonnx" not in name for name, _ in imported)
 
     monkeypatch.setenv(factory.ENV_INFERENCE_BACKEND, "tcim")
     assert factory.resolve_backend_class("HMONNXInference").__name__ == "TcimHMONNXInference"
 
     monkeypatch.setenv(factory.ENV_INFERENCE_BACKEND, "unknown")
-    with pytest.raises(ValueError, match="expected hmonnx or tcim"):
+    with pytest.raises(ValueError, match="expected one of hmonnx, tcim"):
         factory.get_inference_backend()
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("", "hmonnx"),
+        ("  HMONNX ", "hmonnx"),
+        ("tcim", "tcim"),
+        (" TCIM_RUNTIME ", "tcim"),
+        ("tcim_lite", "tcim"),
+    ],
+)
+def test_backend_factory_normalizes_selection(monkeypatch, value, expected):
+    from xhmodel_merak.exec_backends import factory
+
+    monkeypatch.setenv(factory.ENV_INFERENCE_BACKEND, value)
+    assert factory.get_inference_backend() == expected
+
+
+def test_backend_factory_supports_new_mapping_without_dispatch_changes(monkeypatch, tmp_path):
+    from xhmodel_merak.exec_backends import factory
+
+    module_name = "_test_merak_backend_extension"
+    (tmp_path / f"{module_name}.py").write_text(
+        "class Session:\n"
+        "    def __init__(self, value): self.value = value\n"
+        "    @classmethod\n"
+        "    def from_onnx_graph(cls, value): return cls(value)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setitem(
+        factory.BACKENDS,
+        "extension",
+        {
+            "HMONNXInference": (module_name, "Session"),
+            "HMONNXInferenceV2": (module_name, "Session"),
+        },
+    )
+    monkeypatch.setenv(factory.ENV_INFERENCE_BACKEND, "extension")
+    try:
+        assert factory.get_inference_backend() == "extension"
+        assert module_name not in sys.modules
+        session = factory.HMONNXInference(value=17)
+        assert session.value == 17
+        assert isinstance(session, factory.HMONNXInference)
+        assert issubclass(type(session), factory.HMONNXInference)
+        assert factory.HMONNXInferenceV2.from_onnx_graph(23).value == 23
+        with pytest.raises(ValueError, match="extension.*CacheTensor"):
+            factory.resolve_backend_class("CacheTensor")
+        monkeypatch.setenv(factory.ENV_INFERENCE_BACKEND, "unknown")
+        with pytest.raises(ValueError, match="expected one of extension, hmonnx, tcim"):
+            factory.get_inference_backend()
+    finally:
+        sys.modules.pop(module_name, None)
+
+
+def test_backend_declarations_do_not_import_runtime_dependencies():
+    import subprocess
+
+    code = """
+import sys
+from xhmodel_merak.exec_backends import factory
+from xhmodel_merak.exec_backends import hmonnx_backend, tcim_backend
+assert factory.BACKENDS['hmonnx'] is hmonnx_backend.CLASSES
+assert factory.BACKENDS['tcim'] is tcim_backend.CLASSES
+assert set(hmonnx_backend.CLASSES) == set(tcim_backend.CLASSES)
+for alias in tcim_backend.ALIASES:
+    assert factory.BACKEND_ALIASES[alias] == tcim_backend.NAME
+assert 'xhmodel_merak.exec_backends.tcim_hmonnx' not in sys.modules
+assert not any(name.split('.')[0] in {'torch', 'xhquant', 'tcim_runtime', 'tcim_lite'}
+               for name in sys.modules)
+"""
+    subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, check=True)
 
 
 def test_common_hmonnx_model_uses_backend_facade():
@@ -288,9 +365,7 @@ def test_tcim_session_keeps_cache_on_device_between_sessions(tmp_path, monkeypat
 
     cache = tcim_hmonnx.TcimCacheTensor(torch.zeros((1, 2, 4, 8), dtype=torch.int8))
     first = tcim_hmonnx.TcimHMONNXInference(str(model))
-    logits, returned_cache = first.run(
-        {"tokens": torch.ones((1, 1), dtype=torch.int32), "past_key_cache_0": cache}
-    )
+    logits, returned_cache = first.run({"tokens": torch.ones((1, 1), dtype=torch.int32), "past_key_cache_0": cache})
     assert logits.dtype == torch.float16
     assert returned_cache is cache
     assert "past_key_cache_0" not in runtime.modules[0].host_inputs
@@ -365,3 +440,180 @@ def test_link_hmm_generates_runtime_metadata_without_mutating_source(tmp_path, m
     assert output["decode_hmonnx"] == "../hmm/decode.hmm"
     assert output["visual_config"]["hmonnx"] == "../hmm/visual_m96.hmm"
     assert output["prefill_hmonnx_md5"] == hashlib.md5(b"prefill", usedforsecurity=False).hexdigest()
+
+
+@pytest.fixture
+def session_boundary(monkeypatch):
+    """Replace SDK execution only; run real backend policies and model orchestration."""
+    from types import ModuleType
+    from xhmodel_merak.exec_backends import factory
+
+    module = ModuleType("_merak_session_boundary")
+
+    class Session:
+        def __init__(self, path, config=None):
+            self.path = path
+            self.config = config
+            self.device = torch.device("cpu")
+            self.enable_auto_offload = False
+            self.moves = []
+            self.graph = None
+
+        @classmethod
+        def from_onnx_graph(cls, path, graph, config):
+            session = cls(path, config)
+            session.graph = graph
+            return session
+
+        def to(self, device):
+            self.moves.append(device)
+            self.device = device
+            return self
+
+        def get_layer_infos(self):
+            return ["shared-layer"]
+
+    module.Session = Session
+    module.Config = SimpleNamespace
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    for name in ("hmonnx", "tcim"):
+        mapping = dict(factory.BACKENDS[name])
+        for interface in ("HMONNXInferenceV2", "HMONNXGoldenInference", "HMONNXCUDAGraphInference"):
+            mapping[interface] = (module.__name__, "Session")
+        mapping["HMONNXInferenceConfig"] = (module.__name__, "Config")
+        monkeypatch.setitem(factory.BACKENDS, name, mapping)
+    return module
+
+
+@pytest.mark.parametrize("backend_name", ["hmonnx", "tcim"])
+@pytest.mark.parametrize("with_graph", [False, True])
+def test_bound_backend_creates_v2_session_and_preserves_capabilities(
+    monkeypatch, session_boundary, backend_name, with_graph
+):
+    from xhmodel_merak.exec_backends import get_backend
+    from xhmodel_merak.xh_llm.hmonnx.hmonnx_model import HMONNXModel
+
+    monkeypatch.setenv("XHMODEL_INFERENCE_BACKEND", backend_name)
+    monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
+    backend = get_backend()
+    # No later environment read may change session choice or capability handling.
+    monkeypatch.setenv("XHMODEL_INFERENCE_BACKEND", "invalid-after-selection")
+    monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "0")
+    graph = object() if with_graph else None
+    model = HMONNXModel(
+        "model.onnx",
+        onnx_graph=graph,
+        enable_cuda_graph=True,
+        enable_auto_offload=True,
+        device_map="cpu",
+        backend=backend,
+    )
+    session = model.hmonnx_session
+    assert session.graph is graph
+    assert session.config.exec_devices == ["cpu"]
+    assert model.enable_cuda_graph is (backend_name == "hmonnx")
+    assert session.config.enable_auto_offload is (backend_name == "hmonnx")
+    model.enable_auto_offload = True
+    assert model._enable_auto_offload is (backend_name == "hmonnx")
+    assert session.enable_auto_offload is (backend_name == "hmonnx")
+    model._set_device(torch.device("cuda:1"))
+    assert session.moves == []  # V2 placement is owned by the session.
+
+
+@pytest.mark.parametrize("cuda_graph", [False, True])
+def test_bound_backend_keeps_legacy_creation_and_device_rules(monkeypatch, session_boundary, cuda_graph):
+    from xhmodel_merak.xh_llm.hmonnx.hmonnx_model import HMONNXModel
+
+    monkeypatch.setenv("XHMODEL_INFERENCE_BACKEND", "hmonnx")
+    monkeypatch.delenv("ENABLE_HMINFERENCE_V2", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.warns(FutureWarning, match="Legacy HMONNX"):
+        model = HMONNXModel("decode/model.onnx", enable_cuda_graph=cuda_graph)
+    monkeypatch.setenv("XHMODEL_INFERENCE_BACKEND", "tcim")
+    monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
+    assert model.hmonnx_session.moves == [torch.device("cpu")]
+    if cuda_graph:
+        with pytest.raises(RuntimeError, match="Cannot enable auto offload"):
+            model.enable_auto_offload = True
+    else:
+        assert model.hmonnx_session.golden_dir == "decode"
+        assert model.hmonnx_session.legacy_mode is False
+        model.enable_auto_offload = True
+        assert model._enable_auto_offload is True
+        model._set_device(torch.device("cuda:1"))
+        assert model.hmonnx_session.moves[-1] == torch.device("cuda:1")
+
+
+@pytest.mark.parametrize("fusion,page", [(False, False), (True, False), (False, True), (True, True)])
+def test_backend_graph_preparation_policy(monkeypatch, fusion, page):
+    from xhmodel_merak.exec_backends import get_backend
+
+    calls = []
+
+    def prepare(*paths, **options):
+        calls.append((paths, options))
+        return ("prepared-prefill", "prepared-decode")
+
+    options = dict(
+        enable_parallel_linear_fusion=fusion, enable_page_attention=page, convert_unfused_sliding_kv_cache=True
+    )
+    monkeypatch.setenv("XHMODEL_INFERENCE_BACKEND", "hmonnx")
+    assert get_backend().prepare_graphs("p", "d", prepare=prepare, **options) == ("prepared-prefill", "prepared-decode")
+    assert calls == [(("p", "d"), options)]
+    calls.clear()
+    monkeypatch.setenv("XHMODEL_INFERENCE_BACKEND", "tcim")
+    if fusion or page:
+        with pytest.raises(NotImplementedError, match="compiled with the requested graph ABI"):
+            get_backend().prepare_graphs("p", "d", prepare=prepare, **options)
+    else:
+        assert get_backend().prepare_graphs(Path("p"), Path("d"), prepare=prepare, **options) == ("p", "d")
+    assert calls == []
+
+
+def test_llm_pins_prefill_decode_loader_and_cache_backend(monkeypatch, tmp_path, session_boundary):
+    from transformers import LlamaConfig
+
+    from xhmodel_merak.exec_backends import factory
+    from xhmodel_merak.xh_llm.hmonnx.base_llm_hmonnx_model import BaseLLMHMONNXModel
+    from xhmodel_merak.xh_llm.types import LLMModelMeta
+
+    class Cache:
+        def __init__(self, value):
+            self.value = value
+
+    class Loader:
+        def __init__(self, *paths):
+            self.prefill_graph = object()
+            self.decode_graph = object()
+            self.initializer_pool = SimpleNamespace(summary=lambda: {"weights": 1})
+            # Simulate environment mutation during model initialization.
+            monkeypatch.setenv("XHMODEL_INFERENCE_BACKEND", "invalid-after-load")
+
+    session_boundary.Cache = Cache
+    session_boundary.Loader = Loader
+    monkeypatch.setitem(factory.BACKENDS["tcim"], "CacheTensor", (session_boundary.__name__, "Cache"))
+    monkeypatch.setitem(factory.BACKENDS["tcim"], "LLMHMONNXLoader", (session_boundary.__name__, "Loader"))
+    monkeypatch.setenv("XHMODEL_INFERENCE_BACKEND", "tcim")
+    embedding = tmp_path / "embedding.pt"
+    torch.save({"weight": torch.zeros(4, 2)}, embedding)
+    LlamaConfig(
+        vocab_size=4,
+        hidden_size=2,
+        intermediate_size=4,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+    ).save_pretrained(tmp_path)
+    meta = LLMModelMeta(
+        hf_config=str(tmp_path),
+        quant_embedding=str(embedding),
+        prefill_hmonnx="p.hmm",
+        decode_hmonnx="d.hmm",
+        kv_cache=dict(num_layers=1, kv_cache_shape=[1, 1, 2, 2]),
+    )
+    model = BaseLLMHMONNXModel(meta, device_map="cpu")
+    assert model.prefill_model._backend is model.decode_model._backend is model._backend
+    assert model.decode_model.hmonnx_session.config.layers == ["shared-layer"]
+    model._kvcache_mixin.prepare_kv_cache()
+    assert isinstance(model._kvcache_mixin.past_key_caches[0], Cache)
+    assert model.shared_weight_summary == {"weights": 1}

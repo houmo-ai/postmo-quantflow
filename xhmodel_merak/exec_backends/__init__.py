@@ -11,6 +11,7 @@ from .factory import (
     HybridCacheTensor,
     LLMHMONNXLoader,
     MultiHMONNXLoader,
+    get_backend,
     get_inference_backend,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "HybridCacheTensor",
     "LLMHMONNXLoader",
     "MultiHMONNXLoader",
+    "get_backend",
     "get_inference_backend",
 ]
