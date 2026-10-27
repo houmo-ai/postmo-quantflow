@@ -27,6 +27,7 @@ quant:
 
 export:
   model:
+    les_prediction_k: 0
     chip_arch: XH2a
     model_type: MiniCPMV47MoeForConditionalGeneration
     hf_model: null
@@ -59,6 +60,12 @@ export:
         lm_head:
           quant_type: w8a8h1_sefp
       ops:
+        # Float QDQ checkpoints carry no per-module bit metadata. Preserve
+        # AutoRound's W8 attention/shared projections; routed experts stay W4.
+        Linear:
+          quant_type: w8a8h1_sefp
+        Conv2d:
+          quant_type: w8a8h1_sefp
         MatMul:
           act_scheme:
             bits: 16
@@ -68,7 +75,7 @@ export:
             fp_mode: sefp
 
   vision:
-    token_capacity: 1536
+    patch_token_gears: [384, 784, 1536, 2816, 6144]
     keep_onnx: false
 
   components:

@@ -1,0 +1,16 @@
+{
+  "source": "https://pypi.org/project/transformers/5.18.0/",
+  "version": "5.18.0",
+  "wheel": "transformers-5.18.0-py3-none-any.whl",
+  "wheel_sha256": "d79e5a515a572ee3deb33eb0d578be47d91e70c75d54cf21bf6eede6edef14a9",
+  "files": {
+    "configuration_minicpmv4_7.py": {
+      "sha256": "5958e6a5896b2b7b37304953cc6ba0c0c5d5801f920cf7da27fd4b451ec0c441",
+      "size": 6589
+    },
+    "modeling_minicpmv4_7.py": {
+      "sha256": "0b6c68c69ddd302e4e47adadb74daacb59de8c271c5627fef3b3d87a70330963",
+      "size": 63918
+    }
+  }
+}

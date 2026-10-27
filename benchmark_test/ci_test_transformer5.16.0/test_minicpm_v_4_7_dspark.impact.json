@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-v47-dspark",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/**",
+        "xhmodel_merak/model_integrations/minicpm_v_4_7/**",
+        "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/**",
+        "examples_merak/llm/minicpm_v_4_7/**"
+      ]
+    },
+    {
+      "id": "test_minicpm_v_4_7_dspark-native-fixture",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_minicpm_v47_fixture.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/minicpmv4_7/**"
+      ]
+    }
+  ]
+}

@@ -17,6 +17,11 @@ from xhmodel_merak.xh_llm.hmonnx.vision_llm_hmonnx_model import (
     VisonLLMHMONNXModel,
 )
 from xhmodel_merak.xh_llm.infer_mixin import LLMInferenceContextManager
+from xhmodel_merak.xh_llm.minicpm_v_series.vision_gears import (
+    factor_patch_grid,
+    select_vision_profile,
+    vision_profile_entries,
+)
 from xhmodel_merak.xh_llm.models.qwen3_5.data_preprocess import (
     Qwen3_5_DataPreprocess,
 )
@@ -37,6 +42,8 @@ from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_model import (
 
 from .model import XHMiniCPMV47Model, XHMiniCPMV47MoeModel
 from .processor_compat import load_minicpm_v47_processor
+from .positions import MiniCPMV47DataPreprocess, canvas_positions, position_chunk
+from .spec_decode import load_speculative_runtime
 from .vision import (
     crop_token_capacity_image_embeds,
     image_token_count,
@@ -44,6 +51,13 @@ from .vision import (
     split_packed_pixel_values,
     validate_token_capacity,
 )
+
+
+class _MiniCPMLESGraphModel(HMONNXModel):
+    @classmethod
+    def _is_inference_v2_env_enabled(cls) -> bool:
+        # LES needs eager node callbacks regardless of the process default.
+        return True
 
 
 class MiniCPMV47TextHMONNXModel(XHQwen3_5_HMONNXModel):
@@ -70,7 +84,7 @@ class MiniCPMV47TextHMONNXModel(XHQwen3_5_HMONNXModel):
         return self
 
     def _get_data_preprocessor(self) -> Qwen3_5_DataPreprocess:
-        return Qwen3_5_DataPreprocess(
+        return MiniCPMV47DataPreprocess(
             token_embedding=self.embed_tokens,
             input_sequence_length=self.get_input_sequence_length(),
             past_key_caches=self.past_key_caches,
@@ -109,6 +123,8 @@ class PreparedMultimodalInputs:
     input_ids: torch.Tensor
     image_embeds: torch.Tensor | None
     processor: Any
+    position_ids: torch.Tensor | None = None
+    rope_deltas: torch.Tensor | None = None
 
 
 class MiniCPMV47HMONNXRuntime:
@@ -131,6 +147,8 @@ class MiniCPMV47HMONNXRuntime:
         self.device = torch.device(device)
         self.enable_golden = bool(enable_golden)
         self.text: MiniCPMV47TextHMONNXModel | MiniCPMV47MoeTextHMONNXModel | None = None
+        self.speculative = None
+        self.les_scheduler = None
         if "llm" in self.meta:
             child_meta_file = self._resolve(self.meta["llm"]["metadata"])
             child_meta_dict = json.loads(child_meta_file.read_text(encoding="utf-8"))
@@ -142,22 +160,35 @@ class MiniCPMV47HMONNXRuntime:
             else:
                 llm_meta = Qwen3_5_ModelMeta.from_dict(child_meta_dict)
                 text_cls = MiniCPMV47TextHMONNXModel
-            # The LLM artifact's hf_config only carries config.json; MiniCPM-V-4.7
-            # config/tokenizer/processor are remote code, so load them from the
-            # original model directory.
+            # The root carries the complete native config/tokenizer/processor.
             llm_meta.hf_config = str(self._resolve(self.meta["hf_model"]))
-            self.text = text_cls(
-                llm_meta,
-                enable_golden=enable_golden,
-                device_map=[self.device],
-            )
-            self.text.to(self.device)
-            # The legacy HMONNXModel constructor records ``enable_golden``
-            # without invoking its setter. Re-apply it at the aggregate
-            # model level so Prefill and Decode sessions enable dumping.
-            self.text.enable_golden = self.enable_golden
-        self._vision_sessions: dict[str, Any] = {}
-        self._vision_golden_steps: dict[str, int] = {}
+            if self.meta["llm"].get("spec_decode"):
+                self.speculative = load_speculative_runtime(
+                    self.work_dir, self.meta["llm"], llm_meta, self.device, self.enable_golden
+                )
+            else:
+                self.text = text_cls(
+                    llm_meta,
+                    enable_golden=enable_golden,
+                    device_map=[self.device],
+                )
+                self.text.to(self.device)
+                self.text.enable_golden = self.enable_golden
+                if self.meta["llm"].get("les"):
+                    from .les_graph import HMONNXLESScheduler
+
+                    decode = self.text.decode_model
+                    self.text.decode_model = _MiniCPMLESGraphModel(
+                        decode._hmonnx_path,
+                        onnx_graph=decode._onnx_graph,
+                        enable_golden=self.enable_golden,
+                        device_map=[self.device],
+                    )
+                    self.les_scheduler = HMONNXLESScheduler(
+                        self.text.decode_model.hmonnx_session, self.meta["llm"]["les"]
+                    )
+        self._vision_sessions: dict[tuple[str, int], Any] = {}
+        self._vision_golden_steps: dict[tuple[str, int], int] = {}
         self._processor = None
         if self.enable_golden and self.text is not None:
             self._configure_text_golden_dirs()
@@ -168,9 +199,7 @@ class MiniCPMV47HMONNXRuntime:
 
     def get_processor(self):
         if self._processor is None:
-            # MiniCPM-V-4.7's processor is remote code; load it from the
-            # original model directory (the LLM artifact's hf_config only
-            # carries config.json and lacks the remote-code files).
+            # Load packaged native/legacy processor resources without weights.
             processor_dir = self._resolve(self.meta["hf_model"])
             self._processor = load_minicpm_v47_processor(str(processor_dir))
         return self._processor
@@ -189,15 +218,18 @@ class MiniCPMV47HMONNXRuntime:
     def _graph_dir(self, graph: str | Path) -> Path:
         return self._resolve(graph).parent
 
-    def _get_vision_session(self, downsample_mode: str):
+    def _get_vision_session(self, downsample_mode: str, profile=None):
         from xhquant.api import HMONNXGoldenInference, HMONNXInference
 
-        if downsample_mode in self._vision_sessions:
-            return self._vision_sessions[downsample_mode]
-        try:
-            profile = self.meta["vision"][downsample_mode]
-        except KeyError as exc:
-            raise ValueError(f"Vision profile {downsample_mode!r} was not exported") from exc
+        if profile is None:
+            try:
+                profiles = self.meta["vision"][downsample_mode]
+            except KeyError as exc:
+                raise ValueError(f"Vision profile {downsample_mode!r} was not exported") from exc
+            profile = vision_profile_entries(profiles, downsample_mode)[-1]
+        key = (downsample_mode, int(profile["token_capacity"]))
+        if key in self._vision_sessions:
+            return self._vision_sessions[key]
         graph_path = str(self._resolve(profile["hmonnx"]))
         if self.enable_golden:
             session = HMONNXGoldenInference(graph_path)
@@ -213,7 +245,7 @@ class MiniCPMV47HMONNXRuntime:
             session = HMONNXInference(graph_path)
             session.exec_device = self.device
             session.to(self.device)
-        self._vision_sessions[downsample_mode] = session
+        self._vision_sessions[key] = session
         return session
 
     def prepare_multimodal(
@@ -248,6 +280,10 @@ class MiniCPMV47HMONNXRuntime:
             },
         )
         input_ids = model_inputs["input_ids"]
+        from transformers import AutoConfig
+
+        config = AutoConfig.from_pretrained(self._resolve(self.meta["hf_model"]), trust_remote_code=True)
+        position_ids, rope_deltas = canvas_positions(config, model_inputs, downsample_mode=downsample_mode)
         try:
             image_features = self._extract_features(
                 model_inputs.get("pixel_values"),
@@ -272,13 +308,16 @@ class MiniCPMV47HMONNXRuntime:
             input_ids=unified_ids,
             image_embeds=visual_features,
             processor=processor,
+            position_ids=position_ids,
+            rope_deltas=rope_deltas,
         )
 
     def _release_vision_session(self, downsample_mode: str) -> None:
-        session = self._vision_sessions.pop(downsample_mode, None)
-        if session is None:
+        keys = [key for key in self._vision_sessions if key[0] == downsample_mode]
+        if not keys:
             return
-        del session
+        for key in keys:
+            del self._vision_sessions[key]
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -291,12 +330,9 @@ class MiniCPMV47HMONNXRuntime:
     ) -> torch.Tensor | None:
         if pixel_values is None or target_sizes is None:
             return None
-        profile = self.meta["vision"][downsample_mode]
-        token_capacity = int(profile["token_capacity"])
-        positions_per_side = int(profile["positions_per_side"])
+        profiles = self.meta["vision"][downsample_mode]
         expected_tokens = image_token_count(target_sizes, downsample_mode)
         pixel_slices = split_packed_pixel_values(pixel_values, target_sizes)
-        session = self._get_vision_session(downsample_mode)
         features = []
         for pixel_slice, target_tensor in zip(
             pixel_slices,
@@ -304,7 +340,11 @@ class MiniCPMV47HMONNXRuntime:
             strict=True,
         ):
             target_size = tuple(int(value) for value in target_tensor.tolist())
+            profile = select_vision_profile(profiles, downsample_mode, target_size)
+            token_capacity = int(profile["token_capacity"])
+            positions_per_side = int(profile["positions_per_side"])
             validate_token_capacity(target_size, token_capacity, downsample_mode)
+            session = self._get_vision_session(downsample_mode, profile)
             prepared = prepare_token_capacity_vision_inputs(
                 pixel_slice.to(device=self.device, dtype=torch.float16),
                 target_size,
@@ -313,8 +353,9 @@ class MiniCPMV47HMONNXRuntime:
                 positions_per_side,
             )
             if self.enable_golden:
-                step = self._vision_golden_steps.get(downsample_mode, 0)
-                self._vision_golden_steps[downsample_mode] = step + 1
+                key = (downsample_mode, token_capacity)
+                step = self._vision_golden_steps.get(key, 0)
+                self._vision_golden_steps[key] = step + 1
                 session.step = step
             output = session(*(prepared if downsample_mode == "16x" else prepared[:3]))
             output = output[0] if isinstance(output, (tuple, list)) else output
@@ -330,6 +371,20 @@ class MiniCPMV47HMONNXRuntime:
             raise RuntimeError(f"Vision token mismatch: expected {expected_tokens}, got {merged.shape[0]}")
         return merged
 
+    def run_all_vision_gears(self) -> None:
+        """Exercise every exported graph, including gears unused by the prompt."""
+        for mode, profiles in self.meta.get("vision", {}).items():
+            for profile in vision_profile_entries(profiles, mode):
+                capacity = int(profile["token_capacity"])
+                grid = factor_patch_grid(capacity, mode)
+                try:
+                    self._extract_features(
+                        torch.zeros((1, 3, 14, capacity * 14), dtype=torch.float16),
+                        torch.tensor([grid], dtype=torch.int32), mode,
+                    )
+                finally:
+                    self._release_vision_session(mode)
+
     def generate_prepared(
         self,
         prepared: PreparedMultimodalInputs,
@@ -338,14 +393,24 @@ class MiniCPMV47HMONNXRuntime:
     ) -> str:
         if max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
-        if self.text is None:
+        if self.text is None and self.speculative is None:
             raise ValueError("The LLM component was not exported")
         prompt_length = int(prepared.input_ids.shape[-1])
         context_length = int(self.meta["llm"]["context_max_length"])
-        if prompt_length + max_new_tokens > context_length:
+        draft_reserve = 0
+        if self.speculative is not None:
+            draft_reserve = int(self.meta["llm"]["spec_decode"]["draft"].get("block_size", 0))
+        if prompt_length + max_new_tokens + draft_reserve > context_length:
             raise ValueError(
-                f"Prompt plus output needs {prompt_length + max_new_tokens} tokens, "
+                f"Prompt plus output and draft reserve needs {prompt_length + max_new_tokens + draft_reserve} tokens, "
                 f"exceeding context length {context_length}"
+            )
+
+        if self.speculative is not None:
+            self.speculative.prepared = prepared
+            self.speculative.image_token_id = int(prepared.processor.image_token_id)
+            return self.speculative.generate(
+                prepared.input_ids.to(self.device), prepared.processor.tokenizer, max_new_tokens=max_new_tokens
             )
 
         generated: list[int] = []
@@ -370,9 +435,14 @@ class MiniCPMV47HMONNXRuntime:
                         "input_ids": chunk_ids,
                         "past_seq_length": offset,
                         "image_embeds": chunk_features,
-                        # MiniCPM's proven Qwen3.5 adapter uses sequential LLM
-                        # positions after scattering visual embeddings.
                         "image_grid_thw": None,
+                        "position_ids": (
+                            position_chunk(
+                                prepared.position_ids, prepared.rope_deltas, offset=offset, length=prefill_length
+                            )
+                            if prepared.position_ids is not None
+                            else None
+                        ),
                     }
                 )
                 model_args = _match_position_ranks(
@@ -402,6 +472,13 @@ class MiniCPMV47HMONNXRuntime:
                         ),
                         "past_seq_length": past_seq_length,
                         "image_grid_thw": None,
+                        "position_ids": (
+                            position_chunk(
+                                prepared.position_ids, prepared.rope_deltas, offset=past_seq_length, length=1
+                            )
+                            if prepared.position_ids is not None
+                            else None
+                        ),
                     }
                 )
                 decode_args = _match_position_ranks(
@@ -476,12 +553,23 @@ def dump_minicpm_v47_golden(
                 (448, 448),
                 color=(114, 114, 114),
             )
-    graph_dirs = [
-        (work_dir / profile["hmonnx"]).resolve().parent for profile in (root_meta.get("vision") or {}).values()
+    vision_graphs = [
+        work_dir / entry["hmonnx"]
+        for mode, profile in (root_meta.get("vision") or {}).items()
+        for entry in vision_profile_entries(profile, mode)
     ]
+    graph_dirs = [path.resolve().parent for path in vision_graphs]
     if "llm" in root_meta:
         graph_dirs.extend(
             [(work_dir / root_meta["llm"][field]).resolve().parent for field in ("prefill_hmonnx", "decode_hmonnx")]
+        )
+        draft = root_meta["llm"].get("spec_decode", {}).get("draft", {})
+        graph_dirs.extend(
+            (work_dir / value).resolve().parent for key, value in draft.items() if key.endswith("_hmonnx")
+        )
+        graph_dirs.extend(
+            (work_dir / value).resolve().parent
+            for value in root_meta["llm"].get("spec_decode", {}).get("verify_graphs", {}).values()
         )
     # xhquant's legacy symlink helper requires step_N to be an immediate child
     # of the graph directory. Clean every prior step plus obsolete layouts.
@@ -500,6 +588,8 @@ def dump_minicpm_v47_golden(
         device=device,
         enable_golden=True,
     )
+    if any("gears" in profile for profile in root_meta.get("vision", {}).values()):
+        runtime.run_all_vision_gears()
     prepared_by_mode = {
         mode: runtime.prepare_multimodal(
             input_messages,
@@ -508,21 +598,34 @@ def dump_minicpm_v47_golden(
         )
         for mode in vision_modes
     }
-    if runtime.text is not None:
+    if runtime.text is not None or runtime.speculative is not None:
         if prepared_by_mode:
             preferred_mode = "4x" if "4x" in prepared_by_mode else vision_modes[0]
             llm_input = prepared_by_mode[preferred_mode]
         else:
             llm_input = runtime.prepare_multimodal(input_messages)
-        runtime.generate_prepared(llm_input, max_new_tokens=2)
-    expected = [(work_dir / root_meta["vision"][mode]["hmonnx"]).resolve().parent / "step_0" for mode in vision_modes]
-    if runtime.text is not None:
+        proposals = root_meta["llm"].get("spec_decode", {}).get("num_draft_tokens", 0)
+        runtime.generate_prepared(llm_input, max_new_tokens=int(proposals) + 2)
+    expected = [path.resolve().parent / "step_0" for path in vision_graphs]
+    if runtime.text is not None or runtime.speculative is not None:
+        spec = root_meta["llm"].get("spec_decode", {})
+        text_fields = ("prefill_hmonnx",) if spec.get("enable_confidence_truncation") else ("prefill_hmonnx", "decode_hmonnx")
         expected.extend(
             [
                 (work_dir / root_meta["llm"][field]).resolve().parent / "step_0"
-                for field in ("prefill_hmonnx", "decode_hmonnx")
+                for field in text_fields
             ]
         )
+        draft = root_meta["llm"].get("spec_decode", {}).get("draft", {})
+        expected.extend(
+            (work_dir / value).resolve().parent / "step_0" for key, value in draft.items() if key.endswith("_hmonnx")
+        )
+        if spec.get("enable_confidence_truncation"):
+            lengths = getattr(runtime.speculative, "last_spec_decode_stats", {}).get("verify_lengths_per_round", [])
+            expected.extend(
+                (work_dir / spec["verify_graphs"][str(length)]).resolve().parent / "step_0"
+                for length in set(lengths)
+            )
     missing = [str(path) for path in expected if not path.is_dir()]
     if missing:
         raise RuntimeError("Golden generation did not create: " + ", ".join(missing))

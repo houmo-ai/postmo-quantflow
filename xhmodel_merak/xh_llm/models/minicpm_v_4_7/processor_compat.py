@@ -25,6 +25,9 @@ def load_minicpm_v47_processor(model_dir: str | Any, **kwargs: Any):
 
     from transformers import AutoProcessor
 
+    from .auto_classes import register_minicpmv47_auto_classes
+
+    register_minicpmv47_auto_classes()
     ensure_minicpm_v47_processor_compat()
     kwargs.setdefault("trust_remote_code", True)
     return AutoProcessor.from_pretrained(model_dir, **kwargs)

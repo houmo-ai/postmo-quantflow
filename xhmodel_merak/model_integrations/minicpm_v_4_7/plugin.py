@@ -67,14 +67,22 @@ def _dense_recipe() -> ModelRecipe:
     return ModelRecipe(
         # Default public workflows are W8A8 with quant: null. Keep W4A8 YAML
         # examples available outside the registered default/context matrix.
-        dependencies=runtime_dependencies(common=IMAGE),
+        dependencies=runtime_dependencies(common=IMAGE, transformers="5.18.0"),
         model_id="minicpm-v-4.7-1b",
         display_name="MiniCPM-V 4.7 1B",
         family="minicpm-v-4.7",
+        config_resolver="xhmodel_merak.model_integrations.minicpm_v_4_7.planning:resolve_config",
         export_name="minicpm_v_4_7_1b",
         task="vision-language-generation",
         modalities=("text", "image"),
-        variants=(variant("full", _DENSE_WORKFLOW),),
+        variants=(
+            variant("full", _DENSE_WORKFLOW),
+            variant(
+                "dflash",
+                _DENSE_WORKFLOW.replace("w8a8.yaml", "w8a8_dflash.yaml"),
+                speculative_mode="dflash",
+            ),
+        ),
         default_precision=ResolvedPrecision(weight="w8", activation="a8"),
         supported_precisions=(("w8", "a8"),),
         quant_methods=(),
@@ -107,14 +115,22 @@ def _moe_recipe() -> ModelRecipe:
     return ModelRecipe(
         # Default public workflows are W8A8 with quant: null. Keep W4A8 YAML
         # examples available outside the registered default/context matrix.
-        dependencies=runtime_dependencies(common=IMAGE),
+        dependencies=runtime_dependencies(common=IMAGE, transformers="5.18.0"),
         model_id="minicpm-v-4.7-35b-a3b",
         display_name="MiniCPM-V 4.7 35B-A3B",
         family="minicpm-v-4.7",
+        config_resolver="xhmodel_merak.model_integrations.minicpm_v_4_7.planning:resolve_config",
         export_name="minicpm_v_4_7_35b_a3b",
         task="vision-language-generation",
         modalities=("text", "image"),
-        variants=(variant("full", _MOE_WORKFLOW),),
+        variants=(
+            variant("full", _MOE_WORKFLOW),
+            variant(
+                "dflash",
+                _MOE_WORKFLOW.replace("w8a8.yaml", "w8a8_dflash.yaml"),
+                speculative_mode="dflash",
+            ),
+        ),
         default_precision=ResolvedPrecision(weight="w8", activation="a8"),
         supported_precisions=(("w8", "a8"),),
         quant_methods=(),

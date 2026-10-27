@@ -26,6 +26,19 @@
 不属于当前 CI。当前 [Qwen block 导出](../../../benchmark_test/ci_test_transformer5.16.0/test_qwen35_35b_a3b_block_export.py)
 检查其固定配置的导出链路，并不穷举四路精度组合；新增这类回归应在当前 CI 内补用例与 impact。
 
+## MiniCPM-V-4.7：Decode/Verify 的因果 V 量化
+
+MiniCPM 的非 FA 文本 Decode/Verify 图在每个 query 的 P×V 之前，用
+`LessOrEqual → Where` 把该 query 不可见的 V-cache 置零。
+HMFP 沿 P×V 的 token reduction 轴共享指数；仅将未来 token 的概率设为零，
+不能阻止它的 V 值改变有效前缀的量化尺度。被拒绝的草稿留下的 cache 同样需要屏蔽。
+图中只有 P×V 按 query 展开，投影、专家和 Q×K 仍按整个 verify block 计算；
+Prefill 保留原来的批量图。这是 ModelZoo 的因果图表达，不修改 SDK 的矩阵乘算子。
+
+[当前回归](../../../benchmark_test/ci_test_transformer5.16.0/test_minicpm_causal_decode.py)
+用真实 SDK 导出和执行 A8/A16 HMONNX，保留 GQA、64-token 尺度边界及污染的未来
+cache，验证普通 Decode 与多 token Verify 的有效前缀完全一致；不等同于真机验证。
+
 ## MLA：权重融合不等于共享量化 cache
 
 Ling 的 XH2a 路径允许 Q/K 与 V/output 权重吸收，但保持 Q/K 的 D=C+R、V 的 D=C。

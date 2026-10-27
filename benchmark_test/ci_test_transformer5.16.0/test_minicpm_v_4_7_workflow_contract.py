@@ -82,7 +82,9 @@ def test_minicpm_v47_recipes_point_at_root_metadata_workflows(
     assert export["model"]["chip_arch"] == "XH2a"
     assert export["model"]["model_type"] == model_type
     assert set(export["components"]) == set(COMPONENTS)
-    assert export["vision"]["token_capacity"] == 1536
+    assert export["vision"]["patch_token_gears"] == [384, 784, 1536, 2816, 6144]
+    assert "image_token_gears" not in export["vision"]
+    assert "token_capacity" not in export["vision"]
 
     workflow = AutoWorkflow.from_config("/tmp/minicpm-v-4-7", str(config_path))
     assert type(workflow).__name__ == "MiniCPMV47Workflow"
@@ -105,12 +107,32 @@ def test_minicpm_v47_example_helpers_are_importable() -> None:
         )
     )
     assert overrides == {
+        "export.vision.patch_token_gears": None,
+        "export.vision.image_token_gears": None,
         "export.vision.token_capacity": 64,
         "export.model.context_max_length": 1024,
         "export.model.prefill_chunk_length": 128,
         "export.components.vision_4x.quant_type": "w8a8h1_sefp",
         "export.components.vision_16x.quant_type": "w8a8h1_sefp",
         "export.components.llm.quant_type": "w8a8h1_sefp",
+    }
+    gears = workflow._overrides(SimpleNamespace(
+        token_capacity=None, image_token_gears=[96, 196, 384, 704, 1536],
+        context_length=None, prefill_length=None, quant_type=None,
+    ))
+    assert gears == {
+        "export.vision.patch_token_gears": None,
+        "export.vision.token_capacity": None,
+        "export.vision.image_token_gears": [96, 196, 384, 704, 1536],
+    }
+    patches = workflow._overrides(SimpleNamespace(
+        token_capacity=None, patch_token_gears=[384, 784, 1536, 2816, 6144],
+        context_length=None, prefill_length=None, quant_type=None,
+    ))
+    assert patches == {
+        "export.vision.image_token_gears": None,
+        "export.vision.token_capacity": None,
+        "export.vision.patch_token_gears": [384, 784, 1536, 2816, 6144],
     }
 
     assert summarize._fmt("OCRBench", 123.4) == "123"
@@ -120,3 +142,78 @@ def test_minicpm_v47_example_helpers_are_importable() -> None:
     assert str(float_demo._dtype("fp16")).endswith("float16")
     assert callable(hmonnx_demo.parse_args)
     assert callable(float_demo.parse_args)
+
+
+@pytest.mark.parametrize("dflash", (False, True))
+def test_minicpm35b_autoround_release_configs_keep_dynamic_vision(dflash):
+    suffix = "_dflash" if dflash else ""
+    path = MOE_CONFIG.parent / f"minicpm_v_4_7_moe_xh2a_w4a8_autoround{suffix}.yaml"
+    raw = yaml.safe_load(path.read_text())
+    assert raw["quant"]["method"] == "autoround"
+    assert raw["quant"]["bits"] == 4
+    assert raw["quant"]["iters"] == 400
+    assert raw["export"]["vision"]["patch_token_gears"] == [384, 784, 1536, 2816, 6144]
+    assert raw["export"]["model"]["quant_scheme"]["quant_type"] == "w4a8h0_ssfp"
+    assert raw["export"]["components"]["vision_4x"]["quant_type"] == "w8a8h1_sefp"
+    if dflash:
+        assert raw["export"]["model"]["spec_decode_mode"] == "dflash"
+        assert raw["export"]["model"]["num_draft_tokens"] == 3
+    else:
+        assert "spec_decode_mode" not in raw["export"]["model"]
+
+
+@pytest.mark.parametrize("dflash", (False, True))
+def test_minicpm35b_float_qdq_export_preserves_mixed_bits(dflash, tmp_path):
+    """The SDK must retain W4 experts without lowering W8 host projections."""
+    import onnx
+    import torch
+    from xhquant.nn import MoeBlock
+    from xhquant.api import (
+        PrecisionMode, convert_quanted_model_to_hmonnx, ptq_quantize,
+        to_frontend_graph, to_quant_graph,
+    )
+
+    suffix = "_dflash" if dflash else ""
+    path = MOE_CONFIG.parent / f"minicpm_v_4_7_moe_xh2a_w4a8_autoround{suffix}.yaml"
+    scheme = yaml.safe_load(path.read_text())["export"]["model"]["quant_scheme"]
+
+    class Projections(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attention = torch.nn.Linear(64, 64, bias=False)
+            self.conv = torch.nn.Conv2d(64, 64, (1, 3), padding=(0, 1), groups=64, bias=False)
+            self.experts = MoeBlock(
+                "silu", 2,
+                expert_gate_proj_weight=torch.randn(4, 64, 64) * 0.02,
+                expert_up_proj_weight=torch.randn(4, 64, 64) * 0.02,
+                expert_down_proj_weight=torch.randn(4, 64, 64) * 0.02,
+            )
+
+        def forward(self, hidden, scores):
+            return (
+                self.attention(hidden), self.conv(hidden.transpose(1, 2).unsqueeze(2)),
+                self.experts(hidden, scores), torch.matmul(hidden, hidden.transpose(1, 2)),
+            )
+
+    inputs = [torch.randn(1, 2, 64).half(), torch.randn(1, 2, 4).softmax(-1).half()]
+    frontend = to_frontend_graph(Projections().half().eval(), "TorchFX", inputs)
+    quantized = to_quant_graph(frontend, "XH2a", scheme)
+    assert quantized.attention.w_cfg.qspec.man_bit == 8
+    assert quantized.conv.w_cfg.qspec.man_bit == 8
+    assert quantized.experts.w_cfg.qspec.man_bit == 4
+    ptq_quantize(quantized, [inputs], PrecisionMode.ALIGNED, ["cpu"],
+                 auto_release_unused_parameters=True, infer_shape=False)
+    output = tmp_path / "mixed.onnx"
+    convert_quanted_model_to_hmonnx(quantized, inputs, str(output))
+    graph = onnx.load(output)
+    observed = {}
+    matmuls = []
+    for node in graph.graph.node:
+        attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
+        if node.op_type in ("Linear", "Conv2d", "MoeBlock"):
+            observed[node.op_type] = attrs["hmfp_weight_man_bit"]
+        if node.op_type == "MatMul":
+            # HMONNX names the second MatMul activation as the weight operand.
+            matmuls.append((attrs["hmfp_act_man_bit"], attrs["hmfp_weight_man_bit"]))
+    assert observed == {"Linear": 8, "Conv2d": 8, "MoeBlock": 4}
+    assert matmuls == [(16, 16)]

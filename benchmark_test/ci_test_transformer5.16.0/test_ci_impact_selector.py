@@ -45,7 +45,15 @@ def test_minicpm47_preprocess_callers_select_focused_cpu_contract(filename):
     changed_path = f"xhmodel_merak/xh_llm/models/minicpm_v_4_7/{filename}"
     selection = select_for_changes([changed_path], repo_root=REPO_ROOT)
     contract = f"{SUITE_RELATIVE}/test_minicpm_v_4_7_preprocess_contract.py"
-    assert set(selection.tests) == POLICY_GATES | {contract}
+    expected = POLICY_GATES | {contract, f"{SUITE_RELATIVE}/test_minicpm_v_4_7_dspark.py"}
+    expected.add(f"{SUITE_RELATIVE}/test_minicpm_les.py")
+    if filename == "inference.py":
+        expected.add(f"{SUITE_RELATIVE}/test_minicpm_dynamic_vision.py")
+        expected.add(f"{SUITE_RELATIVE}/test_minicpm_vision_gears.py")
+    else:
+        expected.add(f"{SUITE_RELATIVE}/test_minicpm_causal_decode.py")
+        expected.add(f"{SUITE_RELATIVE}/test_minicpm_v_4_7_auto_classes.py")
+    assert set(selection.tests) == expected
     assert selection.uncovered_files == ()
     assert selection.full_suite is False
     assert f"rule:minicpm-v47-text-preprocess-contract:{changed_path}" in selection.reasons[contract]
@@ -65,7 +73,11 @@ def test_minicpm_v_series_helpers_select_focused_cpu_contract(filename):
     changed_path = f"xhmodel_merak/xh_llm/minicpm_v_series/{filename}"
     selection = select_for_changes([changed_path], repo_root=REPO_ROOT)
     contract = f"{SUITE_RELATIVE}/test_minicpm_v_series_contract.py"
-    assert set(selection.tests) == POLICY_GATES | {contract}
+    expected = POLICY_GATES | {contract}
+    if filename in {"token_capacity_vision.py", "token_capacity_vision_export.py"}:
+        expected.add(f"{SUITE_RELATIVE}/test_minicpm_dynamic_vision.py")
+        expected.add(f"{SUITE_RELATIVE}/test_minicpm_vision_gears.py")
+    assert set(selection.tests) == expected
     assert selection.uncovered_files == ()
     assert selection.full_suite is False
     assert f"rule:minicpm-v-series-shared-helpers:{changed_path}" in selection.reasons[contract]
@@ -542,6 +554,12 @@ def test_minicpm47_declaration_change_does_not_select_gemma_or_bge():
     ], repo_root=REPO_ROOT)
     assert set(selection.tests) == POLICY_GATES | {
         f"{SUITE_RELATIVE}/test_minicpm_v_4_7_preprocess_contract.py",
+        f"{SUITE_RELATIVE}/test_minicpm_v_4_7_dspark.py",
+        f"{SUITE_RELATIVE}/test_minicpm_dynamic_vision.py",
+        f"{SUITE_RELATIVE}/test_minicpm_vision_gears.py",
+        f"{SUITE_RELATIVE}/test_minicpm_causal_decode.py",
+        f"{SUITE_RELATIVE}/test_minicpm_v_4_7_auto_classes.py",
+        f"{SUITE_RELATIVE}/test_minicpm_les.py",
     }
     assert selection.full_suite is False
 

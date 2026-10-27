@@ -5,7 +5,7 @@ import pytest
 from _unified_cases import cases_for
 from _unified_runner import check_case_result
 
-CASE_SPEC = ('minicpm-v-4.7-35b-a3b', 'minicpm_v47', '_unified_fixtures.minicpm_v47', ('full',))
+CASE_SPEC = ('minicpm-v-4.7-35b-a3b', 'minicpm_v47', '_unified_fixtures.minicpm_v47', ('full', 'dflash'))
 
 
 @pytest.mark.parametrize("case", cases_for(__file__), ids=lambda case: case.id)

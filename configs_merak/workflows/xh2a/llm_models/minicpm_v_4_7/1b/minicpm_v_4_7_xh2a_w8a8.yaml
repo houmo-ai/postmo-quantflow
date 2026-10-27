@@ -19,7 +19,7 @@ export:
       quant_type: w8a8h1_sefp
 
   vision:
-    token_capacity: 1536
+    patch_token_gears: [384, 784, 1536, 2816, 6144]
     keep_onnx: false
 
   components:

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-v47-auto-classes",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/auto_classes.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/text_model.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/processor_compat.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/positions.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/vision_export.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/workflow.py"
+      ]
+    },
+    {
+      "id": "test_minicpm_v_4_7_auto_classes-native-fixture",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_minicpm_v47_fixture.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/minicpmv4_7/**"
+      ]
+    }
+  ]
+}

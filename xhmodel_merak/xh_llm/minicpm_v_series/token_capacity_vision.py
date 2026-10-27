@@ -7,7 +7,6 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-
 PATCH_SIZE = 14
 DEFAULT_TOKEN_CAPACITY = 1536
 
@@ -20,20 +19,26 @@ def _vision_attention(
     batch_size, sequence_length, hidden_size = hidden_states.shape
     num_heads = int(attention.num_heads)
     head_dim = int(attention.head_dim)
-    head_shape = (batch_size, sequence_length, num_heads, head_dim)
-
-    query = attention.q_proj(hidden_states).view(head_shape).transpose(1, 2)
-    key = attention.k_proj(hidden_states).view(head_shape).transpose(1, 2)
-    value = attention.v_proj(hidden_states).view(head_shape).transpose(1, 2)
-    scores = torch.matmul(query, key.transpose(2, 3)) * float(attention.scaling)
-    if attention_bias is not None:
-        scores = scores + attention_bias.to(dtype=scores.dtype)
-    probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
-    output = torch.matmul(probabilities, value)
+    query = attention.q_proj(hidden_states).reshape(batch_size, sequence_length, num_heads, head_dim).transpose(1, 2)
+    key = attention.k_proj(hidden_states).reshape(batch_size, sequence_length, num_heads, head_dim).transpose(1, 2)
+    value = attention.v_proj(hidden_states).reshape(batch_size, sequence_length, num_heads, head_dim).transpose(1, 2)
+    # Chunk only the query axis. Every query still attends to every key,
+    # with the same key-padding bias and Softmax normalization. Static bounds
+    # keep this traceable while avoiding a 24576 x 24576 score allocation.
+    chunk_size = attention.query_chunk_size
+    chunks = []
+    for start in range(0, attention.query_sequence_length, chunk_size):
+        scores = torch.matmul(query[:, :, start : start + chunk_size], key.transpose(2, 3))
+        scores = scores * float(attention.scaling)
+        if attention_bias is not None:
+            scores = attention.masked_add(scores, attention_bias.to(dtype=scores.dtype))
+        probabilities = attention.softmax(scores)
+        chunks.append(torch.matmul(probabilities, value))
+    output = torch.cat(chunks, dim=2) if len(chunks) > 1 else chunks[0]
     output = (
         output.transpose(1, 2)
         .contiguous()
-        .view(
+        .reshape(
             batch_size,
             sequence_length,
             hidden_size,
@@ -84,14 +89,35 @@ class MiniCPMTokenCapacityVisionExportModel(nn.Module):
         self.model_label = str(model_label)
         self.token_capacity = int(token_capacity)
         self.downsample_mode = downsample_mode
+        self.hidden_size = int(vision_tower.config.hidden_size)
         self.insert_layer_id = int(vision_tower.config.insert_layer_id)
 
         self.patch_embedding = vision_tower.embeddings.patch_embedding
         self.position_embedding = vision_tower.embeddings.position_embedding
         self.encoder_layers = vision_tower.encoder.layers
         self.vit_merger = vision_tower.vit_merger
+        self.window_chunk_size = min(self.token_capacity // 4, 2048)
         self.post_layernorm = vision_tower.post_layernorm
         self.output_merger = merger
+
+        from xhquant import nn as xhnn
+
+        # Match Qwen3.5's quantizable key-padding mask. These leaf modules
+        # must survive TorchFX until quantization; eager ONNX expands them.
+        for layer_index, layer in enumerate(self.encoder_layers):
+            attention = layer.self_attn
+            length = self.token_capacity
+            if downsample_mode == "16x" and layer_index > self.insert_layer_id:
+                length //= 4
+            attention.masked_add = xhnn.MaskedAdd()
+            attention.softmax = xhnn.Softmax(dim=-1)
+            attention.query_sequence_length = length
+            attention.query_chunk_size = 1024 if length > 6144 else length
+        attention = self.vit_merger.self_attn
+        attention.masked_add = xhnn.MaskedAdd()
+        attention.softmax = xhnn.Softmax(dim=-1)
+        attention.query_sequence_length = 4
+        attention.query_chunk_size = 4
 
         window_size = tuple(int(value) for value in self.vit_merger.window_kernel_size)
         if window_size != (2, 2):
@@ -107,6 +133,7 @@ class MiniCPMTokenCapacityVisionExportModel(nn.Module):
             )
         total_merge_rounds = output_merge_rounds + (1 if downsample_mode == "16x" else 0)
         output_divisor = 4**total_merge_rounds
+        self.output_token_capacity = self.token_capacity // output_divisor
         if self.token_capacity % output_divisor:
             raise ValueError(
                 f"token_capacity={self.token_capacity} must be divisible by {output_divisor} for {downsample_mode}"
@@ -119,10 +146,17 @@ class MiniCPMTokenCapacityVisionExportModel(nn.Module):
         residual = hidden_states
         hidden_states = merger.layer_norm1(hidden_states)
 
-        hidden_size = hidden_states.shape[-1]
-        num_windows = hidden_states.shape[1] // 4
+        hidden_size = self.hidden_size
+        num_windows = self.token_capacity // 4
         windows = hidden_states.reshape(num_windows, 4, hidden_size)
-        attended = self._attention(merger.self_attn, windows)
+        # Windows are independent. Bound the window batch as well as the
+        # global query axis; 6144 windows x 16 heads exceeds CUDA's 65535
+        # batch-grid limit in the aligned HMONNX MatMul implementation.
+        chunks = [
+            self._attention(merger.self_attn, windows[start : start + self.window_chunk_size])
+            for start in range(0, num_windows, self.window_chunk_size)
+        ]
+        attended = torch.cat(chunks, dim=0) if len(chunks) > 1 else chunks[0]
         hidden_states = residual + attended.reshape(1, self.token_capacity, hidden_size)
 
         windows = hidden_states.reshape(num_windows, 4, hidden_size)
@@ -133,12 +167,10 @@ class MiniCPMTokenCapacityVisionExportModel(nn.Module):
         hidden_states = merger.linear_2(hidden_states)
         return (hidden_states + residual).unsqueeze(0)
 
-    @staticmethod
-    def _merge_consecutive(hidden_states: torch.Tensor) -> torch.Tensor:
+    def _merge_consecutive(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Flatten each consecutive four-token 2x2 group."""
 
-        hidden_size = hidden_states.shape[-1]
-        return hidden_states[0].reshape(hidden_states.shape[1] // 4, 4 * hidden_size)
+        return hidden_states[0].reshape(self.output_token_capacity, 4 * self.hidden_size)
 
     def forward(
         self,
@@ -147,7 +179,9 @@ class MiniCPMTokenCapacityVisionExportModel(nn.Module):
         pre_attention_bias: torch.Tensor,
         post_attention_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        hidden_states = self.patch_embedding(pixel_values.to(dtype=self.patch_embedding.weight.dtype))
+        # The host/exporter supplies the graph input dtype. Reading a Conv
+        # weight's dtype here would outlive weights removed by quantization.
+        hidden_states = self.patch_embedding(pixel_values)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
         hidden_states = hidden_states + self.position_embedding(position_ids)
 
@@ -354,7 +388,12 @@ def build_token_capacity_attention_biases(
     dtype: torch.dtype,
     device: torch.device | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Mask the padded tail before and after the optional ViT merger."""
+    """Mask C-N padded keys, where N=H_patch*W_patch and C=token_capacity.
+
+    Valid keys get zero; padded keys get the finite minimum of the input
+    dtype, as in Qwen3.5. After the 16x path's first 2x2 merger, lengths are
+    N/4 and C/4. Grid alignment keeps every merge window wholly valid or pad.
+    """
 
     validate_token_capacity(target_size, token_capacity, downsample_mode)
     height, width = target_size

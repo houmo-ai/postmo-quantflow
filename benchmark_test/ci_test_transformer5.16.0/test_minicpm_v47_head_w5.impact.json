@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-v47-calibrated-w5-head",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/test_minicpm_v_4_7_auto_classes.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/quant_llm.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/workflow.py",
+        "xhmodel_merak/xh_llm/shared_head.py",
+        "examples_merak/llm/minicpm_v_4_7/minicpm_v_4_7_workflow.py",
+        "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/*head_w5*.yaml"
+      ]
+    },
+    {
+      "id": "test_minicpm_v47_head_w5-native-fixture",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_minicpm_v47_fixture.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/minicpmv4_7/**"
+      ]
+    }
+  ]
+}

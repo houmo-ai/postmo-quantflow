@@ -336,6 +336,15 @@ decode, cache ordering, and the page-attention input ABI. The two MiniCPM
 callers and their shared Qwen3.5 preprocessing/cache helpers select this test;
 this is not a full MiniCPM vision/export/runtime correctness suite.
 
+MiniCPM-V-4.7 focused tests load the checksum-pinned, unmodified Transformers
+5.18.0 model files in `fixtures/minicpmv4_7/` for their test module only. The
+shared CI environment stays on 5.16.1; tests neither install packages nor
+download weights. Tiny native Dense/MoE and vision models cover loading,
+padding, vision gears, packed heads, LES and DSpark export/runtime contracts.
+The two unified MiniCPM cases check packaging and relocation with an export
+stub; they do not run full multimodal inference. Keep their preparation in
+`_unified_fixtures/minicpm_v47.py` so a private change selects only MiniCPM.
+
 ## Unified model and variant regressions
 
 Each `test_unified_model_<model>.py` declares its model, preparation module and

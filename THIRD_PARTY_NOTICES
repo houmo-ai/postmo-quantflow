@@ -46,6 +46,17 @@ License texts: licenses/Ling-3.0-flash/LICENSE and LICENSE-MIT.
 The local config uses one tiny MLA/MoE layer for CPU loader tests without FLA.
 No pretrained weights, tokenizer, or upstream inference service is included.
 
+MiniCPM-V-4.7 native model code (CI fixture only)
+----------------------------------------------------------------------
+Source: https://github.com/huggingface/transformers/tree/v5.18.0/src/transformers/models/minicpmv4_7
+Version: Transformers 5.18.0 (wheel and file SHA-256 digests in source.json)
+Files: benchmark_test/ci_test_transformer5.16.0/fixtures/minicpmv4_7/
+    configuration_minicpmv4_7.py and modeling_minicpmv4_7.py (unmodified)
+Copyright 2026 OpenBMB and the HuggingFace Inc. team. All rights reserved.
+License: Apache License 2.0; full text in licenses/Transformers/LICENSE.
+The test loader scopes these files to their test module on Transformers 5.16.1.
+No pretrained weights or tokenizer assets are included.
+
 1. Third-party open source libraries
 ----------------------------------------------------------------------
 half (half-precision floating-point library)

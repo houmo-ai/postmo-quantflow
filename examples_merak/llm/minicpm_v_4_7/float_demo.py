@@ -52,9 +52,9 @@ def _dtype(name: str) -> str | torch.dtype:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
-    if Version(transformers_version) < Version("5.7.0"):
+    if Version(transformers_version) < Version("5.18.0.dev0"):
         raise RuntimeError(
-            f"MiniCPM-V-4.7 requires transformers>=5.7.0; found transformers=={transformers_version}"
+            f"MiniCPM-V-4.7 requires transformers>=5.18.0; found transformers=={transformers_version}"
         )
     if not args.model_dir.is_dir():
         raise FileNotFoundError(f"Model directory does not exist: {args.model_dir}")

@@ -145,6 +145,7 @@ def test_qwen38_exposes_dflash2_dependency_profile():
 
 def test_registered_dependencies_pin_tested_versions():
     for recipe in list_recipes():
+        transformers_version = "5.18.0" if recipe.family == "minicpm-v-4.7" else "5.16.1"
         for variant in recipe.variants:
             profile = dependency_profile(recipe, variant)
             assert profile["python"] == "==3.12.13"
@@ -154,7 +155,9 @@ def test_registered_dependencies_pin_tested_versions():
                 profile["checkpoint_build"],
                 *profile["quantization"].values(),
             ):
-                assert "transformers==5.16.1" in phase["pip"]
+                assert [r for r in phase["pip"] if r.startswith("transformers==")] == [
+                    f"transformers=={transformers_version}"
+                ]
                 for requirement in phase["pip"]:
                     parsed = Requirement(requirement)
                     if parsed.url:

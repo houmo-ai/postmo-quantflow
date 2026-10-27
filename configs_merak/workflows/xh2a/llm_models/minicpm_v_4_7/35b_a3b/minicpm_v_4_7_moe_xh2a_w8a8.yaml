@@ -2,6 +2,7 @@ quant: null
 
 export:
   model:
+    les_prediction_k: 0
     chip_arch: XH2a
     model_type: MiniCPMV47MoeForConditionalGeneration
     hf_model: null
@@ -35,7 +36,7 @@ export:
       ops: {}
 
   vision:
-    token_capacity: 1536
+    patch_token_gears: [384, 784, 1536, 2816, 6144]
     keep_onnx: false
 
   components:

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-causal-value-quantization",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/text_model.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/causal_values.py"
+      ]
+    }
+  ]
+}

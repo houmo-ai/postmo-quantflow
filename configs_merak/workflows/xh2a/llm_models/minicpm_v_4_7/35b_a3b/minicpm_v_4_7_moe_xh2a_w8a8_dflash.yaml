@@ -1,0 +1,59 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: MiniCPMV47MoeForConditionalGeneration
+    hf_model: null
+    model_name: minicpm_v_4_7_qwen3_5_moe_35b_a3b
+    context_max_length: 8192
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    support_long_context_over_fp16_limit: true
+    use_cache: true
+    num_logits_to_keep: 1
+    linear_attention_mode: auto
+    linear_chunk_size: 64
+    flash_attention:
+      enable: false
+      q_bits: 8
+      k_bits: 8
+      v_bits: 8
+      p_bits: 8
+    split_conv_cache: true
+    normalize_force_fp32: false
+    use_manual_depthwise_conv1d: false
+    fuse_gdr_ops: true
+    fuse_gdr_block_recurrent_ops: true
+    only_first_block: false
+    spec_decode_mode: dflash
+    # The assistant retains all 15 queries; verify 3 proposals by default.
+    num_draft_tokens: 3
+    dflash_config:
+      hf_model: null  # supply --dflash-model-dir, or unified sources.dflash
+      enable_confidence_truncation: false
+      confidence_threshold: 0.3
+    visual_config: null
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+
+  vision:
+    patch_token_gears: [384, 784, 1536, 2816, 6144]
+    keep_onnx: false
+
+  components:
+    vision_4x:
+      enabled: true
+      quant_type: w8a8h1_sefp
+      validation_target: [30, 40]
+    vision_16x:
+      enabled: true
+      quant_type: w8a8h1_sefp
+      validation_target: [28, 40]
+    llm:
+      enabled: true
+      quant_type: w8a8h1_sefp

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -32,6 +33,8 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
         if workflow_config.quant is None:
             return QuantResult(raw_model_dir=self.model_dir, skipped=True)
 
+        from .auto_classes import register_minicpmv47_auto_classes
+
         quant_cfg = workflow_config.quant
         if not isinstance(quant_cfg, Mapping):
             raise TypeError("MiniCPM-V-4.7 quant must be a mapping")
@@ -42,6 +45,7 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
                 "MiniCPMV47Workflow currently supports quant.algorithm=gptqmodel; "
                 f"got algorithm={algorithm!r}"
             )
+        register_minicpmv47_auto_classes()
         if method in {"gptq", "gptqmodel"}:
             from .quant_llm import quantize_minicpm_v47_llm_gptq
 
@@ -77,16 +81,16 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
     ) -> ExportResult:
         import torch
 
-        from xhmodel_merak.xh_llm.models.qwen3_5.xh_qwen3_5_config import (
-            XHQwen3_5ModelConfig,
-        )
+        from .dspark_config import MiniCPMV47ModelConfig as XHQwen3_5ModelConfig
         from xhmodel_merak.xh_llm.models.qwen3_5_moe.xh_qwen3_5_moe_config import (
             XHQwen3_5MoeModelConfig,
         )
         from xhquant.api import xhquant_init
 
+        from .auto_classes import register_minicpmv47_auto_classes
         from .model import XHMiniCPMV47Model, XHMiniCPMV47MoeModel
-        from .vision_export import export_vision_profile
+        from .vision_export import export_vision_gears, export_vision_profile
+        from xhmodel_merak.xh_llm.minicpm_v_series.vision_gears import image_token_gears_from_patches
 
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         # Host (vision + llm) always loads from the raw MiniCPM directory;
@@ -117,6 +121,35 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
                 f"{_DENSE_MODEL_TYPE!r} or {_MOE_MODEL_TYPE!r}, got {model_type!r}"
             )
 
+        spec_mode = model_cfg.get("spec_decode_mode")
+        prediction_k = model_cfg.get("les_prediction_k", 0)
+        if type(prediction_k) is not int or prediction_k < 0:
+            raise ValueError("les_prediction_k must be a nonnegative integer")
+        if prediction_k:
+            if model_type != _MOE_MODEL_TYPE or spec_mode:
+                raise ValueError("LES requires MiniCPM MoE single-token ordinary decode")
+            if (model_cfg.get("dynamic_prune") or {}).get("mode", "off") != "off":
+                raise ValueError("LES cannot be combined with ACEP pruning")
+            from .les import validate_prediction_k
+
+            native_cfg = json.loads((Path(model_dir) / "config.json").read_text())
+            validate_prediction_k(prediction_k, native_cfg["text_config"]["num_experts"])
+        if spec_mode not in (None, "dflash"):
+            raise ValueError("MiniCPM-V-4.7 supports spec_decode_mode=dflash")
+        if spec_mode:
+            from xhmodel_merak.xh_llm.models.minicpm_v_4_7.draft_checkpoint import validate_draft_target
+
+            draft_dir = (model_cfg.get("dflash_config") or {}).get("hf_model")
+            if not draft_dir:
+                raise ValueError("MiniCPM DFlash requires export.model.dflash_config.hf_model")
+            draft = validate_draft_target(draft_dir, model_dir)
+            capacity = int(draft["dflash_config"]["block_size"])
+            if draft.get("architectures") != ["Qwen3DSparkModel"]:
+                capacity -= 1
+            proposals = model_cfg.get("num_draft_tokens", 9)
+            if type(proposals) is not int or not 1 <= proposals <= capacity:
+                raise ValueError(f"MiniCPM num_draft_tokens must be between 1 and {capacity}")
+
         model_quant_scheme = model_cfg.get("quant_scheme")
         if model_quant_scheme is None:
             model_quant_scheme = {"quant_type": "w8a8h1_sefp"}
@@ -126,6 +159,17 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
         model_default_quant_type = str(model_quant_scheme.get("quant_type", "w8a8h1_sefp"))
         model_quant_scheme["quant_type"] = model_default_quant_type
 
+        from xhmodel_merak.xh_llm.shared_head import target_head_bits
+
+        head_bits = target_head_bits(model_quant_scheme)
+        if head_bits < 8:
+            from .quant_llm import validate_causal_head_checkpoint
+
+            if quant_result.skipped or not quant_result.quanted_model_dir:
+                raise ValueError("MiniCPM low-bit head export requires a calibrated quanted_model_dir")
+            validate_causal_head_checkpoint(quant_result.quanted_model_dir, head_bits)
+
+        register_minicpmv47_auto_classes()
         work_dir = Path(output_dir).resolve()
         if work_dir.exists() and any(work_dir.iterdir()):
             raise FileExistsError(
@@ -144,12 +188,20 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
         if unsupported:
             raise ValueError(f"Unsupported MiniCPM component(s): {unsupported}")
 
+        # Package tokenizer/processor resources so the artifact can move away
+        # from the source checkpoint without retaining 35B model weights.
+        resource_dir = work_dir / "hf_config"
+        resource_dir.mkdir()
+        for source in Path(model_dir).iterdir():
+            if source.is_file() and source.suffix in {".json", ".jinja", ".txt", ".model", ".py"} and not source.name.endswith(".index.json"):
+                shutil.copy2(source, resource_dir / source.name)
+
         meta: dict[str, Any] = {
             "schema_version": 1,
             "create_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "model_type": "MiniCPM-V-4.7",
             "merak_model_type": model_type,
-            "hf_model": model_dir,
+            "hf_model": "hf_config",
             "target_device": target_device,
             "config": str(Path(config_file).relative_to(work_dir)),
             "components": [],
@@ -159,7 +211,12 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
         vision_cfg = export_cfg.get("vision") or {}
         if not isinstance(vision_cfg, Mapping):
             raise TypeError("MiniCPM export.vision must be a mapping")
-        token_capacity = int(vision_cfg.get("token_capacity", 1536))
+        image_token_gears = vision_cfg.get("image_token_gears")
+        patch_token_gears = vision_cfg.get("patch_token_gears")
+        if sum(value is not None for value in (
+            image_token_gears, patch_token_gears, vision_cfg.get("token_capacity")
+        )) > 1:
+            raise ValueError("Configure only one of patch_token_gears, image_token_gears or legacy token_capacity")
         keep_onnx = bool(vision_cfg.get("keep_onnx", False))
         for component_name, mode in (("vision_4x", "4x"), ("vision_16x", "16x")):
             component_cfg = components_cfg.get(component_name, False)
@@ -171,12 +228,22 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
                 component_cfg.get("validation_target"),
                 field=f"export.components.{component_name}.validation_target",
             )
-            profile = export_vision_profile(
+            mode_gears = (
+                image_token_gears_from_patches(patch_token_gears, mode)
+                if patch_token_gears is not None else image_token_gears
+            )
+            capacity_kwargs = (
+                {"image_token_gears": mode_gears}
+                if mode_gears is not None
+                else {"token_capacity": int(vision_cfg.get("token_capacity", 1536))}
+            )
+            exporter = export_vision_gears if mode_gears is not None else export_vision_profile
+            profile = exporter(
                 model_dir=model_dir,
                 work_dir=work_dir,
                 target_device=target_device,
                 quant_type=str(component_cfg.get("quant_type", "w8a8h1_sefp")),
-                token_capacity=token_capacity,
+                **capacity_kwargs,
                 downsample_mode=mode,
                 validation_target=validation_target,
                 device=device,
@@ -214,8 +281,10 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
                 }
             )
             if not quant_result.skipped and quant_result.quanted_model_dir:
+                quant_dir = Path(quant_result.quanted_model_dir)
                 llm_model_cfg["quant_weight"] = str(
-                    Path(quant_result.quanted_model_dir) / "pytorch_model.bin"
+                    quant_dir if (quant_dir / "model.safetensors.index.json").is_file()
+                    else quant_dir / "pytorch_model.bin"
                 )
             llm_output_dir = work_dir / "llm"
             llm_model = model_cls(config_cls(**llm_model_cfg))
@@ -245,6 +314,22 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
                 "prefill_chunk_length": int(llm_model_cfg["prefill_chunk_length"]),
             }
             meta["components"].append("llm")
+            if "les" in child_meta:
+                meta["llm"]["les"] = copy.deepcopy(child_meta["les"])
+            if spec_mode:
+                spec = copy.deepcopy(child_meta["spec_decode"])
+                for field in ("context_hmonnx", "context_decode_hmonnx", "decode_hmonnx"):
+                    spec["draft"][field] = child_path(spec["draft"][field])
+                for key in tuple(spec):
+                    if key.endswith("_onnx"):
+                        spec[key] = child_path(spec[key])
+                if spec.get("verify_graphs"):
+                    spec["verify_graphs"] = {length: child_path(path) for length, path in spec["verify_graphs"].items()}
+                meta["llm"]["spec_decode"] = spec
+                meta["components"].append("dflash")
+
+        if spec_mode and "llm" not in meta:
+            raise ValueError("MiniCPM DFlash requires the llm component")
 
         if not meta["components"]:
             raise ValueError("MiniCPM export must enable at least one component")

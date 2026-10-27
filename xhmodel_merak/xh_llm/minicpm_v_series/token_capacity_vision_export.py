@@ -7,6 +7,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import torch.nn as nn
+
 from .token_capacity_vision import (
     build_token_capacity_vision_export_model,
     crop_token_capacity_image_embeds,
@@ -14,8 +16,18 @@ from .token_capacity_vision import (
     validate_token_capacity,
 )
 
-
 BASE_INPUT_NAMES = ("pixel_values", "position_ids", "pre_attention_bias")
+
+
+class _Vision4xExportAdapter(nn.Module):
+    """Keep the three-input 4x ABI when tracing the shared optional-mask wrapper."""
+
+    def __init__(self, model):
+        super().__init__()
+        self.vision = model
+
+    def forward(self, pixel_values, position_ids, pre_attention_bias):
+        return self.vision(pixel_values, position_ids, pre_attention_bias)
 
 
 def vision_input_names(downsample_mode: str) -> tuple[str, ...]:
@@ -42,6 +54,22 @@ def _cosine_similarity(lhs, rhs) -> float:
         rhs.float().reshape(-1),
         dim=0,
     ).item()
+
+
+def _hmonnx_inputs(model_inputs, names, device="cpu"):
+    import torch
+
+    values = []
+    for name, value in zip(names, model_inputs, strict=True):
+        if value.dtype in (torch.int32, torch.int64):
+            values.append(value.to(device))
+        else:
+            # Float reference masks use FP32's minimum. Clamp before the
+            # FP16 ABI cast so padding stays finite (0 / -65504), not -inf.
+            if name.endswith("attention_bias"):
+                value = value.clamp(min=torch.finfo(torch.float16).min)
+            values.append(value.to(device=device, dtype=torch.float16))
+    return tuple(values)
 
 
 def _export_onnx(model, model_inputs, output_path: Path, names: tuple[str, ...]) -> None:
@@ -93,19 +121,24 @@ def _validate_onnx(onnx_path: Path, model_inputs, reference, names: tuple[str, .
 
 
 def _convert_hmonnx(
-    onnx_path: Path,
+    model,
     hmonnx_path: Path,
     model_inputs,
     names: tuple[str, ...],
     target_device: str,
     quant_type: str,
+    device: str = "cpu",
 ) -> None:
     from xhquant.api import (
         ConfigDict,
         DeviceType,
+        PrecisionMode,
         QuantScheme,
-        convert_onnx_to_hmonnx,
+        convert_quanted_model_to_hmonnx,
         create_quant_config,
+        ptq_quantize,
+        to_frontend_graph,
+        to_quant_graph,
     )
 
     device_type = _device_type(target_device, DeviceType)
@@ -123,13 +156,20 @@ def _convert_hmonnx(
         quant_inputs["post_attention_bias"] = float_input_qspec()
     quant_config.inputs = ConfigDict(quant_inputs)
 
+    # As in Qwen3.5, retain MaskedAdd leaves until quantization. Converting
+    # an eager ONNX graph would turn the mask into ordinary Add/Add/Clip.
+    model = model.half().eval().cpu()
+    export_model = _Vision4xExportAdapter(model) if len(names) == 3 else model
+    inputs = list(_hmonnx_inputs(model_inputs, names))
+    frontend = to_frontend_graph(export_model, "TorchFX", inputs)
+    quanted = to_quant_graph(frontend, device_type.name, quant_config)
+    ptq_quantize(quanted, [inputs], PrecisionMode.ALIGNED, [device], infer_shape=False)
+    quanted.fixed()
     hmonnx_path.parent.mkdir(parents=True, exist_ok=True)
-    convert_onnx_to_hmonnx(
-        str(onnx_path),
-        [value.cpu() for value in model_inputs],
-        device_type,
+    convert_quanted_model_to_hmonnx(
+        quanted,
+        inputs,
         str(hmonnx_path),
-        quant_config=quant_config,
         input_names=list(names),
         output_names=["image_embeds"],
     )
@@ -153,12 +193,7 @@ def _validate_hmonnx(
     session = HMONNXInference(str(hmonnx_path))
     session.exec_device = torch_device
     session.to(torch_device)
-    runtime_inputs = tuple(
-        value.to(torch_device)
-        if value.dtype in (torch.int32, torch.int64)
-        else value.to(device=torch_device, dtype=torch.float16)
-        for value in model_inputs
-    )
+    runtime_inputs = _hmonnx_inputs(model_inputs, vision_input_names(downsample_mode), torch_device)
     output = session(*runtime_inputs)
     output = output[0] if isinstance(output, (tuple, list)) else output
     actual = (
@@ -190,6 +225,8 @@ def export_vision_profile(
     artifact_family: str | None = None,
     trust_remote_code: bool = True,
     place_full_model_on_device: bool = False,
+    profile_name: str | None = None,
+    validate_onnx: bool = True,
 ) -> dict[str, Any]:
     """Export and validate one static token-capacity Vision profile."""
 
@@ -200,7 +237,7 @@ def export_vision_profile(
 
     validate_token_capacity(validation_target, token_capacity, downsample_mode)
     logger = get_root_logger()
-    profile_dir = work_dir / f"vision_{downsample_mode}"
+    profile_dir = work_dir / (profile_name or f"vision_{downsample_mode}")
     profile_dir.mkdir(parents=True, exist_ok=True)
     family = artifact_family or model_label.replace(" ", "_")
     artifact_stem = f"{family}_Vision_tokens{token_capacity}_{downsample_mode}_{target_device}_{quant_type}"
@@ -279,20 +316,21 @@ def export_vision_profile(
     del full_model
     if torch_device.type == "cuda":
         torch.cuda.empty_cache()
-    _export_onnx(wrapper, model_inputs, onnx_path, names)
-    onnx_max_abs, onnx_cosine = _validate_onnx(
-        onnx_path,
-        model_inputs,
-        capacity_reference,
-        names,
-    )
+    onnx_max_abs, onnx_cosine = None, None
+    if validate_onnx or keep_onnx:
+        _export_onnx(wrapper, model_inputs, onnx_path, names)
+    if validate_onnx:
+        onnx_max_abs, onnx_cosine = _validate_onnx(
+            onnx_path, model_inputs, capacity_reference, names,
+        )
     _convert_hmonnx(
-        onnx_path,
+        wrapper,
         hmonnx_path,
         model_inputs,
         names,
         target_device,
         quant_type,
+        device=device,
     )
     hmonnx_max_abs, hmonnx_cosine = _validate_hmonnx(
         hmonnx_path,
@@ -303,10 +341,20 @@ def export_vision_profile(
         downsample_mode=downsample_mode,
         device=device,
     )
+    if not torch.isfinite(torch.tensor(hmonnx_cosine)):
+        raise RuntimeError(f"Nonfinite HMONNX/native comparison: cosine={hmonnx_cosine}, max_abs={hmonnx_max_abs}")
+    # Quantization accuracy is recorded per checkpoint, rather than imposing
+    # a Dense-1B threshold on every projector. Dataset acceptance belongs to
+    # validation, while export checks ABI, execution and finite outputs.
 
     result = {
         "downsample_mode": downsample_mode,
         "token_capacity": token_capacity,
+        "token_unit": "input_patch",
+        "padding_policy": "hierarchical_valid_prefix",
+        "attention_mask_format": "additive_key_padding_bias",
+        "attention_mask_operator": "xhquant.nn.MaskedAdd+Softmax",
+        "output_token_divisor": 4 if downsample_mode == "4x" else 16,
         "positions_per_side": positions_per_side,
         "quant_type": quant_type,
         "hmonnx": str(hmonnx_path.relative_to(work_dir)),
@@ -326,7 +374,8 @@ def export_vision_profile(
     if keep_onnx:
         result["onnx"] = str(onnx_path.relative_to(work_dir))
     else:
-        shutil.rmtree(onnx_path.parent)
+        if onnx_path.parent.exists():
+            shutil.rmtree(onnx_path.parent)
     return result
 
 

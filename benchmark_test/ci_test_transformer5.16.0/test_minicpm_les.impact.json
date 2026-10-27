@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-les",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/les*.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/text_model.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/workflow.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_7/inference.py",
+        "xhmodel_merak/model_integrations/minicpm_v_4_7/artifact.py",
+        "examples_merak/llm/minicpm_v_4_7/evaluate_les.py",
+        "examples_merak/llm/minicpm_v_4_7/minicpm_v_4_7_workflow.py",
+        "examples_merak/llm/minicpm_v_4_7/README.md",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_moe.py",
+        "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w8a8.yaml",
+        "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround.yaml",
+        "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround_head_w5.yaml"
+      ]
+    },
+    {
+      "id": "test_minicpm_les-native-fixture",
+      "patterns": [
+        "benchmark_test/ci_test_transformer5.16.0/_minicpm_v47_fixture.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/minicpmv4_7/**"
+      ]
+    }
+  ]
+}

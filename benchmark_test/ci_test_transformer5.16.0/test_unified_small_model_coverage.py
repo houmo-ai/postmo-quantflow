@@ -33,18 +33,19 @@ def test_every_registered_variant_has_a_unique_integration_case():
     assert set(actual) == expected
 
 
-def test_all_variants_share_the_ci_transformers_environment():
+def test_variants_have_compatible_dependencies_within_their_transformers_environment():
     from xhmodel_merak.model_catalog.dependencies import dependency_profile, merge_requirements
 
-    requirements = []
+    requirements = {}
     for recipe in list_recipes():
         for variant in recipe.variants:
             profile = dependency_profile(recipe, variant)
             for phase in ("build", "inference"):
                 values = profile[phase]["pip"]
-                assert [r for r in values if r.startswith("transformers==")] == ["transformers==5.16.1"]
-                requirements.extend(values)
-    merge_requirements(tuple(requirements))
+                version = next(r for r in values if r.startswith("transformers=="))
+                requirements.setdefault(version, []).extend(values)
+    for values in requirements.values():
+        merge_requirements(tuple(values))
 
 
 def _selected_cases(paths):
@@ -127,6 +128,7 @@ def test_helpers_select_only_actual_model_consumers():
     assert selected("_unified_reporting.py") == set()
     assert selected("_unified_assets.py") == {case.id for case in CASES if case.fixture in {"kokoro", "moss", "depthsplat", "minicpmo"}}
     assert selected("_unified_fixtures/deepseek_v4.py") == {case.id for case in CASES if case.fixture == "deepseek_v4"}
+    assert selected("_unified_fixtures/minicpm_v47.py") == {case.id for case in CASES if case.fixture == "minicpm_v47"}
     assert selected("fixtures/unified/qwen_dense.json") == {case.id for case in CASES if case.fixture == "qwen_dense"}
     assert selected("fixtures/depthsplat/release.json") == {case.id for case in CASES if case.fixture == "depthsplat"}
     for helper in ("_unified_runner.py", "_unified_e2e_worker.py", "_unified_preparation.py"):

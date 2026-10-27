@@ -78,7 +78,7 @@ class _MiniCPMV47Adapter:
             meta = load_metadata(meta_file)
             validate_runtime_contract(
                 meta,
-                components=recipe.components,
+                components=recipe.components + next(v for v in recipe.variants if v.name == manifest.get("recipe", {}).get("variant", "full")).extra_components,
                 resolve_file=lambda value, field: artifact_file(root, manifest, value, field),
             )
         except ModelError:
