@@ -6,6 +6,15 @@
 1.7B 和 4B 配置保留 FlashAttention，禁用 PageAttention；Spark 的滑动窗口输入
 处理器尚不支持 PageAttention，显式开启会在量化或模型初始化前报错。
 
+KV cache 按 `layer_types` 分配：滑窗层的物理长度为
+`align16(sliding_window + prefill_chunk_length)`，全局层为 `context_max_length`。
+例如 4B 的 512-token 滑窗和 256-token prefill 对应 768-token 滑窗缓存；
+其 27 个滑窗层不再各自分配完整 context，9 个全局层仍保留完整历史。
+滑窗层使用 `HybridCacheTensor` 记录有效长度，prefill/decode 复用同一容量；
+attention 实际消费的宽度为 `align16(sliding_window + 当前图输入长度 - 1)`。
+导出 metadata 的 `layer_types`、`layer_kv_shapes` 描述逐层布局，加载时校验并按其分配。
+旧产物缺少该布局或仍使用全长滑窗缓存时需要重新导出，不能只修改 metadata。
+
 ## 1.7B：RTN W8A8
 
 模型目录：`data/models/Spark-X2.5-1.7B`。

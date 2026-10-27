@@ -13,6 +13,7 @@ from xhmodel_merak.xh_llm.llm_data_processor import (
 from xhmodel_merak.xh_llm.text_llm_hf_compatible import build_text_llm_with_hf_compatible_v1
 from xhmodel_merak.xh_llm.text_llm_model import TextLLMModel, TextLLMModelConfig
 
+from .kv_cache import SparkKVCacheMixin, build_layer_kv_shapes
 from .spark2_5_hmonnx_inference import XHSpark2_5HMONNXModel
 from .spark_2_5 import Spark2_5Config, Spark2_5ForCausalLM, register_spark2_5
 
@@ -123,8 +124,23 @@ class XHSpark2_5Model(TextLLMModel):  # noqa: N801 - Spark 2_5 public name
         return native_hf_model
 
     def _wraped_post(self, hf_model: Any) -> None:
-        # TextLLMModel already handles the standard Spark2_5 embedding and cache layout.
         super()._wraped_post(hf_model)
+        if self.use_cache:
+            layer_types = list(hf_model.config.layer_types[: self.kvcache_config.num_layers])
+            shapes = build_layer_kv_shapes(
+                layer_types,
+                self.kvcache_config.kv_cache_shape,
+                self.sliding_window,
+                self.config.prefill_chunk_length,
+            )
+            self._kvcache_mixin = SparkKVCacheMixin(self.kvcache_config, layer_types, shapes)
+
+    def _extra_export_metadata(self, output_dir, meta_info):
+        super()._extra_export_metadata(output_dir, meta_info)
+        if self.use_cache:
+            meta_info.layer_types = self._kvcache_mixin.layer_types
+            meta_info.layer_kv_shapes = self._kvcache_mixin.layer_kv_shapes
+        return meta_info
 
     def _get_hf_config_files(self, hf_model_path: Path) -> list[Path]:
         return [
