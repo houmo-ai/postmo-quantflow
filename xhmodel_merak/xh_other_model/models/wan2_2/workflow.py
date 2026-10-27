@@ -188,6 +188,7 @@ def _build_convert_config(export_cfg: Mapping[str, Any]) -> Wan22ConvertConfig:
         base_seed=int(cfg.get("base_seed", 0)),
         use_resolved_float_loader=bool(cfg.get("use_resolved_float_loader", False)),
         release_dit_fp16_weights=bool(cfg.get("release_dit_fp16_weights", True)),
+        normalize_force_fp32=bool(cfg.get("normalize_force_fp32", False)),
     )
     target_device = str(export_cfg.get("target_device", "XH2a"))
     if hasattr(convert_config.quant_scheme, "target_device"):

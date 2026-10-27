@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "wan2-2-workflow-contract",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/wan2_2/**",
+        "configs_merak/workflows/xh2a/other_models/wan2_2/**"
+      ]
+    }
+  ]
+}

@@ -5,6 +5,8 @@
 
 # pyright: reportMissingImports=false
 
+from __future__ import annotations
+
 import json
 import gc
 import math
@@ -12,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Sequence, Tuple
 
 import torch
 from safetensors import safe_open
@@ -28,17 +30,13 @@ from xhquant.api import (
 )
 
 from .common import ensure_wan2_2_repo
-from .dit_wrapper import Wan2_2DiTExportWrapper, build_wan_time_embeddings
-from .t5_wrapper import Wan2_2T5EncoderExportWrapper
-from .vae_wrapper import Wan2_2VAEDecoderExportWrapper, Wan2_2VAEEncoderExportWrapper
-from xh_model_zoo.xh_aigc.models.wan2_2.t5_local import LocalT5EncoderModel
-from xh_model_zoo.xh_aigc.models.wan2_2.vae_local import LocalWan2_1_VAE
 
+# Keep workflow/config imports usable without the optional upstream runtime.
+# Each component imports its model and wrapper only when it is requested.
 ensure_wan2_2_repo()
-from wan.configs import WAN_CONFIGS  # noqa: E402
-from wan.image2video import WanI2V  # noqa: E402
-from wan.modules.model import WanModel  # noqa: E402
-from wan.text2video import WanT2V  # noqa: E402
+
+if TYPE_CHECKING:
+    from wan.modules.model import WanModel
 
 WAN_EXPORT_COMPONENTS = ("t5", "vae_encode", "vae_decode", "low_noise_model", "high_noise_model")
 WAN_SHARED_VAE_COMPONENTS = ("vae_encode", "vae_decode")
@@ -71,6 +69,7 @@ class Wan22ConvertConfig:
     base_seed: int = 0
     use_resolved_float_loader: bool = False
     release_dit_fp16_weights: bool = True
+    normalize_force_fp32: bool = False
 
 
 class Wan22Converter:
@@ -106,6 +105,8 @@ class Wan22Converter:
         return candidates[0]
 
     def _resolve_text_encoder_path(self) -> Path:
+        from wan.configs import WAN_CONFIGS
+
         ckpt_dir = self.pretrained_model_path
         cfg = WAN_CONFIGS[self.config.task]
         return self._resolve_existing_path(
@@ -114,6 +115,8 @@ class Wan22Converter:
         )
 
     def _resolve_vae_path(self) -> Path:
+        from wan.configs import WAN_CONFIGS
+
         ckpt_dir = self.pretrained_model_path
         cfg = WAN_CONFIGS[self.config.task]
         return self._resolve_existing_path(
@@ -123,6 +126,8 @@ class Wan22Converter:
         )
 
     def _resolve_noise_model_path(self, noise_model_name: str) -> Path:
+        from wan.configs import WAN_CONFIGS
+
         ckpt_dir = self.pretrained_model_path
         cfg = WAN_CONFIGS[self.config.task]
         if noise_model_name == "low_noise_model":
@@ -190,6 +195,8 @@ class Wan22Converter:
         return ckpt_dir / subfolder
 
     def _build_wan_model_from_config(self, cfg, *, is_i2v: bool) -> WanModel:
+        from wan.modules.model import WanModel
+
         model_kwargs = dict(
             model_type="i2v" if is_i2v else "t2v",
             patch_size=cfg.patch_size,
@@ -215,6 +222,8 @@ class Wan22Converter:
         return model
 
     def _load_noise_model_from_path(self, cfg, *, device: torch.device, noise_model_name: str):
+        from wan.modules.model import WanModel
+
         model_path = self._resolve_noise_model_path(noise_model_name)
         if model_path.is_dir():
             subfolder = cfg.low_noise_checkpoint if noise_model_name == "low_noise_model" else cfg.high_noise_checkpoint
@@ -246,6 +255,8 @@ class Wan22Converter:
 
         text_encoder = None
         if need_text_encoder:
+            from xh_model_zoo.xh_aigc.models.wan2_2.t5_local import LocalT5EncoderModel
+
             text_encoder_path = self._resolve_text_encoder_path()
             text_encoder = LocalT5EncoderModel(
                 text_len=cfg.text_len,
@@ -258,6 +269,8 @@ class Wan22Converter:
 
         vae = None
         if need_vae:
+            from xh_model_zoo.xh_aigc.models.wan2_2.vae_local import LocalWan2_1_VAE
+
             vae_path = self._resolve_vae_path()
             vae = LocalWan2_1_VAE(
                 vae_pth=str(vae_path),
@@ -301,6 +314,8 @@ class Wan22Converter:
         rank: int = 0,
         components: Sequence[str] | None = None,
     ):
+        from wan.configs import WAN_CONFIGS
+
         cfg = WAN_CONFIGS[self.config.task]
         cfg.param_dtype = torch.float16
         cfg.t5_dtype = torch.float16
@@ -311,7 +326,10 @@ class Wan22Converter:
                 rank=rank,
                 components=components,
             )
-        pipeline_cls = WanI2V if self.config.task.startswith("i2v") else WanT2V
+        if self.config.task.startswith("i2v"):
+            from wan.image2video import WanI2V as pipeline_cls
+        else:
+            from wan.text2video import WanT2V as pipeline_cls
         return pipeline_cls(
             cfg,
             str(self.pretrained_model_path),
@@ -350,6 +368,12 @@ class Wan22Converter:
         release_fp16_weights: bool = False,
     ) -> Dict[str, Any]:
         quant_config = ConfigDict(create_quant_config(self.config.quant_scheme))
+        quant_config.setdefault("ops_cfg", ConfigDict())
+        # Wan frontend norms are rewritten to xhnn.RMSNorm; apply the YAML switch
+        # to RMSNorm.force_fp32 (not only ops_cfg.Normalize).
+        rmsnorm_cfg = ConfigDict(quant_config["ops_cfg"].get("RMSNorm", ConfigDict()))
+        rmsnorm_cfg["force_fp32"] = bool(self.config.normalize_force_fp32)
+        quant_config["ops_cfg"]["RMSNorm"] = rmsnorm_cfg
         if release_fp16_weights:
             # DiT weights are large. Disabling shape propagation during PTQ lets
             # xhquant release each QModule's FP16 weights after static weight
@@ -428,6 +452,10 @@ class Wan22Converter:
         return path
 
     def _export_t5(self, pipe, work_dir: Path) -> Dict[str, Any]:
+        from wan.configs import WAN_CONFIGS
+
+        from .t5_wrapper import Wan2_2T5EncoderExportWrapper
+
         component_dir = work_dir / "t5"
         component_dir.mkdir(parents=True, exist_ok=True)
         t5_dtype = torch.float16
@@ -520,6 +548,7 @@ class Wan22Converter:
         return model, latent, timestep, context, seq_len, y
 
     def _validate_dit_wrap(self, model, latent, timestep, context, seq_len, y, noise_model_name: str):
+        from .dit_wrapper import Wan2_2DiTExportWrapper, build_wan_time_embeddings
 
         validate_dtype = torch.float16
         model = model.to(device=self.device, dtype=validate_dtype).eval()
@@ -569,6 +598,10 @@ class Wan22Converter:
         return model
 
     def _export_dit(self, pipe, work_dir: Path, noise_model_name: str) -> Dict[str, Any]:
+        from wan.configs import WAN_CONFIGS
+
+        from .dit_wrapper import Wan2_2DiTExportWrapper, build_wan_time_embeddings
+
         component_dir = work_dir / noise_model_name
         component_dir.mkdir(parents=True, exist_ok=True)
         model, latent, timestep, context, seq_len, y = self._build_dit_inputs(pipe, noise_model_name)
@@ -652,6 +685,8 @@ class Wan22Converter:
         return meta
 
     def _validate_vae_encode_wrap(self, pipe, video: torch.Tensor):
+        from .vae_wrapper import Wan2_2VAEEncoderExportWrapper
+
         validate_dtype = torch.float16
         vae_model = pipe.vae.model.to(device=self.device, dtype=validate_dtype).eval()
         scale = [
@@ -683,6 +718,8 @@ class Wan22Converter:
         return vae_model, scale
 
     def _validate_vae_decode_wrap(self, pipe, latent: torch.Tensor):
+        from .vae_wrapper import Wan2_2VAEDecoderExportWrapper
+
         validate_dtype = torch.float16
         vae_model = pipe.vae.model.to(device=self.device, dtype=validate_dtype).eval()
         scale = [
@@ -714,6 +751,8 @@ class Wan22Converter:
         return vae_model, scale
 
     def _export_vae_encode(self, pipe, work_dir: Path) -> Dict[str, Any]:
+        from .vae_wrapper import Wan2_2VAEEncoderExportWrapper
+
         component_dir = work_dir / "vae_encode"
         component_dir.mkdir(parents=True, exist_ok=True)
         width, height = self.config.size
@@ -753,6 +792,8 @@ class Wan22Converter:
         return meta
 
     def _export_vae_decode(self, pipe, work_dir: Path) -> Dict[str, Any]:
+        from .vae_wrapper import Wan2_2VAEDecoderExportWrapper
+
         component_dir = work_dir / "vae_decode"
         component_dir.mkdir(parents=True, exist_ok=True)
         latent_shape = self._build_latent_shape(pipe)
