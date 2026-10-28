@@ -41,6 +41,9 @@ def validate_build_config(config):
     cfg.setdefault("norm_fp16", True)
     if type(cfg["norm_fp16"]) is not bool:
         raise ValueError("norm_fp16 must be a boolean")
+    cfg.setdefault("upscaler_conv3d_mode", "slice")
+    if cfg["upscaler_conv3d_mode"] not in ("slice", "gather"):
+        raise ValueError("upscaler_conv3d_mode must be 'slice' or 'gather'")
     reference = cfg.get("ltx_reference_conditioning", {})
     if not isinstance(reference, dict) or set(reference) - {"enabled", "encoder_norm_eps"}:
         raise ValueError("ltx_reference_conditioning accepts enabled and encoder_norm_eps")
@@ -192,7 +195,9 @@ class BundleExporter:
             raise ValueError("unsupported Sol-H3 runtime resource kind")
         self.meta["resources"][name] = path.relative_to(self.root).as_posix()
 
-    def graph(self, name, directory, module, inputs, names, outputs, *, dynamo=False, quant_scheme=None):
+    def graph(
+        self, name, directory, module, inputs, names, outputs, *, dynamo=False, quant_scheme=None, conv3d_mode=None
+    ):
         import torch
         from torch.utils._pytree import tree_map
 
@@ -215,6 +220,7 @@ class BundleExporter:
             quant_scheme=quant_scheme or self.cfg["model"]["quant_scheme"],
             dynamo=dynamo,
             norm_fp16=norm_fp16,
+            conv3d_mode=conv3d_mode,
         )
         self.meta["graphs"][name] = dict(
             path=path.relative_to(self.root).as_posix(),
@@ -223,6 +229,8 @@ class BundleExporter:
             quant_type=(quant_scheme or self.cfg["model"]["quant_scheme"])["quant_type"],
             norm_fp16=norm_fp16,
         )
+        if conv3d_mode is not None:
+            self.meta["graphs"][name]["conv3d_to_conv2d_mode"] = conv3d_mode
         self.progress(name)
         torch.cuda.empty_cache()
         return path
@@ -886,6 +894,7 @@ class BundleExporter:
                 ),
                 ["latent"],
                 ["upscaled"],
+                conv3d_mode=self.cfg["upscaler_conv3d_mode"],
             )
             self.meta["upscaler_graphs"].append(name)
         self.meta["upscaler_segments"] = segments
@@ -1177,6 +1186,9 @@ def calibration_inputs(model_dir, config):
 
 
 def build_bundle(model_dir, output_dir, config, *, device="cuda:0", conditioner_checkpoint=None):
+    from .export import validate_conv3d_mode
+
+    validate_conv3d_mode(config.get("upscaler_conv3d_mode", "slice"))
     if config.get("mode") == "all":
         from .unified_build import build_unified_bundle
 

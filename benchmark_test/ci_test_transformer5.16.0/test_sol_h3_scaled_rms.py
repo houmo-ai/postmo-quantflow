@@ -21,9 +21,15 @@ def test_sol_norm_and_reference_yaml_flags_default_on_and_validate_types():
     path = root / "configs_merak/workflows/xh2a/other_models/sol_h3/sol_h3_all_384p_768p_w4.yaml"
     raw = yaml.safe_load(path.read_text())["export"]
     assert raw["norm_fp16"] is True and raw["ltx_reference_conditioning"]["enabled"] is True
+    assert raw.pop("upscaler_conv3d_mode") == "slice"
     raw.pop("norm_fp16")
     raw.pop("ltx_reference_conditioning")
     default = validate_build_config(raw)
+    assert default["upscaler_conv3d_mode"] == "slice"
+    assert validate_build_config({**raw, "upscaler_conv3d_mode": "gather"})["upscaler_conv3d_mode"] == "gather"
+    for mode in (False, "auto"):
+        with pytest.raises(ValueError, match="upscaler_conv3d_mode"):
+            validate_build_config({**raw, "upscaler_conv3d_mode": mode})
     assert default["norm_fp16"] is True and default["ltx_reference_conditioning"] == {
         "enabled": True,
         "encoder_norm_eps": 2**-24,

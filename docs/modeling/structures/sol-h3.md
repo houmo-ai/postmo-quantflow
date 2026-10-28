@@ -247,8 +247,14 @@ metadata 的 `spatial_padding_mode="reflect"` 与图输入同步发布。此前�
 Gather 改成 zero 属于有损变更，已观察到条件视频细白框，因此不再作为默认导出。
 这些空间边界 Gather 不承担 Conv3d 时间窗口打包；Slice/Conv2d/Add 拆分保持不变。
 LTX decoder 原本使用空间零填充，继续保持其原生边界及时间首尾帧复制语义。
-旧的时间窗口打包和 Gather 消除实验不再代表当前导出图。
-分支 Conv2d 和 Add 会改变量化舍入边界，不能沿用旧图逐位一致的结论。
+默认不启用时间窗口打包。两个 H3 upscaler 档位可通过
+`export.upscaler_conv3d_mode: slice|gather` 选择 SDK 前端转换，默认 `slice`；
+`gather` 需要已接通模式参数的 SDK，不影响 adapter、参考 VAE 或 LTX decoder 的选择。
+支持该配置的 SDK 在两种模式下均先折叠 `1×1×1` 点卷积，以及空间核为 `1×1` 的
+纯时间 depthwise 卷积；后者按 `[B,C,T,H×W]` 执行 `(Kt,1)` Conv2d，不增加转秩。
+Gather 仅对其余受支持的普通卷积打包时间窗口，未覆盖的情况继续 Slice/Conv2d/Add。
+时间 DW 默认开启，接受整核 VP 与旧图逐时间核 Conv/Add 的 FP16 舍入差异；
+小张量 W8A8 对照相对 L2 约为 0.05%–0.06%，不代表完整视频质量指标。
 
 时间核拆分改变量化分组的输入宽度，浮点等价不意味着 W8 结果逐位相同，
 仍须用原生浮点输出验证重新量化后的误差。

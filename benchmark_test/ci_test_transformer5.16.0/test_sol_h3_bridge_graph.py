@@ -32,6 +32,55 @@ def test_upscaler_chunks_cover_every_frame_and_overlap_the_author_windows():
     assert plans[1]["crop_start"] == 10
 
 
+def test_upscaler_lowering_choice_is_scoped_to_both_segment_exports(monkeypatch, tmp_path):
+    from _sol_h3_tiny_components import bridge_sources
+
+    from xhmodel_merak.xh_other_model.models.sol_h3 import source_io
+    from xhmodel_merak.xh_other_model.models.sol_h3.build import BundleExporter, SourceAssets, build_bundle
+    from xhquant.frontend import convert_impl
+    from xhquant.frontend.fx_transform import conv3d_to_conv2d
+
+    def reject_source_access(*_):
+        raise AssertionError("unsupported Gather reached asset or processor loading")
+
+    # Both halves of the SDK configuration path must exist before any media or
+    # source is read, including the unified-package dispatch.
+    for transformer, builder in (
+        (lambda: None, lambda enable_fuse=True, quant_config=None: None),
+        (lambda mode="slice": None, lambda enable_fuse=True: None),
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(conv3d_to_conv2d, "Conv3dToConv2d", transformer)
+            patch.setattr(convert_impl, "build_fx_transformer", builder)
+            patch.setattr(SourceAssets, "read", reject_source_access)
+            for mode in ("i2va", "all"):
+                with pytest.raises(ValueError, match="SDK with configurable Conv3dToConv2d"):
+                    build_bundle(tmp_path, tmp_path / "output", {"mode": mode, "upscaler_conv3d_mode": "gather"})
+            assert not (tmp_path / "output").exists()
+
+    upscaler, adapter = bridge_sources()
+    monkeypatch.setattr(source_io, "upscaler", lambda *_: (upscaler, {}))
+    monkeypatch.setattr(source_io, "adapter", lambda *_: adapter)
+    runner = object.__new__(BundleExporter)
+    runner.assets, runner.device = None, "cpu"
+    runner.cfg = dict(draft_size=[32, 32], refiner_size=[64, 64], calibration_seed=42)
+    runner.progress = lambda *_: None
+    runner.resource = lambda *_: None
+    calls = []
+
+    def record(name, _directory, _module, _values, _inputs, _outputs, **options):
+        # SDK lowering/numerics have their own tests; this checks model dispatch.
+        calls.append((name, options.get("conv3d_mode")))
+
+    runner.graph = record
+    for mode in ("slice", "gather"):
+        runner.cfg["upscaler_conv3d_mode"] = mode
+        runner.meta = {"upscaler_graphs": []}
+        calls.clear()
+        runner.bridge()
+        assert calls == [("h3_upscale_t20", mode), ("h3_upscale_t42", mode), ("h3_to_ltx", None)]
+
+
 def test_alignment_preserves_nearest_slot_channel_order_and_empty_slots():
     alignment = TemporalAlignment()
     latent = torch.arange(24 * 37 * 4 * 6, dtype=torch.float32).reshape(1, 24, 37, 4, 6)

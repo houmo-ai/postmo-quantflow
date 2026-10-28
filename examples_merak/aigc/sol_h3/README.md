@@ -22,12 +22,17 @@ Sol-H3 导出不再运行完整 H3/LTX 去噪采样，使用固定种子、有�
 ```yaml
 export:
   norm_fp16: true
+  upscaler_conv3d_mode: slice
   ltx_reference_conditioning:
     enabled: true
     encoder_norm_eps: 5.960464477539063e-8
 ```
 
 `norm_fp16` 只改变 H3/LTX DiT 的 RMSNorm 累加路径；Qwen、文本 refiner 和 VAE 保持宽归约。
+`upscaler_conv3d_mode` 仅控制 `h3_upscale_t20`、`h3_upscale_t42`：默认 `slice`，
+普通时间卷积由 SDK 转为 Slice→Conv2d→Add；显式设为 `gather` 才打包时间窗口。
+支持该配置的 SDK 会先处理等价的 `1×1×1` 点卷积和纯时间 depthwise 快路，两种模式都保留这些优化。
+旧 SDK 可以继续使用默认 Slice；请求 Gather 时若 SDK 尚未接通模式参数，导出会在加载组件前明确拒绝。
 首尾参考一致性默认开启，新增一张共享 W16A16 LTX 图像 encoder：
 `[1,3,1,768,1344] → [1,128,1,24,42]`，残差流缩放32。
 I2VA/L2VA/FL2VA 分别编码首图、末图、两图；T2VA/Ref2VA 不把参考素材解释为目标首尾帧。
