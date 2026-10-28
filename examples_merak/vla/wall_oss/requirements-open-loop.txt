@@ -1,0 +1,5 @@
+# Add to the task-local ModelZoo deployment environment (CUDA Torch already installed).
+av==18.1.0
+numpy==2.2.6
+pyarrow==25.0.1
+scipy==1.18.1

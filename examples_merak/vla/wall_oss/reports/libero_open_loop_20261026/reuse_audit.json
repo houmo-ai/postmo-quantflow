@@ -1,0 +1,27 @@
+{
+  "legacy_w8_reuse_verified": true,
+  "reused_predictions": 120,
+  "sdk_commit": "1f00cb1cc300773a4831414e44de28c0b7ebf604",
+  "hsum_binary": {
+    "module": "xhquant.lib.hsum_gpu",
+    "file": "/data01/home/jing.huang/xhquanttool/xhquant/lib/hsum_gpu.cpython-312-x86_64-linux-gnu.so",
+    "sha256": "ccb715f2f965afaca1c9d5684d64be10bb8d59067043041977e7e9751e227764"
+  },
+  "deployment_dependencies": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.16.1",
+    "qwen-vl-utils": "0.0.14",
+    "numpy": "2.2.6"
+  },
+  "runtime_sources": {
+    "xhmodel_merak/xh_other_model/models/wall_oss/runtime.py": {
+      "sha256": "3d5743d5e3e915b0fd2d53c4e3959f20df1a997fb505af201ebec890e097c101",
+      "matches_original_commit": true
+    },
+    "xhmodel_merak/xh_other_model/models/wall_oss/processor.py": {
+      "sha256": "431ba8a15be6ca6bdc546ee507acd890decc2797709785ab9ef0fc5efac674fb",
+      "matches_original_commit": true
+    }
+  },
+  "noise_override_equivalence": "work_dirs/wall_bf16_noise_equivalence.log"
+}

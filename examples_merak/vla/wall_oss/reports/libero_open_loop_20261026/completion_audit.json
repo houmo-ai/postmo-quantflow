@@ -1,0 +1,37 @@
+{
+  "complete": true,
+  "tasks": 40,
+  "episodes": 320,
+  "observations": 960,
+  "pairs": 1920,
+  "no_missing_or_duplicate_pairs": true,
+  "origins": {
+    "bf16": {
+      "new": 1920
+    },
+    "w8": {
+      "reused": 120,
+      "new": 1800
+    }
+  },
+  "inference_code_cohorts": {
+    "bf16": [
+      "9d2e66dbf113a731462e857bdb8fd3d9db9c85200273897b18cd71cba20a48fa"
+    ],
+    "w8": [
+      "9d2e66dbf113a731462e857bdb8fd3d9db9c85200273897b18cd71cba20a48fa"
+    ]
+  },
+  "bf16_dtype_audits": 10,
+  "selected_physical_gpus": [
+    6,
+    7
+  ],
+  "artifact_files_unchanged": 21,
+  "source_weights_unchanged": true,
+  "deployment_dependencies": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.16.1",
+    "numpy": "2.2.6"
+  }
+}

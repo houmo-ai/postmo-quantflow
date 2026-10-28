@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "wall-oss",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/wall_oss/*",
+        "xhmodel_merak/model_integrations/wall_oss/*",
+        "configs_merak/workflows/xh2a/other_models/wall_oss/*",
+        "examples_merak/vla/wall_oss/*",
+        "docs/modeling/structures/wall-oss.md",
+        "licenses/wall-x/*",
+        "benchmark_test/ci_test_transformer5.16.0/_wall_oss_small_fixture.py"
+      ]
+    }
+  ]
+}

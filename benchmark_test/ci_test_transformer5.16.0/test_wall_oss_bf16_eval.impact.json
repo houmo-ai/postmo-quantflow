@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rules": [{"id": "wall-oss-bf16-eval", "patterns": [
+    "examples_merak/vla/wall_oss/bf16_open_loop.py",
+    "examples_merak/vla/wall_oss/evaluation_queue.py",
+    "examples_merak/vla/wall_oss/bf16_eval_report.py",
+    "examples_merak/vla/wall_oss/validate.py",
+    "examples_merak/vla/wall_oss/open_loop.py"
+  ]}]
+}

@@ -1,0 +1,86 @@
+{
+  "gpus": [
+    6,
+    7
+  ],
+  "results": {
+    "bf16": {
+      "1": {
+        "6": {
+          "slots": 1,
+          "samples": 8,
+          "seconds": 5.208034327952191,
+          "samples_per_second": 1.5360881853375983,
+          "peak_reserved_bytes": 9298771968
+        },
+        "7": {
+          "slots": 1,
+          "samples": 8,
+          "seconds": 5.372088035102934,
+          "samples_per_second": 1.4891788719256744,
+          "peak_reserved_bytes": 9298771968
+        }
+      },
+      "2": {
+        "6": {
+          "slots": 2,
+          "samples": 8,
+          "seconds": 4.014913160121068,
+          "samples_per_second": 1.9925711169700027,
+          "peak_reserved_bytes": 18597543936
+        },
+        "7": {
+          "slots": 2,
+          "samples": 8,
+          "seconds": 4.085552392993122,
+          "samples_per_second": 1.9581195467521857,
+          "peak_reserved_bytes": 18597543936
+        }
+      }
+    },
+    "w8": {
+      "1": {
+        "6": {
+          "slots": 1,
+          "samples": 8,
+          "seconds": 15.55844603292644,
+          "samples_per_second": 0.5141901693182949,
+          "peak_reserved_bytes": 4901044224
+        },
+        "7": {
+          "slots": 1,
+          "samples": 8,
+          "seconds": 15.234441492939368,
+          "samples_per_second": 0.5251259131296491,
+          "peak_reserved_bytes": 4901044224
+        }
+      },
+      "2": {
+        "6": {
+          "slots": 2,
+          "samples": 8,
+          "seconds": 10.554374492028728,
+          "samples_per_second": 0.7579795473471271,
+          "peak_reserved_bytes": 9802088448
+        },
+        "7": {
+          "slots": 2,
+          "samples": 8,
+          "seconds": 10.563899930100888,
+          "samples_per_second": 0.7572960793773439,
+          "peak_reserved_bytes": 9802088448
+        }
+      }
+    }
+  },
+  "layout": {
+    "bf16": {
+      "6": 2,
+      "7": 2
+    },
+    "w8": {
+      "6": 2,
+      "7": 2
+    }
+  }
+}

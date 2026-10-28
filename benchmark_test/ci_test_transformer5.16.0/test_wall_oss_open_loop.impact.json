@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "wall-oss-open-loop",
+    "patterns": [
+      "examples_merak/vla/wall_oss/open_loop.py",
+      "examples_merak/vla/wall_oss/open_loop_ablation.py",
+      "examples_merak/vla/wall_oss/float_policy.py",
+      "examples_merak/vla/wall_oss/validate.py"
+    ]
+  }]
+}

@@ -1,0 +1,7 @@
+# Native Wall-X reference overlay; keep separate from the deployment environment.
+transformers==5.2.0
+tokenizers==0.22.2
+kernels==0.11.0
+peft==0.18.1
+qwen-vl-utils==0.0.11
+torchdiffeq==0.2.5

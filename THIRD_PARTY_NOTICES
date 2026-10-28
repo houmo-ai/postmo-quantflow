@@ -1464,3 +1464,11 @@ generation executed with packaged Qwen3.5 HMONNX prefill/decode/visual graphs,
 explicit generated-token presence penalty, capacity checks and bounded Golden.
 The official system prompts are copied from the user-supplied checkpoint only
 when building the optional component. No pretrained weights are committed.
+
+Wall-X deployment adapters
+Upstream: https://github.com/X-Square-Robot/wall-x
+Revision: ce2a1ae31d9ee1028b97ca40e3f66034cf8c0e5f
+License: Apache-2.0 (licenses/wall-x/LICENSE)
+Files: xhmodel_merak/xh_other_model/models/wall_oss/
+Changes: static routed graphs, packed vision geometry, explicit cache and portable runtime.
+Native Qwen2.5-VL vision is consumed through Transformers, with fused checkpoint MLP weights split for its native API.

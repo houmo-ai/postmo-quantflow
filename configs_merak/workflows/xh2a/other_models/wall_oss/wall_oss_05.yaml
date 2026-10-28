@@ -1,0 +1,11 @@
+quant: null
+export:
+  model:
+    type: XHWallOSSModel
+    quant_scheme:
+      target_device: XH2a
+      quant_type: w16a16_sefp
+  target_device: XH2a
+  context_length: 2048
+  prefill_length: 256
+  visual_capacity: 1024

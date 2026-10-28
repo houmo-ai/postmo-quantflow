@@ -1,0 +1,11 @@
+{
+  "README.md": "e13dc4703e5a05233f6252a897e17610c47fa7b140b1bf81075eb50c0429b456",
+  "benchmark.json": "b00972de39d4e02c49b0c6ffe8c8ca1dffa395a43c280b177d0870e69b4768c1",
+  "cases.csv": "1be02b66d47406f707d090e182a8e2e0b1f5d04e54d9dc116be3e886ce1442fc",
+  "completion_audit.json": "62d6c89ed7602b79bacff403d509b347348c3028bad88cd45d8007c11d435bb1",
+  "legacy_dtype_diagnostic.json": "6304c59e944f2613c70855e106947094a050779cb4e7fb9244f0c388e0cfdce7",
+  "provenance.json": "748f24a187da7df73544af0f58f464c32f95a14e87e92556b43c2da4c8b4cae2",
+  "report.json": "decc01d28ca5d0c6b7ba98769a37c44786b946f87e47ad97a79c96b5377a44e3",
+  "reuse_audit.json": "0d5852243c743e356c57dd9b4c8af928890907dda06e906d7d8f297ea8e1919d",
+  "sample_manifest.jsonl": "62f92665fa846ff59ed56ab8e2707018ebd6af5cd5adec344a8328f6bb1d6c9e"
+}

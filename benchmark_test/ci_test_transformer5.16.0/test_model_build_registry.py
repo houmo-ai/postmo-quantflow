@@ -326,6 +326,7 @@ def test_registry_covers_each_public_artifact_kind():
         "glm53",
         "qwen_image21",
         "flux3_klein",
+        "wall_oss",
         "minicpm_v_4_7",
         "minicpm_o_4_5",
         "sol_h3",
