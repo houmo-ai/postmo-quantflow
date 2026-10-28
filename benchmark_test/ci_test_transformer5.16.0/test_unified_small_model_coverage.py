@@ -79,6 +79,7 @@ def test_private_model_and_adapter_changes_select_related_cases():
     }
     assert _selected_cases(["xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py"]) == {
         c.id for c in CASES if c.model_id.startswith(("qwen3", "ornith", "macaron", "wemm"))
+        or c.fixture in {"minicpm_ocr", "ocr_rm"}
     }
 
 

@@ -54,10 +54,13 @@ from .vision import (
 
 
 class _MiniCPMLESGraphModel(HMONNXModel):
-    @classmethod
-    def _is_inference_v2_env_enabled(cls) -> bool:
+    def __init__(self, *args, backend=None, **kwargs):
+        from dataclasses import replace
+        from xhmodel_merak.exec_backends import get_backend
+
         # LES needs eager node callbacks regardless of the process default.
-        return True
+        backend = replace(backend if backend is not None else get_backend(), use_inference_v2=True)
+        super().__init__(*args, backend=backend, **kwargs)
 
 
 class MiniCPMV47TextHMONNXModel(XHQwen3_5_HMONNXModel):

@@ -1408,6 +1408,38 @@ Modifications cover configuration validation, Transformers cache/mask and
 typing compatibility, and packed Linear dtype handling. Model weights are not
 redistributed by this repository.
 
+MiniCPM-OCR image geometry compatibility
+----------------------------------------------------------------------
+Component Name: Transformers MiniCPM-OCR image processor
+Source: supplied hw_vllm_minicpm_20261016.tar.gz,
+  hw_codehub/new-model-addition-mincpm-ocr/src/transformers/models/minicpm_ocr/
+Version: 5.19.0.dev0, delivered 2026-10-16
+Copyright: 2026 OpenBMB and the HuggingFace Inc. team
+License: Apache License 2.0
+License text: licenses/transformers/LICENSE
+Files: xhmodel_merak/xh_llm/models/minicpm_ocr/native.py
+Scope: find_best_resize and get_sliced_grid are adapted from the supplied
+MiniCPM-OCR implementation to preserve its 4x patch-grid quantization and
+slice-grid tie breaking while reusing the installed Transformers 5.16.1
+MiniCPM-V-4.6 backbone and processor. HOUMO adds local checkpoint/processor
+loading and restricts unsupported 16x/adaptive-resize protocols. No checkpoint
+weights or other supplied Transformers source files are redistributed.
+
+----------------------------------------------------------------------
+Xing4.0 native CI source
+----------------------------------------------------------------------
+Component Name: XingChen-AGI Xing4.0-29B-A4B native model configuration and code
+Version: a32a2e99b5877c6b7ad16e9954ec08488bcc5fa2
+Source: https://huggingface.co/XingChen-AGI/Xing4.0-29B-A4B/tree/a32a2e99b5877c6b7ad16e9954ec08488bcc5fa2
+Upstream: https://github.com/XingChen-AGI/Xing4.0-29B-A4B
+Copyright holder: China Telecom Artificial Intelligence Technology Co., Ltd.
+License: Apache License, Version 2.0
+License Text: licenses/Xing4.0/LICENSE
+Imported files: benchmark_test/ci_test_transformer5.16.0/fixtures/unified/xing_native/
+    config.json, configuration_xing4_0.py, modeling_xing4_0.py, tokenization_xing4_0.py
+Unmodified upstream source for offline reduced-model CI. No pretrained weights
+or tokenizer model are redistributed.
+
 FLUX 3 Image Klein reference inference code
 ----------------------------------------------------------------------
 Source: https://github.com/black-forest-labs/flux-3-image-klein

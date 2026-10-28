@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "xing-workflow-and-runtime-assets",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/xing4_0/__init__.py",
+      "xhmodel_merak/xh_llm/models/xing4_0/workflow.py",
+      "xhmodel_merak/xh_llm/models/xing4_0/quant_adapter.py",
+      "xhmodel_merak/xh_llm/models/xing4_0/xing4_0_model.py",
+      "xhmodel_merak/xh_llm/models/xing4_0/xing4_0_hmonnx_inference.py",
+      "xhmodel_merak/xh_llm/workflows/runtime_config.py",
+      "xhmodel_merak/model_build/runtime_assets.py",
+      "xhmodel_merak/_environment.py",
+      "xhmodel_merak/model_integrations/xing4_0/**",
+      "configs_merak/workflows/xh2a/llm_models/xing4_0/**",
+      "examples_merak/llm/xing4_0/**"
+    ]
+  }]
+}

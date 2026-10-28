@@ -43,9 +43,9 @@ def _remove_auto_mappings(monkeypatch, environment, *, local):
 def _tiny_model(modeling, *, moe):
     text = dict(
         model_type="qwen3_5_moe_text" if moe else "qwen3_5_text",
-        vocab_size=128, hidden_size=128, num_hidden_layers=1,
+        vocab_size=128, hidden_size=128, num_hidden_layers=2,
         num_attention_heads=2, num_key_value_heads=1, head_dim=64,
-        layer_types=["full_attention"],
+        layer_types=["linear_attention", "full_attention"],
         linear_num_key_heads=2, linear_num_value_heads=2,
         linear_key_head_dim=32, linear_value_head_dim=32,
         rope_parameters=dict(
@@ -115,6 +115,23 @@ def test_text_loader_registers_before_auto_config(
     register_minicpmv47_auto_classes()
     register_minicpmv47_auto_classes()
     assert AutoModelForImageTextToText._model_mapping[type(native.config)] is type(native)
+
+    # Transformers 5.18 stores RoPE settings only in rope_parameters. Keep
+    # the real native language/attention configs when wrapping the Qwen shell.
+    text_config = loaded.model.language_model.config
+    if hasattr(text_config, "partial_rotary_factor"):
+        del text_config.partial_rotary_factor
+    source_config = (tmp_path / "config.json").read_bytes()
+    export_config = adapter.CONFIG_CLS(
+        model_name="tiny_minicpm", hf_model=str(tmp_path), visual_config=None,
+        context_max_length=64, prefill_chunk_length=4, max_pe_length=64,
+        flash_attention={"enable": False},
+    )
+    exporter = adapter(export_config)
+    exporter.to_wrap(loaded)
+    assert text_config.partial_rotary_factor == text_config.rope_parameters["partial_rotary_factor"]
+    assert exporter.full_attention_layer_indices == [1]
+    assert (tmp_path / "config.json").read_bytes() == source_config
 
 
 def test_missing_implementation_reports_installation_requirement(auto_environment, monkeypatch):

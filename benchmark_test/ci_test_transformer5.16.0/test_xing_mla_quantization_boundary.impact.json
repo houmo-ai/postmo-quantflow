@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "xing-mla-producer-consumer",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/xing4_0/**",
+      "configs_merak/workflows/xh2a/llm_models/xing4_0/**",
+      "xhmodel_merak/model_integrations/xing4_0/checkpoint.py"
+    ]
+  }]
+}

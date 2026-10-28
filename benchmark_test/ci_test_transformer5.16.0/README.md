@@ -382,6 +382,16 @@ PEFT expert layout and round-trips W4/W8 LoRA through the SDK exporter/runtime.
 These checks exercise integration contracts, not model quality or full-size
 memory/performance requirements.
 
+The Xing case retains two native decoder layers, MLA, mHC, dense and routed/shared
+experts. Set `XING4_0_MODEL_DIR` to the native checkpoint's config/code directory;
+the fixture reads no source weights and generates its own reduced weights and
+tokenizer. It runs GPTQ, exports both phases, relocates the package and runs public
+inference. The selected GPTQModel checkout must expose `quantize_xing4_0` with
+`mla_weight_layout`; the SDK checkout must include batched `llm_cache_fast_static`
+and the per-row causal mask fix. Run from the same Python environment with all
+three tested source checkouts on `PYTHONPATH`; an older checkout cannot provide
+these APIs just because its distribution version matches.
+
 For source-based CI, keep the tested ModelZoo, SDK and GPTQModel checkouts on
 `PYTHONPATH`. Dependency checks read ModelZoo (`xhmodel-zoo==1.0.0`) and SDK
 (`xhquanttool==0.9.2`) versions from the `pyproject.toml` next to the imported

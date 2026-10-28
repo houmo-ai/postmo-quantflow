@@ -1,0 +1,52 @@
+quant:
+  algorithm: gptqmodel
+  method: gptq
+  mla_weight_layout: xh2_absorbed_v1
+  offload_to_disk: false
+  bits: 4
+  group_size: 64
+  sym: true
+  desc_act: false
+  hessian_mse: true
+  damp_percent: 0.01
+  calibration:
+    # Prefer a local JSONL when available; otherwise the adapter falls back to WikiText-2.
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    text_key: text
+    nsamples: 128
+    seqlen: 1024
+  runtime:
+    batch_size: 1
+    trust_remote_code: true
+  max_shard_size: 4GB
+  moe:
+    attn_bits: 8
+    shared_expert_bits: 8
+    expert_bits: 4
+    dense_mlp_bits: 8
+    routing: bypass
+    routing_batch_size: 48
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Xing4_0ForCausalLM
+    # This field is filled from --model-dir by the workflow.
+    hf_model: null
+    model_name: xing4_0_29b_a4b
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      # MoE mixed weight bits are defined in quant.moe above.
+      # Prefer SEFP for MLA+MoE families when available; SSFP kept as the
+      # first-pass HMONNX target aligned with other W4A8 MoE YAMLs.
+      quant_type: w4a8h0_ssfp
+      nodes:
+        lm_head:
+          quant_type: w8a8h1_sefp
+      ops: {}
+    only_first_block: false
+    max_layers: null

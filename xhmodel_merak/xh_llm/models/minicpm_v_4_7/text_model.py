@@ -102,6 +102,11 @@ class _MiniCPMV47TextMixin:
     def _to_wrap(self, hf_model):
         from .causal_values import enable_minicpm_causal_values
 
+        # Native 5.18 configs keep this in rope_parameters; the shared Qwen
+        # wrapper still consumes the legacy attribute on the language model.
+        text_config = self._get_language_model(hf_model).config
+        if not hasattr(text_config, "partial_rotary_factor"):
+            text_config.partial_rotary_factor = (text_config.rope_parameters or {}).get("partial_rotary_factor", 1.0)
         super()._to_wrap(hf_model)
         language_model = self._get_language_model(self._wrap_model)
         for index in self.full_attention_layer_indices:

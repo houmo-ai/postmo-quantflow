@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "xing-build-adapter",
+    "patterns": [
+      "xhmodel_merak/model_integrations/xing4_0/build.py",
+      "xhmodel_merak/model_integrations/xing4_0/plugin.py",
+      "xhmodel_merak/model_integrations/xing4_0/checkpoint.py",
+      "xhmodel_merak/model_integrations/xing4_0/planning.py",
+      "xhmodel_merak/model_integrations/autoregressive/build.py",
+      "xhmodel_merak/model_integrations/autoregressive/export_info.py",
+      "xhmodel_merak/model_build/runtime_assets.py",
+      "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/xing.py",
+      "xhmodel_merak/xh_llm/models/xing4_0/workflow.py",
+      "xhmodel_merak/model_build/checkpoint.py"
+    ]
+  }]
+}

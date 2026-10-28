@@ -11,7 +11,7 @@ from xhmodel_merak._requirements import validate_worker_requirements
 from xhmodel_merak.errors import ModelError
 from xhmodel_merak.model_build import build_model, describe_model, list_models
 from xhmodel_merak.model_catalog import list_recipes, resolve_workflow_config
-from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_format_spec
+from xhmodel_merak.model_catalog.registry import get_adapter_spec, get_artifact_format_spec, get_catalog
 
 
 EXPECTED_VARIANTS = {model: list(variants) for model, (_, variants) in MODELS.items()}
@@ -180,6 +180,13 @@ def test_descriptions_are_json_serializable_and_qwen_static_vit_is_not_public():
                 "image_token_gears": [96, 196, 384, 704, 1024, 1280],
                 "static_profiles": [],
             }
+        elif model == "ocr-rm-2b-value":
+            assert description["vision"] == {
+                "mode": "dynamic_token_gears",
+                "profile": "visualm96-384-1536",
+                "image_token_gears": [96, 384, 1536],
+                "static_profiles": [],
+            }
         elif model.startswith("wemm-embedding"):
             assert description["vision"] == {
                 "mode": "dynamic_token_gears",
@@ -259,7 +266,8 @@ def test_text_output_schema_matches_typed_inference_result_fields():
         schema = description["output_schema"]
         if model == "minicpm-o-4.5":
             assert [item["required"] for item in schema["oneOf"]] == [
-                ["output_text", "output_tokens"], ["waveform", "sample_rate", "stats"],
+                ["output_text", "output_tokens"],
+                ["waveform", "sample_rate", "stats"],
             ]
         else:
             assert schema["required"] == ["output_text", "output_tokens"]
@@ -306,7 +314,9 @@ def test_all_public_workflow_configs_exist_and_match_registered_quantization():
 def test_registry_covers_each_public_artifact_kind():
     recipes = list_recipes()
 
-    assert {recipe.artifact_format for recipe in recipes} == {
+    artifact_formats = {recipe.artifact_format for recipe in recipes}
+    assert artifact_formats == set(get_catalog()._artifact_formats)
+    assert artifact_formats >= {
         "aigc",
         "gaussian-scene",
         "autoregressive",

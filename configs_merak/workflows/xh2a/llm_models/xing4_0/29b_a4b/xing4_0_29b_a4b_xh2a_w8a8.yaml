@@ -1,0 +1,19 @@
+quant: null
+
+export:
+  model:
+    chip_arch: XH2a
+    model_type: Xing4_0ForCausalLM
+    # This field is filled from --model-dir by the workflow.
+    hf_model: null
+    model_name: xing4_0_29b_a4b
+    context_max_length: 2048
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    use_cache: true
+    num_logits_to_keep: 1
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      ops: {}
+    only_first_block: false
+    max_layers: null
