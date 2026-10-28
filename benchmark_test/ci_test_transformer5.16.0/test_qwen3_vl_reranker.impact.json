@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen3-vl-reranker",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen3_vl_reranker/**",
+        "xhmodel_merak/xh_llm/models/qwen3_vl/**",
+        "xhmodel_merak/xh_llm/models/qwen3_vl_embedding/**",
+        "xhmodel_merak/model_integrations/qwen3_vl_reranker/**",
+        "configs_merak/workflows/xh2a/llm_models/qwen3_vl_reranker/**",
+        "examples_merak/llm/qwen3_vl_reranker/**",
+        "xhmodel_merak/xh_llm/visual_token*.py",
+        "xhmodel_merak/model_build/runtime_assets.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_vision_model_impl.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_vision_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/visual_token_gears.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/xh_qwen3_5_config.py"
+      ]
+    }
+  ]
+}

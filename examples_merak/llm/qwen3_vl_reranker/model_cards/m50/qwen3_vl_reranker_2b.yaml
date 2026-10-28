@@ -1,0 +1,154 @@
+schema_version: 2
+external:
+  model:
+    id: qwen3_vl_reranker_2b
+    family: qwen3_vl_reranker
+    display_name: Qwen3-VL-Reranker-2B
+  parameters:
+    # Counted from the official safetensors header; tied weights count once.
+    total: 2127532032
+    active: 2127532032
+    unit: parameters
+    status: verified
+  compute:
+    input_shape: null
+    prefill: null
+    decode: null
+    unit: TFLOPs
+    status: missing
+    note: Prefill-only reranker，无自回归 Decode；本次未对固定图像/视频输入场景测量计算量。
+  precision:
+    float_format: BF16
+    quantized_format: language_w4a8_nodes2_a16_head_w8a16_visual_w8a8
+    comparisons:
+    - name: w4a8_nodes2a16_headw8a16_quick_mmeb_v1_713_image_macro
+      dataset: MMEB-v2 Retrieval quick-mmeb-v1 原713查询固定子集 / 图像300查询 / 3任务等权
+      metric: Macro Hit@1 (%)
+      float: 75.6667
+      quant: 73.6667
+      delta: -2.0000
+      evidence: examples_merak/llm/qwen3_vl_reranker/evaluation/ACTIVATION_A16_713_COMPARISON_20261028.md
+      status: verified
+    - name: w4a8_nodes2a16_headw8a16_quick_mmeb_v1_713_visdoc_macro
+      dataset: MMEB-v2 Retrieval quick-mmeb-v1 原713查询固定子集 / 文档263查询 / 3任务等权
+      metric: Macro linear nDCG@5 (%)
+      float: 80.1857
+      quant: 79.1140
+      delta: -1.0717
+      evidence: examples_merak/llm/qwen3_vl_reranker/evaluation/ACTIVATION_A16_713_COMPARISON_20261028.md
+      status: verified
+    - name: w4a8_nodes2a16_headw8a16_quick_mmeb_v1_713_video_macro
+      dataset: MMEB-v2 Retrieval quick-mmeb-v1 原713查询固定子集 / 视频150查询 / 3任务等权
+      metric: Macro Hit@1 (%)
+      float: 56.0000
+      quant: 56.6667
+      delta: 0.6667
+      evidence: examples_merak/llm/qwen3_vl_reranker/evaluation/ACTIVATION_A16_713_COMPARISON_20261028.md
+      status: verified
+  owner: jing.huang
+internal:
+  model:
+    type: llm_models
+    modality: [text, image, video]
+    task: [inference, reranking, retrieval]
+    tags: [merak, xh2a, qwen3-vl, autoround, w4g64, mixed-activation, prefill-only]
+  source:
+    provider: Qwen
+    name: Qwen3-VL-Reranker-2B
+    url: https://huggingface.co/Qwen/Qwen3-VL-Reranker-2B
+    license: Apache-2.0
+    raw_model_path: /data01/datasets/Qwen3-VL-Reranker-2B
+  components:
+  - id: model
+    display_name: Qwen3-VL-Reranker-2B 动态视觉与 Prefill 评分模型
+    type: llm_models
+    precision: language_w4a8_nodes2_a16_head_w8a16_visual_w8a8
+    inputs:
+    - name: query
+      type: object
+      required: true
+      description: 查询文本、图像或混合输入；Merak 路径另支持视频及显式帧/时间戳。
+    - name: documents
+      type: array
+      required: true
+      description: 待重排候选，顺序保持不变；每个候选可包含文本、图像或 Merak 视频输入。
+    outputs:
+    - name: scores
+      type: array
+      required: true
+      description: sigmoid 后0到1相关性分数，顺序对应输入候选。
+    - name: ranking
+      type: array
+      required: true
+      description: 按相关性分数稳定降序排列的候选索引。
+  io:
+    inputs:
+    - name: query
+      type: object
+      required: true
+      description: 单个查询；支持文本、图像，视频走 Merak 输入路径。
+    - name: documents
+      type: array
+      required: true
+      description: 候选文档列表，逐对计算相关性；支持图文和 Merak 视频。
+    - name: instruction
+      type: string
+      required: false
+      description: 检索任务指令；使用与冻结评测协议一致的官方模板。
+    outputs:
+    - name: scores
+      type: array
+      required: true
+      shape: '[num_documents]'
+      description: 与候选输入顺序一致的相关性分数。
+    - name: ranking
+      type: array
+      required: true
+      shape: '[num_documents]'
+      description: 稳定降序候选索引。
+  workflow:
+    config_path: configs_merak/workflows/xh2a/llm_models/qwen3_vl_reranker/2b/qwen3_vl_reranker_2b_xh2a_w4a8_a16_nodes2.yaml
+    model_dir: /data01/datasets/Qwen3-VL-Reranker-2B
+    class: auto
+    actions: [quant, export, dump_golden, eval]
+    category: llm_models
+    target_device: XH2a
+    precision:
+      overall: language_w4a8_nodes2_a16_head_w8a16_visual_w8a8
+      components:
+        model_quant_scheme: w8a8h1_sefp
+        language_weight: autoround_ssfp_w4_g64
+        language_activation_default: a8
+        model_language_model_layers_26_mlp_up_proj: w4a16
+        model_language_model_layers_27_mlp_gate_proj: w4a16
+        model_quant_scheme_nodes_lm_head: w8a16h1_sefp
+        model_visual_config_quant_scheme: w8a8h1_sefp
+  runtime:
+    device: cuda:0
+    seed: 42
+    work_dir: work_dirs/merak_delivery/qwen3_vl_reranker_2b
+  release:
+    version_id: qwen3_vl_reranker_2b_w4a8_nodes2a16_headw8a16_draft
+    target_status: draft
+    url: ''
+    reviewer: ''
+    quant_models: []
+  presentation:
+    summary: 主配置为同一AutoRound W4G64权重、两节点A16、head W8A16、视觉W8A8；5个动态视觉图加1个Prefill图。精度栏只记录该两节点方案在原713条完整候选集上的图像、文档、视频宏平均。
+    demo:
+      kind: python
+      path: examples_merak/llm/qwen3_vl_reranker/hmonnx_demo.py
+    limitations:
+    - comparisons中w4a8_nodes2a16_headw8a16对应主workflow；仅0起编号L26 mlp.up_proj和L27 mlp.gate_proj激活A16，其余194个语言Linear保持A8。
+    - 评分头为W8A16、视觉W8A8、FlashAttention Q8/K8/V8/P8、32768上下文和256-token Prefill chunk；全局基础scheme不改变已有W4整数载荷。
+    - 结果仅为quick-mmeb-v1原713查询、9任务、66809候选对，复用Qwen3-VL-Embedding-2B冻结召回；不是官方全量MMEB分数。各模态3任务等权，delta为量化减BF16的百分点差。
+    - BF16使用官方动态图像预算，HMONNX使用96/196/384/704/1536视觉token档位；指标差异包含量化侧视觉输入预算的影响。
+    - 结果来自原生vLLM BF16与CUDA上的vLLM Merak HMONNX数值推理；未声明芯片真机性能或精度。
+    - 本卡只记录三个模态宏平均；不填逐任务分数、九任务总均值或未测计算量。评测脚本见本模型evaluation/README列出的work_dirs归档，不使用通用默认CEval任务替代。
+    evidence:
+      examples:
+      - examples_merak/llm/qwen3_vl_reranker
+      - vllm_merak/examples/vllm_merak_reranker.py
+      readme:
+      - examples_merak/llm/qwen3_vl_reranker/README.md
+      - examples_merak/llm/qwen3_vl_reranker/evaluation/ACTIVATION_A16_713_COMPARISON_20261028.md

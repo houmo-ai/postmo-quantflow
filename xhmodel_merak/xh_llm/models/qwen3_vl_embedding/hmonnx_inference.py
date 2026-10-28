@@ -4,12 +4,12 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from xhmodel_merak.xh_llm.infer_mixin import (
-    LLMInferenceContextManager,
-)
 from xhmodel_merak.xh_llm.hmonnx.hmonnx_model import (
     HMONNXBaseModel,
     HMONNXModel,
+)
+from xhmodel_merak.xh_llm.infer_mixin import (
+    LLMInferenceContextManager,
 )
 from xhmodel_merak.xh_llm.kv_cache_mixin import KVCacheMixin
 from xhmodel_merak.xh_llm.models.qwen3_vl import (
@@ -38,23 +38,16 @@ class XHQwen3VLEmbeddingHMONNXModel(XHQwen3VLHMONNXModel):
         **kwargs: Any,
     ):
         if enable_page_attention:
-            raise ValueError(
-                "Qwen3-VL-Embedding is Prefill-only and does not "
-                "support page attention"
-            )
+            raise ValueError("Qwen3-VL-Embedding is Prefill-only and does not support page attention")
 
         HMONNXBaseModel.__init__(self, **kwargs)
         self.meta_info = meta_info
         self.hf_model_dir = meta_info.hf_config
         self.hf_compatible_model = None
-        self.embed_tokens = self._build_embed_tokens_from_meta(
-            meta_info
-        )
+        self.embed_tokens = self._build_embed_tokens_from_meta(meta_info)
         self._llm_prefill = True
         self.kvcache_config = (
-            meta_info.kv_cache
-            if isinstance(meta_info.kv_cache, KVCacheConfig)
-            else KVCacheConfig(**meta_info.kv_cache)
+            meta_info.kv_cache if isinstance(meta_info.kv_cache, KVCacheConfig) else KVCacheConfig(**meta_info.kv_cache)
         )
         self.use_cache = self.kvcache_config.num_layers > 0
         self.enable_page_attention = False
@@ -72,7 +65,10 @@ class XHQwen3VLEmbeddingHMONNXModel(XHQwen3VLHMONNXModel):
         self.pad_token_id = meta_info.pad_token_id
 
         self.visual_meta = meta_info.visual_config
-        self.visual = VisualHMONNXModel(
+        self.visual = self._build_visual_runtime(enable_auto_offload=enable_auto_offload, enable_golden=enable_golden)
+
+    def _build_visual_runtime(self, *, enable_auto_offload, enable_golden):
+        return VisualHMONNXModel(
             self.visual_meta.hmonnx,
             enable_auto_offload=enable_auto_offload,
             enable_golden=enable_golden,
@@ -80,19 +76,14 @@ class XHQwen3VLEmbeddingHMONNXModel(XHQwen3VLHMONNXModel):
         )
 
     def set_decode(self):
-        raise RuntimeError(
-            "Qwen3-VL-Embedding exports Prefill only; Decode is "
-            "not available"
-        )
+        raise RuntimeError("Qwen3-VL-Embedding exports Prefill only; Decode is not available")
 
     @staticmethod
     def _build_messages(item: Mapping[str, Any]) -> list[dict[str, Any]]:
         text = item.get("text")
         image = item.get("image")
         if text is None and image is None:
-            raise ValueError(
-                "Each embedding input must contain 'text' or 'image'"
-            )
+            raise ValueError("Each embedding input must contain 'text' or 'image'")
 
         content: list[dict[str, Any]] = []
         if image is not None:
@@ -150,9 +141,7 @@ class XHQwen3VLEmbeddingHMONNXModel(XHQwen3VLHMONNXModel):
         processor: Any = None,
     ) -> torch.Tensor:
         if not isinstance(item, Mapping):
-            raise TypeError(
-                "Embedding input must be a mapping with text/image fields"
-            )
+            raise TypeError("Embedding input must be a mapping with text/image fields")
         if processor is None:
             processor = self.get_tf_processor()
 
@@ -165,19 +154,12 @@ class XHQwen3VLEmbeddingHMONNXModel(XHQwen3VLHMONNXModel):
         else:
             input_length = int(attention_mask.sum().item())
 
-        max_length = int(
-            self.meta_info.model_config.prefill_chunk_length
-        )
+        max_length = int(self.meta_info.model_config.prefill_chunk_length)
         if input_length > max_length:
-            raise ValueError(
-                f"Processed input length {input_length} exceeds the "
-                f"exported prefill length {max_length}"
-            )
+            raise ValueError(f"Processed input length {input_length} exceeds the exported prefill length {max_length}")
 
         self.set_prefill()
-        image_embeds, deepstack_image_embeds = (
-            self._extract_visual_features(model_inputs)
-        )
+        image_embeds, deepstack_image_embeds = self._extract_visual_features(model_inputs)
         data_prefill = {
             "input_ids": input_ids,
             "past_seq_length": 0,
@@ -189,18 +171,14 @@ class XHQwen3VLEmbeddingHMONNXModel(XHQwen3VLHMONNXModel):
         prefill_inputs = data_processor(data_prefill)
         hidden_states = self.forward(*prefill_inputs)
         if not isinstance(hidden_states, torch.Tensor):
-            raise TypeError(
-                "Qwen3-VL-Embedding prefill must return a tensor"
-            )
+            raise TypeError("Qwen3-VL-Embedding prefill must return a tensor")
         if hidden_states.ndim != 3:
             raise ValueError(
-                "Qwen3-VL-Embedding prefill must return a [B, T, H] "
-                f"tensor, got shape {tuple(hidden_states.shape)}"
+                f"Qwen3-VL-Embedding prefill must return a [B, T, H] tensor, got shape {tuple(hidden_states.shape)}"
             )
         if hidden_states.shape[1] < input_length:
             raise ValueError(
-                f"Prefill output length {hidden_states.shape[1]} is "
-                f"shorter than input length {input_length}"
+                f"Prefill output length {hidden_states.shape[1]} is shorter than input length {input_length}"
             )
 
         embedding = hidden_states[:, input_length - 1, :]

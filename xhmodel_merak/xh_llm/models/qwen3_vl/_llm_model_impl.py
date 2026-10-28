@@ -140,6 +140,19 @@ class _Qwen3VLTextAttention(_Qwen3VLTextAttentionBase):
         self.slice_2 = xhnn.Slice([self.head_dim // 2], [sys.maxsize], [3], [1])
         self.masked_softmax = MaskedSoftmax(dim=-1)
         self.attn_hidden_dim = self.head_dim * self.num_heads
+        flash_cfg = cfg.get("flash_attention") or {}
+        self.use_flash_attention = bool(flash_cfg.get("enable", False))
+        if self.use_flash_attention:
+            bits = {name: int(flash_cfg.get(name, 8)) for name in ("q_bits", "k_bits", "v_bits", "p_bits")}
+            if any(value not in (8, 16) for value in bits.values()):
+                raise ValueError("flash_attention q_bits/k_bits/v_bits/p_bits must be 8 or 16")
+            self.flash_attn = xhnn.FlashAttention(
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_key_value_heads,
+                scale=1 / math.sqrt(self.head_dim),
+                is_causal=True,
+                **bits,
+            )
         bfp_flash_attention_cfg = cfg.get("bfp_flash_attention", None)
         self.use_bfp_flash_attention = False
         if bfp_flash_attention_cfg is not None:
@@ -148,6 +161,8 @@ class _Qwen3VLTextAttention(_Qwen3VLTextAttentionBase):
             self.out_fp_manbit = bfp_flash_attention_cfg.out_fp_manbit
             self.out_fp_expbit = bfp_flash_attention_cfg.out_fp_expbit
         if self.use_bfp_flash_attention:
+            if self.use_flash_attention:
+                raise ValueError("flash_attention and bfp_flash_attention cannot both be enabled")
             self.bfp_attn = BfpFlashAttention(
                 self.attn_hidden_dim,
                 self.num_heads,
@@ -192,7 +207,6 @@ class _Qwen3VLTextAttention(_Qwen3VLTextAttentionBase):
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         bsz, q_len, _ = hidden_states.size()
-        causal_mask = None
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
@@ -211,7 +225,16 @@ class _Qwen3VLTextAttention(_Qwen3VLTextAttentionBase):
         if self.use_cache:
             key_states = self.k_cache(key_states, past_seq_length, current_input_length, past_k_cache)
             value_states = self.v_cache(value_states, past_seq_length, current_input_length, past_v_cache)
-        if self.use_bfp_flash_attention:
+        if self.use_flash_attention:
+            attn_output = self.flash_attn(
+                query_states,
+                key_states,
+                value_states,
+                past_seq_length=past_seq_length,
+                current_input_length=current_input_length,
+            )
+            attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, self.attn_hidden_dim)
+        elif self.use_bfp_flash_attention:
             attn_output = self.bfp_attn(query_states, key_states, value_states)
         else:
             query_states = query_states * self.kv_scale

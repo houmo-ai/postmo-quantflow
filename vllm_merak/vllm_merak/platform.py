@@ -369,6 +369,8 @@ def _build_merak_platform_class():
 
             # check and update model config
             model_config = vllm_config.model_config
+            if model_config is None:
+                return
             if not model_config.enforce_eager:
                 logger.warning("CUDA graph is not supported on Merak backend, fallback to the eager mode.")
                 model_config.enforce_eager = True
@@ -378,6 +380,15 @@ def _build_merak_platform_class():
             hybrid_cache_policy = getattr(
                 hf_config, "merak_hybrid_cache_policy", None
             )
+            if loader_architecture == "Qwen3VLRerankerMerakForSequenceClassification":
+                from .reranker_processing import register_reranker_scoring_processor
+
+                register_reranker_scoring_processor()
+                scheduler_config = vllm_config.scheduler_config
+                scheduler = "vllm_merak.worker_v1.pooling_scheduler.MerakPoolingScheduler"
+                if scheduler_config.scheduler_cls not in (None, scheduler):
+                    raise ValueError("Reranker requires the Merak pooling scheduler")
+                scheduler_config.scheduler_cls = scheduler
             if (
                 hybrid_cache_policy is not None
                 and hybrid_cache_policy not in SUPPORTED_HYBRID_CACHE_POLICIES

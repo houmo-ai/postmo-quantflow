@@ -421,6 +421,13 @@ class MerakModelRunnerV1(GPUModelRunner):
         placeholder_attn_layers = getattr(merak_model, "placeholder_attn_layers", [])
         fallback = torch.device(getattr(merak_model, "inference_device", self.device))
 
+        if bool(getattr(merak_model, "uses_internal_hmonnx_cache", False)):
+            # Contiguous runtimes own their KV storage. Their FlashAttention
+            # nodes do not correspond to the tiny scheduler-only KV groups.
+            if getattr(merak_model, "enable_page_attention", False):
+                raise ValueError("Internal HMONNX cache cannot also use scheduler PageAttention")
+            return {str(layer.layer_name): fallback for layer in placeholder_attn_layers}
+
         runtime_model = getattr(merak_model, "inference_model", None)
         prefill_model = getattr(runtime_model, "prefill_model", None)
         decode_model = getattr(runtime_model, "decode_model", None)

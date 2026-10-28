@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen3-vl-reranker-merak",
+      "patterns": [
+        "vllm_merak/vllm_merak/config.py",
+        "vllm_merak/vllm_merak/reranker_processing.py",
+        "vllm_merak/vllm_merak/model_executor/model_loader/qwen3_vl_reranker.py",
+        "vllm_merak/vllm_merak/model_executor/model_loader/qwen3_5.py",
+        "vllm_merak/vllm_merak/model_executor/register.py",
+        "vllm_merak/examples/vllm_merak_reranker.py",
+        "vllm_merak/docs/qwen3_vl_reranker_merak_deploy.md",
+        "xhmodel_merak/xh_llm/models/qwen3_vl_reranker/**",
+        "xhmodel_merak/xh_llm/models/wemm_embedding/processor.py",
+        "vllm_merak/vllm_merak/worker_v1/merak_model_runner_v1.py",
+        "vllm_merak/examples/qwen3_vl_reranker.jinja",
+        "vllm_merak/vllm_merak/platform.py",
+        "vllm_merak/vllm_merak/worker_v1/pooling_scheduler.py"
+      ]
+    }
+  ]
+}

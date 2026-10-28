@@ -12,9 +12,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from xhmodel_merak.errors import ErrorCode, ModelError, invalid_parameter
+from xhmodel_merak.errors import invalid_parameter
 from xhmodel_merak.model_build.contracts import SourceRef
 from xhmodel_merak.model_catalog.contracts import ModelRecipe, VariantRecipe
+
+from ..autoregressive.vision import validate_visual_workflow as _validate_visual_workflow
 
 
 def resolve_config(
@@ -31,13 +33,16 @@ def resolve_config(
     if recipe.vision_gears:
         _validate_visual_workflow(recipe, workflow)
     from .quantization import resolve_quantization
+
     replacements = resolve_quantization(recipe, variant, workflow, quant_checkpoint, precision)
     if recipe.model_id == "qwen3-next-80b-a3b" and variant.speculative_mode == "mtp" and quant_checkpoint:
         # The draft must share the checkpoint's hidden-state basis. A raw
         # source is not evidence of compatibility with a rotated target.
         if not _has_mtp_decoder_weights(Path(quant_checkpoint)):
             raise invalid_parameter(
-                recipe.model_id, "quant_checkpoint", str(quant_checkpoint),
+                recipe.model_id,
+                "quant_checkpoint",
+                str(quant_checkpoint),
                 "MTP weights are missing from quant_checkpoint; cannot combine a potentially "
                 "rotated target with raw-source MTP weights. Use full or a complete MTP checkpoint.",
             )
@@ -47,7 +52,9 @@ def resolve_config(
     return {
         **replacements,
         "export.model.dflash_config.hf_model": source.path,
-        "export.model.dflash_config.noise_token_id": _validate_dflash_source(recipe, source, model_dir, mode=variant.speculative_mode),
+        "export.model.dflash_config.noise_token_id": _validate_dflash_source(
+            recipe, source, model_dir, mode=variant.speculative_mode
+        ),
     }
 
 
@@ -68,34 +75,6 @@ def _has_mtp_decoder_weights(model_dir: Path) -> bool:
             if any(name.startswith("mtp.layers.") for name in header):
                 return True
     return False
-
-
-def _validate_visual_workflow(recipe: ModelRecipe, workflow: Mapping[str, Any]) -> None:
-    export = workflow.get("export")
-    model = export.get("model") if isinstance(export, Mapping) else None
-    visual = model.get("visual_config") if isinstance(model, Mapping) else None
-    expected = {
-        "visual_input_mode": "patches",
-        "image_token_gears": list(recipe.vision_gears),
-        "image_token_capacity": max(recipe.vision_gears),
-        "spatial_merge_size": 2,
-    }
-    mismatches = {}
-    for field, value in expected.items():
-        actual = visual.get(field) if isinstance(visual, Mapping) else None
-        if actual != value or type(actual) is not type(value):
-            mismatches[field] = {"expected": value, "actual": actual}
-    if isinstance(visual, Mapping):
-        for field in ("max_size_w", "max_size_h"):
-            if field in visual:
-                mismatches[field] = {"expected": "absent in patches mode", "actual": visual[field]}
-    if mismatches:
-        raise ModelError(
-            ErrorCode.ARTIFACT_VALIDATION_FAILED,
-            "Qwen Workflow visual contract does not match the registered Recipe",
-            model=recipe.model_id,
-            mismatches=mismatches,
-        )
 
 
 def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: Path, *, mode: str = "dflash") -> int:
@@ -120,7 +99,9 @@ def _validate_dflash_source(recipe: ModelRecipe, source: SourceRef, target_dir: 
     is_dflash2 = architecture == "DFlash2DraftModel"
     if (mode == "dflash2") != is_dflash2:
         raise invalid_parameter(
-            recipe.model_id, f"sources.{mode}.architectures", architecture,
+            recipe.model_id,
+            f"sources.{mode}.architectures",
+            architecture,
             f"draft architecture does not match requested {mode}",
         )
     dflash_config = assistant_config.get("dflash_config")

@@ -9,6 +9,7 @@ from typing import Any
 
 from xhmodel_merak.errors import ErrorCode, ModelError
 from xhmodel_merak.model_artifact.files import confined_file
+from xhmodel_merak.model_catalog.contracts import ModelRecipe
 
 
 def validate_dynamic_vision(
@@ -69,8 +70,12 @@ def validate_dynamic_vision(
 
     if schema_version == 2:
         extended_fields = (
-            "position_format", "rotary_position_format", "attention_mask_format",
-            "attention_mask_shape", "attention_mask_operator", "spatial_merge_size",
+            "position_format",
+            "rotary_position_format",
+            "attention_mask_format",
+            "attention_mask_shape",
+            "attention_mask_operator",
+            "spatial_merge_size",
             "rotary_cache_length",
         )
         mismatches = {
@@ -144,3 +149,31 @@ def _invalid_dynamic_vision(model_id: str, message: str, **details: Any) -> Mode
         model=model_id,
         **details,
     )
+
+
+def validate_visual_workflow(recipe: ModelRecipe, workflow: Mapping[str, Any]) -> None:
+    export = workflow.get("export")
+    model = export.get("model") if isinstance(export, Mapping) else None
+    visual = model.get("visual_config") if isinstance(model, Mapping) else None
+    expected = {
+        "visual_input_mode": "patches",
+        "image_token_gears": list(recipe.vision_gears),
+        "image_token_capacity": max(recipe.vision_gears),
+        "spatial_merge_size": 2,
+    }
+    mismatches = {}
+    for field, value in expected.items():
+        actual = visual.get(field) if isinstance(visual, Mapping) else None
+        if actual != value or type(actual) is not type(value):
+            mismatches[field] = {"expected": value, "actual": actual}
+    if isinstance(visual, Mapping):
+        for field in ("max_size_w", "max_size_h"):
+            if field in visual:
+                mismatches[field] = {"expected": "absent in patches mode", "actual": visual[field]}
+    if mismatches:
+        raise ModelError(
+            ErrorCode.ARTIFACT_VALIDATION_FAILED,
+            "Qwen Workflow visual contract does not match the registered Recipe",
+            model=recipe.model_id,
+            mismatches=mismatches,
+        )

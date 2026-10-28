@@ -158,6 +158,13 @@ python examples/vllm_wemm_embedding.py \
 `--video /path/to/video.mp4 --video-frames 4`。示例在导入 vLLM 前固定
 `VLLM_PLUGINS=wemm`，并直接使用官方 checkpoint 与 chat template。
 
+## Qwen3-VL-Reranker HMONNX 评分
+
+已支持 Qwen3-VL-Reranker-2B 的 W8 和 AutoRound W4 发布包，通过 pooling runner
+执行文本、图片和图文相关性评分。支持 Query 带图、多图、动态视觉与 DeepStack、
+32K 及分块调度；单引擎使用 `max_num_seqs=1`。离线评分、在线 `/rerank`、
+旧产物准备方式和实际验证范围见 [部署说明](docs/qwen3_vl_reranker_merak_deploy.md)。
+
 ## HMONNX 推理
 
 模型目录必须包含：

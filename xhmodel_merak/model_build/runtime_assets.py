@@ -45,17 +45,26 @@ def explicit_rope_config(config: Mapping[str, Any]) -> dict[str, Any]:
     """
     result = dict(config)
     theta = config.get("rope_theta")
+    legacy = config.get("rope_scaling")
+    unscaled = legacy is None or (
+        isinstance(legacy, Mapping)
+        and legacy.get("rope_type", legacy.get("type")) == "default"
+        and legacy.get("rope_theta", theta) == theta
+    )
     if (
         "rope_parameters" not in config
         and "rope_scaling" in config
-        and config["rope_scaling"] is None
+        and unscaled
         and isinstance(theta, (int, float))
         and not isinstance(theta, bool)
         and theta > 0
     ):
         result.pop("rope_scaling")
         result.pop("rope_theta")
-        rope = {"rope_type": "default", "rope_theta": theta}
+        rope = dict(legacy or {})
+        if "type" in rope and "rope_type" not in rope:
+            rope["rope_type"] = rope.pop("type")
+        rope.update(rope_type="default", rope_theta=theta)
         if "partial_rotary_factor" in config:
             rope["partial_rotary_factor"] = config["partial_rotary_factor"]
         result["rope_parameters"] = rope

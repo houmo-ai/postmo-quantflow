@@ -286,9 +286,11 @@ def test_all_public_workflow_configs_exist_and_match_registered_quantization():
                 config_path = resolve_workflow_config(workflow_config)
                 data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
                 quant = data.get("quant")
-                if recipe.quant_methods:
+                if quant is not None:
                     method = quant["method"] if "method" in quant else {"gptqmodel": "gptq"}[quant["algorithm"]]
                     assert method in recipe.quant_methods, config_path
+                elif recipe.quant_methods:
+                    assert recipe.default_precision.weight == "w16" and recipe.config_resolver is not None, config_path
                 else:
                     assert quant is None, config_path
                 if recipe.artifact_format == "autoregressive":
@@ -330,6 +332,7 @@ def test_registry_covers_each_public_artifact_kind():
         "minicpm_v_4_7",
         "minicpm_o_4_5",
         "sol_h3",
+        "qwen3-vl-reranker",
     }
     assert {recipe.task for recipe in recipes} >= {
         "text-generation",
@@ -339,6 +342,7 @@ def test_registry_covers_each_public_artifact_kind():
         "speech-transcription",
         "image-to-video",
         "image-generation",
+        "multimodal-reranking",
     }
     assert all(recipe.build_adapter and recipe.inference_adapter for recipe in recipes)
 

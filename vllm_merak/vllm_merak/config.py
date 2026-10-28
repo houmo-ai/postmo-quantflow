@@ -488,6 +488,12 @@ def _resolve_registered_architecture(
     hmonnx_meta_info: dict[str, Any],
 ) -> tuple[str, bool | None]:
     model_config = hmonnx_meta_info.get("model_config")
+    if isinstance(model_config, dict) and model_config.get("model_type") == "Qwen3VLForConditionalGeneration_reranker":
+        from xhmodel_merak.model_integrations.qwen3_vl_reranker.artifact import validate_score_contract
+
+        validate_score_contract(model_dir, hmonnx_meta_info)
+        _validate_qwen3_5_visual_gears(model_dir, hmonnx_meta_info["visual_config"])
+        return "Qwen3VLRerankerMerakForSequenceClassification", True
     is_wemm_embedding = (
         isinstance(model_config, dict)
         and model_config.get("model_type") == "WeMMEmbedding"
