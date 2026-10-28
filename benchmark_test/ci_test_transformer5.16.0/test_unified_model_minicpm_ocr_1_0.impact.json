@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm_ocr-unified",
+      "patterns": [
+        "xhmodel_merak/model_build/**",
+        "xhmodel_merak/model_inference/**",
+        "xhmodel_merak/model_catalog/**",
+        "xhmodel_merak/model_artifact/**",
+        "xhmodel_merak/_requirements.py",
+        "xhmodel_merak/_environment.py",
+        "xhmodel_merak/model_integrations/_dependencies.py",
+        "xhmodel_merak/model_integrations/_shared.py",
+        "xhmodel_merak/xh_llm/workflows/**",
+        "xhmodel_merak/workflows/**",
+        "xhmodel_merak/xh_llm/ocr_runtime.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
+        "xhmodel_merak/xh_llm/models/minicpm_ocr/**",
+        "xhmodel_merak/model_integrations/minicpm_ocr/**",
+        "configs_merak/workflows/xh2a/llm_models/minicpm_ocr/**",
+        "examples_merak/llm/minicpm_ocr/**",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_cases.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_e2e_worker.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_preparation.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_runner.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_small_model.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/__init__.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/ocr.py",
+        "benchmark_test/ci_test_transformer5.16.0/fixtures/unified/minicpm_ocr.json",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_delta_rule.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py"
+      ]
+    }
+  ]
+}

@@ -33,7 +33,10 @@ def test_minicpm46_preprocess_callers_select_focused_cpu_contract(filename):
     changed_path = f"xhmodel_merak/xh_llm/models/minicpm_v_4_6/{filename}"
     selection = select_for_changes([changed_path], repo_root=REPO_ROOT)
     contract = f"{SUITE_RELATIVE}/test_minicpm_v_4_6_preprocess_contract.py"
-    assert set(selection.tests) == POLICY_GATES | {contract}
+    assert set(selection.tests) == POLICY_GATES | {
+        contract,
+        f"{SUITE_RELATIVE}/test_minicpm_ocr_and_rm.py",
+    }
     assert selection.uncovered_files == ()
     assert selection.full_suite is False
     assert f"rule:minicpm-v46-text-preprocess-contract:{changed_path}" in selection.reasons[contract]
@@ -74,6 +77,8 @@ def test_minicpm_v_series_helpers_select_focused_cpu_contract(filename):
     selection = select_for_changes([changed_path], repo_root=REPO_ROOT)
     contract = f"{SUITE_RELATIVE}/test_minicpm_v_series_contract.py"
     expected = POLICY_GATES | {contract}
+    if filename in {"text_export.py", "token_capacity_vision.py", "token_capacity_vision_export.py"}:
+        expected.add(f"{SUITE_RELATIVE}/test_minicpm_ocr_and_rm.py")
     if filename in {"token_capacity_vision.py", "token_capacity_vision_export.py"}:
         expected.add(f"{SUITE_RELATIVE}/test_minicpm_dynamic_vision.py")
         expected.add(f"{SUITE_RELATIVE}/test_minicpm_vision_gears.py")
@@ -540,6 +545,7 @@ def test_minicpm_declaration_change_does_not_select_gemma_or_bge():
     ], repo_root=REPO_ROOT)
     assert set(selection.tests) == POLICY_GATES | {
         f"{SUITE_RELATIVE}/test_minicpm_v_4_6_preprocess_contract.py",
+        f"{SUITE_RELATIVE}/test_minicpm_ocr_and_rm.py",
     }
     assert selection.full_suite is False
 

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "minicpm-ocr-and-reward-contracts",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/minicpm_ocr/**",
+        "xhmodel_merak/xh_llm/models/ocr_rm/**",
+        "xhmodel_merak/xh_llm/ocr_runtime.py",
+        "xhmodel_merak/model_integrations/minicpm_ocr/**",
+        "xhmodel_merak/model_integrations/ocr_rm/**",
+        "configs_merak/workflows/xh2a/llm_models/minicpm_ocr/**",
+        "configs_merak/workflows/xh2a/llm_models/ocr_rm/**",
+        "examples_merak/llm/minicpm_ocr/**",
+        "examples_merak/llm/ocr_rm/**",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_6/text_model.py",
+        "xhmodel_merak/xh_llm/models/minicpm_v_4_6/inference.py",
+        "xhmodel_merak/xh_llm/minicpm_v_series/token_capacity_vision.py",
+        "xhmodel_merak/xh_llm/minicpm_v_series/token_capacity_vision_export.py",
+        "xhmodel_merak/xh_llm/minicpm_v_series/text_export.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/data_preprocess.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/modeling_qwen3_5_patch.py",
+        "xhmodel_merak/model_integrations/_dependencies.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_delta_rule.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,175 @@
+{
+  "config": {
+    "architectures": [
+      "MiniCPMOcrForConditionalGeneration"
+    ],
+    "dtype": "bfloat16",
+    "image_token_id": 4,
+    "model_type": "minicpm_ocr",
+    "text_config": {
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "attn_output_gate": true,
+      "bos_token_id": null,
+      "dtype": "bfloat16",
+      "eos_token_id": 0,
+      "full_attention_interval": 4,
+      "head_dim": 32,
+      "hidden_act": "silu",
+      "hidden_size": 64,
+      "initializer_range": 0.02,
+      "intermediate_size": 128,
+      "layer_types": [
+        "linear_attention",
+        "full_attention"
+      ],
+      "linear_conv_kernel_dim": 4,
+      "linear_key_head_dim": 16,
+      "linear_num_key_heads": 4,
+      "linear_num_value_heads": 4,
+      "linear_value_head_dim": 16,
+      "mamba_ssm_dtype": "float32",
+      "max_position_embeddings": 256,
+      "mlp_only_layers": [],
+      "model_type": "qwen3_5_text",
+      "mtp_num_hidden_layers": 0,
+      "mtp_use_dedicated_embeddings": false,
+      "num_attention_heads": 4,
+      "num_hidden_layers": 2,
+      "num_key_value_heads": 2,
+      "pad_token_id": null,
+      "partial_rotary_factor": 0.25,
+      "rms_norm_eps": 1e-06,
+      "rope_parameters": {
+        "mrope_interleaved": true,
+        "mrope_section": [
+          2,
+          1,
+          1
+        ],
+        "partial_rotary_factor": 0.25,
+        "rope_theta": 10000000,
+        "rope_type": "default"
+      },
+      "tie_word_embeddings": true,
+      "use_cache": true,
+      "vocab_size": 512
+    },
+    "tie_word_embeddings": true,
+    "transformers_version": "5.16.1",
+    "video_token_id": 5,
+    "vision_config": {
+      "model_type": "minicpm_ocr_vision",
+      "hidden_size": 64,
+      "intermediate_size": 128,
+      "num_attention_heads": 4,
+      "num_hidden_layers": 2,
+      "image_size": 56,
+      "patch_size": 14,
+      "window_kernel_size": [
+        2,
+        2
+      ],
+      "layer_norm_eps": 1e-06,
+      "hidden_act": "gelu_pytorch_tanh"
+    },
+    "vision_end_token_id": 3,
+    "vision_start_token_id": 2,
+    "downsample_mode": "4x",
+    "merger_times": 1,
+    "insert_layer_id": 0,
+    "merge_kernel_size": [
+      2,
+      2
+    ]
+  },
+  "tokenizer": {
+    "vocab": {
+      "<|im_end|>": 1,
+      "<|endoftext|>": 0,
+      "<|audio_start|>": 6,
+      "<|audio_end|>": 7,
+      "<|audio_pad|>": 8,
+      "<|image_pad|>": 4,
+      "<|video_pad|>": 5,
+      "<|vision_start|>": 2,
+      "<|vision_end|>": 3,
+      "[UNK]": 9,
+      "hello": 10,
+      "world": 11,
+      "test": 12,
+      "calibration": 13,
+      "OCR:": 14,
+      "42": 15,
+      "\u4f60\u597d": 16,
+      "<image>": 17,
+      "</image>": 18,
+      "<slice>": 19,
+      "</slice>": 20,
+      "<image_id>": 21,
+      "</image_id>": 22
+    },
+    "special_tokens": {
+      "eos_token": "<|im_end|>",
+      "pad_token": "<|endoftext|>",
+      "audio_bos_token": "<|audio_start|>",
+      "audio_eos_token": "<|audio_end|>",
+      "audio_token": "<|audio_pad|>",
+      "image_token": "<|image_pad|>",
+      "video_token": "<|video_pad|>",
+      "vision_bos_token": "<|vision_start|>",
+      "vision_eos_token": "<|vision_end|>",
+      "image_start_token": "<image>",
+      "image_end_token": "</image>",
+      "slice_start_token": "<slice>",
+      "slice_end_token": "</slice>",
+      "image_id_start_token": "<image_id>",
+      "image_id_end_token": "</image_id>"
+    }
+  },
+  "processor_files": {
+    "preprocessor_config.json": {
+      "downsample_mode": "4x",
+      "max_slice_nums": 1,
+      "patch_size": 14,
+      "scale_resolution": 56,
+      "slice_mode": true,
+      "use_image_id": true,
+      "image_mean": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "image_std": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "image_processor_type": "MiniCPMOcrImageProcessor",
+      "processor_class": "MiniCPMOcrProcessor"
+    },
+    "video_preprocessor_config.json": {
+      "downsample_mode": "4x",
+      "max_slice_nums": 1,
+      "patch_size": 14,
+      "scale_resolution": 56,
+      "slice_mode": true,
+      "use_image_id": true,
+      "image_mean": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "image_std": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "processor_class": "MiniCPMOcrProcessor",
+      "video_processor_type": "MiniCPMOcrVideoProcessor"
+    },
+    "processor_config.json": {
+      "processor_class": "MiniCPMOcrProcessor"
+    }
+  }
+}

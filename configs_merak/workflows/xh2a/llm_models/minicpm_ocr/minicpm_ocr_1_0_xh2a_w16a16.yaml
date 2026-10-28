@@ -1,0 +1,24 @@
+quant: null
+export:
+  model:
+    chip_arch: XH2a
+    model_type: MiniCPMOcrForConditionalGeneration
+    model_name: minicpm_ocr_1_0
+    hf_model: null
+    context_max_length: 8192
+    prefill_chunk_length: 256
+    max_pe_length: 262144
+    use_cache: true
+    num_logits_to_keep: 1
+    linear_attention_mode: auto
+    linear_chunk_size: 64
+    split_conv_cache: true
+    fuse_gdr_ops: true
+    fuse_gdr_block_recurrent_ops: true
+    quant_scheme:
+      quant_type: w16a16h0_sefp
+    visual_config:
+      token_capacity: 1536
+      validation_target: [32, 32]
+      quant_scheme:
+        quant_type: w16a16h0_sefp
