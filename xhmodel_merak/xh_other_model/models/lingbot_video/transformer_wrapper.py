@@ -292,13 +292,14 @@ class _LingBotVideoSparseMoeBlock(DynamicModule):
         self.route_scale = float(self.router.route_scale)
         self.router_choice_mode = os.environ.get("LINGBOT_MOE_ROUTER_PRECISION", "fp32")
         self.router_fixed_frac_bits = int(os.environ.get("LINGBOT_MOE_ROUTER_FIXED_FRAC_BITS", "24"))
-        self.score_float_to_fixed_int32 = xhnn.FloatToFixedInt32(self.router_fixed_frac_bits)
-        self.group_limited_topk_int32 = xhnn.GroupLimitedTopkInt32(
-            self.num_experts,
-            self.n_group or 1,
-            self.topk_group,
-            self.top_k,
-        )
+        if self.router_choice_mode == "fixed_int32":
+            self.score_float_to_fixed_int32 = xhnn.FloatToFixedInt32(self.router_fixed_frac_bits)
+            self.group_limited_topk_int32 = xhnn.GroupLimitedTopkInt32(
+                self.num_experts,
+                self.n_group or 1,
+                self.topk_group,
+                self.top_k,
+            )
         router_bias_fixed_int32 = torch.round(router_bias.float() * float(1 << self.router_fixed_frac_bits)).to(
             torch.int32
         )
@@ -367,7 +368,13 @@ class _LingBotVideoAttention(DynamicModule):
             value,
             current_input_length=current_input_length,
         )
-        output = output.transpose(1, 2).contiguous()
+        # FlashAttention returns [B, H, S, D]. Dense LingBot matches official
+        # SDPA when value_scale stays on that layout. The 30B MoE adaptation
+        # transposed to [B, S, H, D] first; keep that path only for an explicit
+        # router mode. Default fp32 is the dense export and must not change.
+        router_choice_mode = os.environ.get("LINGBOT_MOE_ROUTER_PRECISION", "fp32")
+        if router_choice_mode != "fp32":
+            output = output.transpose(1, 2).contiguous()
         output = output * value_scale
         output = output.transpose(1, 2).reshape(batch_size, sequence_length, self.num_heads * self.head_dim)
         return self.to_out(output)

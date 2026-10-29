@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "lingbot-video-attention-layout-contract",
+      "patterns": [
+        "xhmodel_merak/xh_other_model/models/lingbot_video/transformer_wrapper.py"
+      ]
+    }
+  ]
+}
