@@ -44,6 +44,9 @@ def validate_build_config(config):
     cfg.setdefault("upscaler_conv3d_mode", "slice")
     if cfg["upscaler_conv3d_mode"] not in ("slice", "gather"):
         raise ValueError("upscaler_conv3d_mode must be 'slice' or 'gather'")
+    cfg.setdefault("upscaler_conv3d_fastpath", False)
+    if type(cfg["upscaler_conv3d_fastpath"]) is not bool:
+        raise ValueError("upscaler_conv3d_fastpath must be a boolean")
     reference = cfg.get("ltx_reference_conditioning", {})
     if not isinstance(reference, dict) or set(reference) - {"enabled", "encoder_norm_eps"}:
         raise ValueError("ltx_reference_conditioning accepts enabled and encoder_norm_eps")
@@ -196,7 +199,18 @@ class BundleExporter:
         self.meta["resources"][name] = path.relative_to(self.root).as_posix()
 
     def graph(
-        self, name, directory, module, inputs, names, outputs, *, dynamo=False, quant_scheme=None, conv3d_mode=None
+        self,
+        name,
+        directory,
+        module,
+        inputs,
+        names,
+        outputs,
+        *,
+        dynamo=False,
+        quant_scheme=None,
+        conv3d_mode=None,
+        conv3d_fastpath=None,
     ):
         import torch
         from torch.utils._pytree import tree_map
@@ -221,6 +235,7 @@ class BundleExporter:
             dynamo=dynamo,
             norm_fp16=norm_fp16,
             conv3d_mode=conv3d_mode,
+            conv3d_fastpath=conv3d_fastpath,
         )
         self.meta["graphs"][name] = dict(
             path=path.relative_to(self.root).as_posix(),
@@ -231,6 +246,8 @@ class BundleExporter:
         )
         if conv3d_mode is not None:
             self.meta["graphs"][name]["conv3d_to_conv2d_mode"] = conv3d_mode
+        if conv3d_fastpath is not None:
+            self.meta["graphs"][name]["conv3d_to_conv2d_fastpath"] = conv3d_fastpath
         self.progress(name)
         torch.cuda.empty_cache()
         return path
@@ -895,6 +912,7 @@ class BundleExporter:
                 ["latent"],
                 ["upscaled"],
                 conv3d_mode=self.cfg["upscaler_conv3d_mode"],
+                conv3d_fastpath=self.cfg["upscaler_conv3d_fastpath"],
             )
             self.meta["upscaler_graphs"].append(name)
         self.meta["upscaler_segments"] = segments
@@ -1188,7 +1206,9 @@ def calibration_inputs(model_dir, config):
 def build_bundle(model_dir, output_dir, config, *, device="cuda:0", conditioner_checkpoint=None):
     from .export import validate_conv3d_mode
 
-    validate_conv3d_mode(config.get("upscaler_conv3d_mode", "slice"))
+    validate_conv3d_mode(
+        config.get("upscaler_conv3d_mode", "slice"), fastpath=config.get("upscaler_conv3d_fastpath", False)
+    )
     if config.get("mode") == "all":
         from .unified_build import build_unified_bundle
 

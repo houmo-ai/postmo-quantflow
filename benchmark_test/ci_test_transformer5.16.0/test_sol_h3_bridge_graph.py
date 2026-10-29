@@ -41,13 +41,19 @@ def test_upscaler_lowering_choice_is_scoped_to_both_segment_exports(monkeypatch,
     from xhquant.frontend.fx_transform import conv3d_to_conv2d
 
     def reject_source_access(*_):
-        raise AssertionError("unsupported Gather reached asset or processor loading")
+        raise AssertionError("unsupported Conv3d options reached asset or processor loading")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(SourceAssets, "read", reject_source_access)
+        with pytest.raises(ValueError, match="upscaler_conv3d_fastpath must be a boolean"):
+            build_bundle(tmp_path, tmp_path / "output", {"upscaler_conv3d_fastpath": None})
 
     # Both halves of the SDK configuration path must exist before any media or
     # source is read, including the unified-package dispatch.
-    for transformer, builder in (
-        (lambda: None, lambda enable_fuse=True, quant_config=None: None),
-        (lambda mode="slice": None, lambda enable_fuse=True: None),
+    for transformer, builder, lowering in (
+        (lambda: None, lambda enable_fuse=True, quant_config=None: None, "gather"),
+        (lambda mode="slice", enable_fastpath=False: None, lambda enable_fuse=True: None, "gather"),
+        (lambda mode="slice": None, lambda enable_fuse=True, quant_config=None: None, "slice"),
     ):
         with monkeypatch.context() as patch:
             patch.setattr(conv3d_to_conv2d, "Conv3dToConv2d", transformer)
@@ -55,7 +61,7 @@ def test_upscaler_lowering_choice_is_scoped_to_both_segment_exports(monkeypatch,
             patch.setattr(SourceAssets, "read", reject_source_access)
             for mode in ("i2va", "all"):
                 with pytest.raises(ValueError, match="SDK with configurable Conv3dToConv2d"):
-                    build_bundle(tmp_path, tmp_path / "output", {"mode": mode, "upscaler_conv3d_mode": "gather"})
+                    build_bundle(tmp_path, tmp_path / "output", {"mode": mode, "upscaler_conv3d_mode": lowering})
             assert not (tmp_path / "output").exists()
 
     upscaler, adapter = bridge_sources()
@@ -70,15 +76,20 @@ def test_upscaler_lowering_choice_is_scoped_to_both_segment_exports(monkeypatch,
 
     def record(name, _directory, _module, _values, _inputs, _outputs, **options):
         # SDK lowering/numerics have their own tests; this checks model dispatch.
-        calls.append((name, options.get("conv3d_mode")))
+        calls.append((name, options.get("conv3d_mode"), options.get("conv3d_fastpath")))
 
     runner.graph = record
-    for mode in ("slice", "gather"):
+    for mode, fastpath in (("slice", False), ("slice", True), ("gather", False)):
         runner.cfg["upscaler_conv3d_mode"] = mode
+        runner.cfg["upscaler_conv3d_fastpath"] = fastpath
         runner.meta = {"upscaler_graphs": []}
         calls.clear()
         runner.bridge()
-        assert calls == [("h3_upscale_t20", mode), ("h3_upscale_t42", mode), ("h3_to_ltx", None)]
+        assert calls == [
+            ("h3_upscale_t20", mode, fastpath),
+            ("h3_upscale_t42", mode, fastpath),
+            ("h3_to_ltx", None, None),
+        ]
 
 
 def test_alignment_preserves_nearest_slot_channel_order_and_empty_slots():

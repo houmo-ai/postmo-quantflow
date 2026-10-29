@@ -22,10 +22,16 @@ def test_sol_norm_and_reference_yaml_flags_default_on_and_validate_types():
     raw = yaml.safe_load(path.read_text())["export"]
     assert raw["norm_fp16"] is True and raw["ltx_reference_conditioning"]["enabled"] is True
     assert raw.pop("upscaler_conv3d_mode") == "slice"
+    assert raw.pop("upscaler_conv3d_fastpath") is False
     raw.pop("norm_fp16")
     raw.pop("ltx_reference_conditioning")
     default = validate_build_config(raw)
     assert default["upscaler_conv3d_mode"] == "slice"
+    assert default["upscaler_conv3d_fastpath"] is False
+    assert validate_build_config({**raw, "upscaler_conv3d_fastpath": True})["upscaler_conv3d_fastpath"] is True
+    for fastpath in (0, "false", None):
+        with pytest.raises(ValueError, match="upscaler_conv3d_fastpath"):
+            validate_build_config({**raw, "upscaler_conv3d_fastpath": fastpath})
     assert validate_build_config({**raw, "upscaler_conv3d_mode": "gather"})["upscaler_conv3d_mode"] == "gather"
     for mode in (False, "auto"):
         with pytest.raises(ValueError, match="upscaler_conv3d_mode"):

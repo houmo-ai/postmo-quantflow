@@ -3,6 +3,7 @@ export:
   # DiT RMSNorm uses the SDK exponent-scaled FP16 reduction; VAE/Qwen stay wide.
   norm_fp16: true
   upscaler_conv3d_mode: slice
+  upscaler_conv3d_fastpath: false
   ltx_reference_conditioning:
     enabled: true
     encoder_norm_eps: 5.960464477539063e-8

@@ -11,25 +11,38 @@ from pathlib import Path
 import torch
 
 
-def validate_conv3d_mode(mode):
+def validate_conv3d_mode(mode, *, fastpath=False):
     if mode not in ("slice", "gather"):
         raise ValueError("upscaler_conv3d_mode must be 'slice' or 'gather'")
-    if mode == "gather":
-        from inspect import signature
+    if type(fastpath) is not bool:
+        raise ValueError("upscaler_conv3d_fastpath must be a boolean")
+    from inspect import signature
 
-        from xhquant.frontend.convert_impl import build_fx_transformer
-        from xhquant.frontend.fx_transform.conv3d_to_conv2d import Conv3dToConv2d
+    from xhquant.frontend.convert_impl import build_fx_transformer
+    from xhquant.frontend.fx_transform.conv3d_to_conv2d import Conv3dToConv2d
 
-        if (
-            "mode" not in signature(Conv3dToConv2d).parameters
-            or "quant_config" not in signature(build_fx_transformer).parameters
-        ):
-            raise ValueError("gather upscaler lowering requires an SDK with configurable Conv3dToConv2d")
+    parameters = signature(Conv3dToConv2d).parameters
+    if (
+        (mode == "gather" and "mode" not in parameters)
+        or "enable_fastpath" not in parameters
+        or "quant_config" not in signature(build_fx_transformer).parameters
+    ):
+        raise ValueError("upscaler lowering requires an SDK with configurable Conv3dToConv2d fastpath")
     return mode
 
 
 def export_graph(
-    module, inputs, path, input_names, output_names, *, quant_scheme, dynamo=False, norm_fp16=False, conv3d_mode=None
+    module,
+    inputs,
+    path,
+    input_names,
+    output_names,
+    *,
+    quant_scheme,
+    dynamo=False,
+    norm_fp16=False,
+    conv3d_mode=None,
+    conv3d_fastpath=None,
 ):
     from torch.utils._pytree import tree_leaves
 
@@ -53,8 +66,15 @@ def export_graph(
     scheme = deepcopy(quant_scheme)
     scheme["target_device"] = DeviceType[scheme["target_device"]]
     config = ConfigDict(create_quant_config(QuantScheme(**scheme)))
-    if conv3d_mode is not None:
-        config.conv3d_to_conv2d_mode = validate_conv3d_mode(conv3d_mode)
+    if conv3d_mode is not None or conv3d_fastpath is not None:
+        mode = validate_conv3d_mode(
+            "slice" if conv3d_mode is None else conv3d_mode,
+            fastpath=False if conv3d_fastpath is None else conv3d_fastpath,
+        )
+        if conv3d_mode is not None:
+            config.conv3d_to_conv2d_mode = mode
+        if conv3d_fastpath is not None:
+            config.conv3d_to_conv2d_fastpath = conv3d_fastpath
     if type(norm_fp16) is not bool:
         raise ValueError("norm_fp16 must be a boolean")
     # Use the SDK's exponent-scaled FP16 RMS reduction. Only DiT callers opt

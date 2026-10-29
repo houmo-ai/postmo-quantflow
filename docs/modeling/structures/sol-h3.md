@@ -249,12 +249,16 @@ Gather 改成 zero 属于有损变更，已观察到条件视频细白框，因�
 LTX decoder 原本使用空间零填充，继续保持其原生边界及时间首尾帧复制语义。
 默认不启用时间窗口打包。两个 H3 upscaler 档位可通过
 `export.upscaler_conv3d_mode: slice|gather` 选择 SDK 前端转换，默认 `slice`；
-`gather` 需要已接通模式参数的 SDK，不影响 adapter、参考 VAE 或 LTX decoder 的选择。
-支持该配置的 SDK 在两种模式下均先折叠 `1×1×1` 点卷积，以及空间核为 `1×1` 的
-纯时间 depthwise 卷积；后者按 `[B,C,T,H×W]` 执行 `(Kt,1)` Conv2d，不增加转秩。
+`gather` 不影响 adapter、参考 VAE 或 LTX decoder 的选择。
+`export.upscaler_conv3d_fastpath` 默认 `false`，关闭 `1×1×1` 点卷积和纯时间
+depthwise 的 reshape 折叠；显式设为 `true` 才开启这两条优化。
+该开关与 `slice/gather` 独立，开启后的纯时间 DW 按 `[B,C,T,H×W]` 执行
+`(Kt,1)` Conv2d，不增加转秩。
 Gather 仅对其余受支持的普通卷积打包时间窗口，未覆盖的情况继续 Slice/Conv2d/Add。
-时间 DW 默认开启，接受整核 VP 与旧图逐时间核 Conv/Add 的 FP16 舍入差异；
-小张量 W8A8 对照相对 L2 约为 0.05%–0.06%，不代表完整视频质量指标。
+开启 DW 折叠会改变中间精度、舍入及 bias 加入顺序；此前小张量 W8A8 对照相对
+L2 约为 0.05%–0.06%，不代表完整视频质量指标。两条折叠默认关闭，保留原计算图；
+数值对齐与端到端质量需独立验证。SDK 必须支持该布尔开关，旧 SDK 在导出入口明确拒绝。
+配置仅控制重新导出的图，不修改已有 ONNX。
 
 时间核拆分改变量化分组的输入宽度，浮点等价不意味着 W8 结果逐位相同，
 仍须用原生浮点输出验证重新量化后的误差。
