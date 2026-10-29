@@ -17,12 +17,19 @@ def read_metadata(root):
     from xhmodel_merak.model_artifact.files import confined_file
 
     root = Path(root).resolve()
-    meta = json.loads(confined_file(root, "runtime_meta_info.json", "runtime metadata").read_text())
+    from .config import normalize_prefill_config
+
+    meta = normalize_prefill_config(
+        json.loads(confined_file(root, "runtime_meta_info.json", "runtime metadata").read_text())
+    )
     if meta.get("schema_version") != 1 or meta.get("kind") != "wall_oss" or meta.get("model_id") != "wall-oss-0.5":
         raise ValueError("invalid Wall deployment identity")
+    if meta.get("instruction_truncation", "error") not in ("right", "error"):
+        raise ValueError("invalid Wall instruction truncation policy")
     from .build import export_entries, validate_config
 
     cfg = validate_config(meta["deployment_config"])
+    meta["deployment_config"] = cfg
     from .config import validate_source_config
 
     source = json.loads(confined_file(root, "wall_config.json", "model configuration").read_text())["model_config"]
@@ -30,7 +37,7 @@ def read_metadata(root):
     head_dim = source["hidden_size"] // source["num_attention_heads"]
     expected = dict(
         context_length=cfg["context_length"],
-        prefill_length=cfg["prefill_length"],
+        prefill_chunk_length=cfg["prefill_chunk_length"],
         visual_capacity=cfg["visual_capacity"],
         horizon=32,
         action_dim=26,
@@ -56,7 +63,7 @@ def audit_graphs(root, meta):
 
     import onnx
 
-    c, p, v = meta["context_length"], meta["prefill_length"], meta["visual_capacity"]
+    c, p, v = meta["context_length"], meta["prefill_chunk_length"], meta["visual_capacity"]
     arch = json.loads((root / "wall_config.json").read_text())["model_config"]
     hidden, ah = arch["hidden_size"], arch["dim_inputs"][1]
     layers, kv, dim = meta["layers"], meta["kv_heads"], meta["head_dim"]
@@ -121,7 +128,10 @@ class WallRuntime:
         self.meta = read_metadata(root)
         self.device = torch.device(device)
         self.processor = WallProcessor(
-            self.root, prefix_capacity=self.meta["context_length"], visual_capacity=self.meta["visual_capacity"]
+            self.root,
+            prefix_capacity=self.meta["context_length"],
+            visual_capacity=self.meta["visual_capacity"],
+            truncate_instruction=self.meta.get("instruction_truncation", "error") == "right",
         )
         weight = load_file(str(self.root / "quant_embedding.safetensors"))["embedding.weight"]
         arch = self.processor.config["model_config"]
@@ -199,7 +209,7 @@ class WallRuntime:
         embeddings[image_mask] = merged.reshape(-1, self.hidden)
         cos, sin = (move(x) for x in data["rope"])
         p = embeddings.shape[1]
-        chunk = self.meta["prefill_length"]
+        chunk = self.meta["prefill_chunk_length"]
         h = 32
         caches = tuple(
             CacheTensor(
@@ -291,4 +301,5 @@ class WallRuntime:
             resized_sizes=data["sizes"],
             norm_key=norm_key,
             cache=self.last_cache_checks,
+            truncation=data["truncation"],
         )

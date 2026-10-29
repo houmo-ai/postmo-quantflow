@@ -69,7 +69,7 @@ def language_rope(position_ids, head_dim=128, theta=1000000.0, sections=(16, 24,
 
 
 class WallProcessor:
-    def __init__(self, root, *, prefix_capacity=2048, visual_capacity=1024):
+    def __init__(self, root, *, prefix_capacity=2048, visual_capacity=1024, truncate_instruction=False):
         from transformers import AutoProcessor
 
         self.root = Path(root)
@@ -79,6 +79,7 @@ class WallProcessor:
         self.image_token_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         self.normalizers = json.loads((self.root / "normalizers.json").read_text())
         self.prefix_capacity, self.visual_capacity = prefix_capacity, visual_capacity
+        self.truncate_instruction = truncate_instruction
 
     def normalize(self, values, key, kind):
         if key not in self.normalizers[kind]:
@@ -99,16 +100,54 @@ class WallProcessor:
         bins = np.digitize(normalized, np.linspace(-1, 1, 513)[:-1]) - 1
         state_text = " ".join(map(str, bins[active]))
         prepared = [resize_image(image, self.config["long_edge"]) for image in images]
-        prompt = (
+        prefix = (
             "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
             "<|im_start|>user\nObservation: front view: <|vision_start|><|image_pad|><|vision_end|>"
             " right wrist view: <|vision_start|><|image_pad|><|vision_end|>\nInstruction: "
-            + instruction
-            + "\nPredict the next action in robot action.\nProprioception: "
+        )
+        suffix = (
+            "\nPredict the next action in robot action.\nProprioception: "
             + state_text
             + "\n<|im_end|>\n<|im_start|>assistant\n"
         )
-        encoded = self.processor(text=[prompt], images=prepared, return_tensors="pt", do_resize=False)
+
+        def encode(value):
+            return self.processor(text=[prefix + value + suffix], images=prepared, return_tensors="pt", do_resize=False)
+
+        encoded = encode(instruction)
+        original_prefix_tokens = encoded["input_ids"].shape[1]
+        prefix_limit = self.prefix_capacity - self.config["horizon"]
+        instruction_ids = self.tokenizer(instruction, add_special_tokens=False)["input_ids"]
+        effective_instruction = instruction
+        if original_prefix_tokens > prefix_limit:
+            if not self.truncate_instruction:
+                raise ValueError("prompt and action exceed exported cache capacity")
+            # Like official max_length truncation, keep the token prefix. Restrict
+            # the crop to the instruction so media, state and action slots survive.
+            fixed_length = encode("")["input_ids"].shape[1]
+            keep = min(len(instruction_ids), prefix_limit - fixed_length)
+            if keep <= 0:
+                raise ValueError("fixed prompt and action leave no room for an instruction")
+            offsets = self.tokenizer(instruction, add_special_tokens=False, return_offsets_mapping=True)[
+                "offset_mapping"
+            ]
+            while keep > 0:
+                end = offsets[keep - 1][1]
+                effective_instruction = instruction[:end]
+                if not effective_instruction.strip():
+                    keep -= 1
+                    continue
+                encoded = encode(effective_instruction)
+                excess = encoded["input_ids"].shape[1] - prefix_limit
+                if excess <= 0:
+                    break
+                keep -= max(1, excess)
+                # Some byte tokens share a Unicode character; never split it.
+                while keep > 0 and offsets[keep - 1][1] >= end:
+                    keep -= 1
+            else:
+                raise ValueError("fixed prompt and action leave no room for an instruction")
+        prompt = prefix + effective_instruction + suffix
         ids, grid = encoded["input_ids"], encoded["image_grid_thw"]
         if ids.shape[1] + self.config["horizon"] > self.prefix_capacity:
             raise ValueError("prompt and action exceed exported cache capacity")
@@ -178,5 +217,17 @@ class WallProcessor:
                 sections=self.config["model_config"]["rope_scaling"]["mrope_section"],
             ),
             prompt=prompt,
+            effective_instruction=effective_instruction,
+            truncation=dict(
+                truncated=effective_instruction != instruction,
+                side="right" if self.truncate_instruction else "none",
+                original_prefix_tokens=original_prefix_tokens,
+                retained_prefix_tokens=ids.shape[1],
+                prefix_limit=prefix_limit,
+                original_instruction_tokens=len(instruction_ids),
+                retained_instruction_tokens=len(
+                    self.tokenizer(effective_instruction, add_special_tokens=False)["input_ids"]
+                ),
+            ),
             sizes=[image.size for image in prepared],
         )

@@ -175,6 +175,15 @@ def check_inference(moved, inputs, record):
     shutil.copytree(moved, tampered)
     meta_path = tampered / "runtime_meta_info.json"
     meta = json.loads(meta_path.read_text())
+    legacy = json.loads(meta_path.read_text())
+    legacy["prefill_length"] = legacy.pop("prefill_chunk_length")
+    legacy["deployment_config"]["prefill_length"] = legacy["deployment_config"].pop("prefill_chunk_length")
+    meta_path.write_text(json.dumps(legacy))
+    assert read_metadata(tampered) == meta
+    legacy["prefill_chunk_length"] = legacy["prefill_length"] + 1
+    meta_path.write_text(json.dumps(legacy))
+    with pytest.raises(ValueError, match="prefill_chunk_length.*disagree"):
+        read_metadata(tampered)
     meta["context_length"] += 256
     meta["deployment_config"]["context_length"] += 256
     meta_path.write_text(json.dumps(meta))
@@ -183,5 +192,12 @@ def check_inference(moved, inputs, record):
     shutil.rmtree(tampered)
     repeated = inference_model(artifact_dir=str(moved), inputs=inputs, device="cuda:0")
     np.testing.assert_array_equal(output.actions, repeated.actions)
+    assert not repeated.stats["truncation"]["truncated"]
+    long_inputs = {**inputs, "instruction": "token_4 " * 1500}
+    long_output = inference_model(artifact_dir=str(moved), inputs=long_inputs, device="cuda:0")
+    assert long_output.stats["truncation"]["truncated"]
+    assert long_output.stats["prefix_tokens"] + 32 <= 1024
+    assert long_output.stats["cache"]["prefix_unchanged"]
+    assert np.isfinite(np.asarray(long_output.actions)).all()
     json.dumps(output.to_dict(), allow_nan=False)
     record.update(repeat_bit_exact=True, passed=True, stage="complete", inference=output.to_dict())

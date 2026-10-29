@@ -13,7 +13,8 @@ from xhmodel_merak.xh_other_model.models.wall_oss.vision import PackedVision
 
 
 @pytest.mark.parametrize("precision", ["w16a16_sefp", "w8a16_sefp", "w8a8_sefp"])
-def test_real_three_graph_cascade_and_cache_reset(tmp_path, precision):
+@pytest.mark.parametrize("capacity", [744, 1024])
+def test_real_three_graph_cascade_and_cache_reset(tmp_path, precision, capacity):
     from xhquant.core import CacheTensor
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
 
@@ -24,7 +25,8 @@ def test_real_three_graph_cascade_and_cache_reset(tmp_path, precision):
     cfg._attn_implementation = "sdpa"
     vision = Qwen2_5_VisionTransformerPretrainedModel(cfg).eval()
     source = make_small_source()
-    cache_shape = (1, 1, 512, 64)
+    prefix_length = capacity - 32
+    cache_shape = (1, 1, capacity, 64)
     caches = tuple(CacheTensor(torch.zeros(cache_shape)) for _ in range(4))
     patches = torch.randn(1, 128, 1176)
     geometry = vision_geometry(12, 10, capacity=128, head_dim=80)
@@ -33,17 +35,17 @@ def test_real_three_graph_cascade_and_cache_reset(tmp_path, precision):
         torch.ones(1, 1, 256, 64),
         torch.zeros(1, 1, 256, 64),
         torch.tensor([0], dtype=torch.int32),
-        torch.tensor([35], dtype=torch.int32),
+        torch.tensor([256], dtype=torch.int32),
         caches,
     )
     action_inputs = (
-        torch.randn(1, 4, 6),
-        torch.ones(1, 4, 6),
+        torch.randn(1, 32, 6),
+        torch.ones(1, 32, 6),
         torch.randn(1, 64),
-        torch.ones(1, 1, 4, 64),
-        torch.zeros(1, 1, 4, 64),
-        torch.tensor([35], dtype=torch.int32),
-        torch.tensor([4], dtype=torch.int32),
+        torch.ones(1, 1, 32, 64),
+        torch.zeros(1, 1, 32, 64),
+        torch.tensor([prefix_length], dtype=torch.int32),
+        torch.tensor([32], dtype=torch.int32),
         caches,
     )
     cache_names = [f"cache_{i}" for i in range(4)]
@@ -54,12 +56,12 @@ def test_real_three_graph_cascade_and_cache_reset(tmp_path, precision):
             ["patches", "order", "reverse", "cos", "sin", "mask", "full_range", "window_range"],
         ),
         "prefill": (
-            ExpertStack(source, expert=0, query_capacity=256, cache_capacity=512),
+            ExpertStack(source, expert=0, query_capacity=256, cache_capacity=capacity),
             prefix_inputs,
             ["embeddings", "cos", "sin", "past", "current", *cache_names],
         ),
         "denoise": (
-            ActionDenoiser(source, query_capacity=4, cache_capacity=512),
+            ActionDenoiser(source, query_capacity=32, cache_capacity=capacity),
             action_inputs,
             ["action", "dof", "time", "cos", "sin", "past", "current", *cache_names],
         ),
@@ -78,16 +80,26 @@ def test_real_three_graph_cascade_and_cache_reset(tmp_path, precision):
     visual = sessions["visual"](move(patches), *[move(x) for x in geometry]).clone()
     assert torch.isfinite(visual).all()
     assert visual[:, 30:].count_nonzero() == 0
-    prefix = prefix_inputs[0].clone()
+    prefix = torch.randn(1, prefix_length, 128)
     prefix[:, :30] = visual[:, :30].float().cpu()
 
     def run(action):
         cache = tuple(CacheTensor(torch.zeros(cache_shape, device="cuda", dtype=torch.float16)) for _ in range(4))
-        sessions["prefill"](move(prefix), *[move(x) for x in prefix_inputs[1:-1]], *cache)
-        frozen = tuple(x.data[:, :, :35].clone() for x in cache)
+        for start in range(0, prefix_length, 256):
+            length = min(256, prefix_length - start)
+            padded = torch.nn.functional.pad(prefix[:, start : start + length], (0, 0, 0, 256 - length))
+            sessions["prefill"](
+                move(padded),
+                move(prefix_inputs[1]),
+                move(prefix_inputs[2]),
+                torch.tensor([start], dtype=torch.int32, device="cuda"),
+                torch.tensor([length], dtype=torch.int32, device="cuda"),
+                *cache,
+            )
+        frozen = tuple(x.data[:, :, :prefix_length].clone() for x in cache)
         result = sessions["denoise"](move(action), *[move(x) for x in action_inputs[1:-1]], *cache).clone()
         for old, new in zip(frozen, cache, strict=True):
-            torch.testing.assert_close(old, new.data[:, :, :35], rtol=0, atol=0)
+            torch.testing.assert_close(old, new.data[:, :, :prefix_length], rtol=0, atol=0)
         return result
 
     actual = run(action_inputs[0])
@@ -95,12 +107,12 @@ def test_real_three_graph_cascade_and_cache_reset(tmp_path, precision):
     torch.testing.assert_close(actual, again, rtol=0, atol=0)
     with torch.no_grad():
         expected = source.joint(
-            prefix[:, :35],
+            prefix,
             action_inputs[0],
             action_inputs[1],
             action_inputs[2],
-            torch.ones(1, 1, 39, 64),
-            torch.zeros(1, 1, 39, 64),
+            torch.ones(1, 1, capacity, 64),
+            torch.zeros(1, 1, capacity, 64),
         )
     error = torch.linalg.vector_norm(actual.float().cpu() - expected) / torch.linalg.vector_norm(expected)
     assert error < 0.12, float(error)

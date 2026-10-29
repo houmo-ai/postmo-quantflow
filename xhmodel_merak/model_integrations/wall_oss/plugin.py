@@ -56,9 +56,9 @@ def register(catalog):
             build_adapter="wall_oss_build",
             inference_adapter="wall_oss_inference",
             artifact_format="wall_oss",
-            default_profile="p256-c2k-v1024-h32",
-            profiles=("p256-c2k-v1024-h32",),
-            artifact_name_template="hmquant_xh2_wall_oss_05_{deployment_precision}_p256_c2k_v1024_h32",
+            default_profile="p256-c1024-v1024-h32",
+            profiles=("p256-c1024-v1024-h32",),
+            artifact_name_template="hmquant_xh2_wall_oss_05_{deployment_precision}_p256_c1024_v1024_h32",
             config_resolver="xhmodel_merak.model_integrations.wall_oss.source:resolve_config",
             dependencies=runtime_dependencies(common=(*IMAGE, "qwen-vl-utils==0.0.14")),
             input_schema={

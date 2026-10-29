@@ -3,6 +3,23 @@
 """Validate Wall's two-expert architecture and compatible tensor dimensions."""
 
 
+def normalize_prefill_config(config, *, default=None):
+    """Read legacy configs/packages while emitting only the canonical chunk name."""
+    result = dict(config)
+    values = [result[key] for key in ("prefill_chunk_length", "prefill_length") if key in result]
+    if not values:
+        if default is None:
+            raise ValueError("missing prefill_chunk_length")
+        values = [default]
+    if any(type(value) is not int or value <= 0 for value in values):
+        raise ValueError("invalid prefill_chunk_length")
+    if any(value != values[0] for value in values[1:]):
+        raise ValueError("prefill_chunk_length and legacy prefill_length disagree")
+    result.pop("prefill_length", None)
+    result["prefill_chunk_length"] = values[0]
+    return result
+
+
 def validate_source_config(config):
     if config.get("model_type") != "qwen2_5_vl" or config.get("num_experts") != 2:
         raise ValueError("requires the Wall-OSS two-expert architecture")

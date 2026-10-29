@@ -7,6 +7,7 @@ Wall-OSS-0.5 已接入 `build_model` / `inference_model`，模型 ID 为 `wall-o
 - [模型结构、图和缓存 ABI](../../../xhmodel_merak/xh_other_model/models/wall_oss/EXPLANATION.md)
 - [适配范围与数值证据](../../../docs/modeling/structures/wall-oss.md)
 - [官方 BF16 对 W8A8：1,920 组开环测试报告](reports/libero_open_loop_20261026/README.md)
+- [1024 容量、指令截断与重导出验证](reports/context_truncation_20261029/README.md)
 
 本目录提供模型导出、推理和开环数值验证。报告比较同一输入下两种实现的预测差异，
 不将动作误差换算成机器人任务成功率，也不提供官方量化“合格线”。
@@ -49,9 +50,30 @@ git -C examples_merak/vla/wall_oss/.upstream checkout --detach ce2a1ae31d9ee1028
 | W8A16 | [wall_oss_05_w8a16.yaml](../../../configs_merak/workflows/xh2a/other_models/wall_oss/wall_oss_05_w8a16.yaml) | `w8a16_sefp` |
 | W8A8 | [wall_oss_05_w8a8.yaml](../../../configs_merak/workflows/xh2a/other_models/wall_oss/wall_oss_05_w8a8.yaml) | `w8a8_sefp` |
 
-三份 YAML 仅部署精度不同：prefill 分块 256、KV 总容量 2048、单图 patch 容量 1024，
+三份 YAML 仅部署精度不同：`prefill_chunk_length: 256`、`context_length: 1024`、
+`visual_capacity: 1024`，即 prefill 分块 256、KV 总容量 1024、单图 patch 容量 1024，
 动作 horizon 固定 32，group size 均为 64。`quant: null` 表示跳过独立权重量化阶段；
 SDK PTQ 在 `export()` 内执行，`dump_golden()` 独立执行。
+
+双张 448×448 图像合计 512 个视觉 token，非图像内容（指令、有效状态字符串、
+提示模板及全部特殊 token）预算最多 480，另留 32 个动作位置，总容量为 1024。
+实际非方图 token 数由 grid 决定。参考 Wall-X LIBERO 示例的 `data.max_length: 1024`
+和 tokenizer 截断思路，但本实现只对超长指令做右截断，保留指令开头；不会截断图像、
+状态字符串、模板标记或动作位置。按实际 token 和图像 grid 计算剩余预算，再重新分词，
+保证前缀不超过 992。Unicode 按原字符串字符边界截断，不产生半个字符。
+短指令保持原样；截断状态、原始/保留 token 数和上限写入推理结果的 `stats.truncation`。
+新包声明 `instruction_truncation: right`。未声明该字段的旧包继续超限报错，不改变旧协议。
+只有固定结构本身放不下时才报错；当前固定双图与 26 维状态在 1024 下可完整保留。
+
+官方训练 collator 对包含图像占位符和动作 token 的整段序列启用截断，不能把其
+`max_length` 当作纯文本上限；本实现保护结构的行为与直接切整段序列有区别。
+依据：[官方 LIBERO 示例](https://github.com/X-Square-Robot/wall-x/blob/ce2a1ae31d9ee1028b97ca40e3f66034cf8c0e5f/workspace/example/libero.yml)、
+[collator](https://github.com/X-Square-Robot/wall-x/blob/ce2a1ae31d9ee1028b97ca40e3f66034cf8c0e5f/wall_x/data/backends/lerobot/loader.py)。
+
+`prefill_chunk_length` 是唯一的新导出字段名，配置和运行 metadata 使用同一命名。
+加载器兼容已有 YAML 和包内的旧 `prefill_length`，保留旧包自身的缓存尺寸；
+若新旧字段同时存在且数值不一致，直接拒绝。原 2048、744 容量模型包及下文历史开环报告
+保留不变，不能将旧报告视为新 1024 容量/截断协议的重测结果。
 
 统一入口通过 `--precision` 设置同一个 `export.model.quant_scheme` 字段：
 
@@ -82,7 +104,7 @@ result = build_model(
 相机顺序固定为 face/front、right wrist。每张图保持宽高比将长边缩放至 448，再按
 官方 `smart_resize` 对齐到 28 像素网格，例如 640×480→448×336、1920×1080→448×252。
 实际 grid 控制视觉位置编码、窗口范围和 token 数，物理容量不会改变图片几何。
-超出 patch 或 KV 容量会报错，不静默截断指令。
+超出单图 patch 容量会报错；超长指令按上述协议截断，并记录截断信息。
 
 | 索引 | 状态 | 动作 |
 | --- | --- | --- |

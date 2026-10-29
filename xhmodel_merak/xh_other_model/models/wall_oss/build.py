@@ -10,17 +10,19 @@ import torch
 
 
 def validate_config(config):
-    config = dict(config)
+    from .config import normalize_prefill_config
+
+    config = normalize_prefill_config(config, default=256)
     scheme = config["model"]["quant_scheme"]
     if config.get("target_device") != "XH2a" or scheme.get("target_device") != "XH2a":
         raise ValueError("Wall export currently requires XH2a")
     if scheme.get("quant_type") not in ("w16a16_sefp", "w8a16_sefp", "w8a8_sefp"):
         raise ValueError("unsupported Wall deployment precision")
-    for name, default in (("context_length", 2048), ("prefill_length", 256), ("visual_capacity", 1024)):
+    for name, default in (("context_length", 1024), ("visual_capacity", 1024)):
         config.setdefault(name, default)
         if type(config[name]) is not int or config[name] <= 0:
             raise ValueError(f"invalid {name}")
-    if config["prefill_length"] > config["context_length"] or config["visual_capacity"] % 4:
+    if config["prefill_chunk_length"] > config["context_length"] or config["visual_capacity"] % 4:
         raise ValueError("invalid Wall capacities")
     return config
 
@@ -147,7 +149,7 @@ def build_bundle(source, root, config, device):
     del graph, visual
     gc.collect()
     src = load_source(source)
-    c, p = config["context_length"], config["prefill_length"]
+    c, p = config["context_length"], config["prefill_chunk_length"]
     arch = src.config
     layers, kvheads, dim, hidden, action_hidden = (
         len(src.layers),
@@ -197,7 +199,7 @@ def build_bundle(source, root, config, device):
         target_device="XH2a",
         quant_type=qtype,
         context_length=c,
-        prefill_length=p,
+        prefill_chunk_length=p,
         visual_capacity=capacity,
         horizon=32,
         action_dim=26,
@@ -205,6 +207,7 @@ def build_bundle(source, root, config, device):
         kv_heads=kvheads,
         head_dim=dim,
         cache_policy="inplace_replace_action",
+        instruction_truncation="right",
         graphs=paths,
         deployment_config=config,
     )

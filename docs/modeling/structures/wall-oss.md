@@ -24,7 +24,7 @@
 | 图拆分 | `visual`、`prefill`、`denoise`；两路相机复用视觉图 |
 | 视觉 | 保持宽高比、长边 448、28 对齐、非方图、窗口与全局注意力 |
 | 动作 | batch 1、H32、26 维状态/动作、512 档状态字符串、默认 10 步 Euler |
-| 缓存 | 分块 prefill 256、总容量 2048、72 个 KV 状态、动作区域覆盖和请求隔离 |
+| 缓存 | prefill 分块 256、72 个 KV 状态、动作区域覆盖和请求隔离；历史数值报告总容量 2048，当前 YAML 总容量 1024 |
 | 部署精度 | W16A16、W8A16、W8A8 SEFP，group size 64，图位宽有实际审计 |
 | 统一接口 | build / inference、CLI、Manifest、包搬移及脱离源 checkpoint 的推理 |
 | Golden | 三精度、每精度三图，覆盖合成与真实相机输入，诊断与运行产物分离 |
@@ -45,6 +45,13 @@ checkpoint 配置 vocab_size=151936，实际 embedding 有 155765 行。按官�
 | W8A8 | [wall_oss_05_w8a8.yaml](../../../configs_merak/workflows/xh2a/other_models/wall_oss/wall_oss_05_w8a8.yaml) |
 
 三个配置只在 `export.model.quant_scheme.quant_type` 上不同，沿用同一三图 ABI。
+当前统一使用 `export.prefill_chunk_length: 256`，`export.context_length: 1024`，
+默认 recipe 档位为 `p256-c1024-v1024-h32`。1024 包括双图最多 512 个视觉 token、
+非图像内容最多 480 和动作 32 个位置；前缀长度按实际分词和 grid 检查。
+新包使用 `instruction_truncation: right`，只有超长指令被右截断，完整保留图像、状态、
+模板和动作位置；截断信息在 `stats.truncation` 返回，旧包未声明策略时保持超限报错。
+参考官方 LIBERO 的 1024 上限；与官方对完整序列的直接截断区分，细节见示例 README。
+已有 2048 容量包中的 `prefill_length` 由读取端兼容，不改旧包内容；冲突字段拒绝加载。
 `quant: null` 跳过独立权重量化阶段，PTQ 在导出阶段执行。图接口/缓存为 FP16，
 Host 动作状态、时间调度和 Euler 更新为 FP32，源 BF16 权重与部署 W16A16 不能混称。
 官方 BF16 数值参考保留主干/视觉 BF16 及官方指定 FP32 模块，不将整个模型升到 FP32。

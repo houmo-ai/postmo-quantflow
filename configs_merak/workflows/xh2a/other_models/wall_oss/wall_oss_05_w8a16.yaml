@@ -6,6 +6,6 @@ export:
       target_device: XH2a
       quant_type: w8a16_sefp
   target_device: XH2a
-  context_length: 2048
-  prefill_length: 256
+  context_length: 1024
+  prefill_chunk_length: 256
   visual_capacity: 1024

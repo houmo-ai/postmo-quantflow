@@ -14,9 +14,13 @@ Wall-OSS-0.5 在 Qwen2.5-VL 的视觉/语言主干上增加连续动作专家。
 | prefill | `[1,256,2048]` 前缀 embedding；RoPE、past/current 长度、72 个 KV 端口 | `[1,256,2048]` hidden；36 层 K/V 原地写入 |
 | denoise | `[1,32,26]` 当前动作与 DOF mask；`[1,1024]` 时间特征；动作 RoPE、长度和前缀 KV | `[1,32,26]` 速度；本步动作 K/V 覆盖同一区域 |
 
-缓存物理 shape 为 `[1,2,2048,128]`，接口 dtype 为 FP16；缓存数量由真实层数决定。
+缓存物理 shape 为 `[1,2,C,128]`，其中 C 是 `context_length`；当前默认 C=1024，
+历史开环评测包为 C=2048。接口 dtype 为 FP16；缓存数量由真实层数决定。
 模型代码从源配置读取维度，并校验双专家、注意力头和视觉结构的一致性。
-公开真实 checkpoint 的默认参数为上表数值。
+上表中 2048 的 hidden/embedding 维度来自 checkpoint，不是 cache 总容量。
+`prefill_chunk_length: 256` 是图的固定查询长度；尾块按 current_input_length 写入有效 KV，
+不要求 C 是分块长度的整数倍。旧包字段 `prefill_length` 在读取时转换为新名称，
+已有图的物理 shape 不变；新旧字段不同值会报错。
 
 ```mermaid
 flowchart LR
@@ -50,6 +54,16 @@ Host 只计算确定性正弦时间特征、位置、mask、embedding 查表、�
 长前缀按真实顺序分块写入；每个请求重新分配缓存，复用 session 不复用上一个请求状态。
 加载器要求每张状态图有 72 个实际 cache producer，并显式启用原地更新。
 运行时还检查最终前缀逐位不变。Host 不拼接或回拷整份 KV。
+
+## 输入长度与指令截断
+
+新包由 metadata 的 `instruction_truncation: right` 声明输入协议。Host 完整处理图像和
+状态后，预留 H=32，允许的前缀长度为 C-H=992；双张方图的非图像预算最多 480。
+短指令原样通过；超长时只保留指令的 token 前缀，用 offset mapping 选择原字符串
+的完整字符边界，再对完整 prompt 重新分词检查容量，并重新生成 RoPE 与动作位置。
+图像 token、全部有效状态、模板和动作区域不裁剪。结果返回截断前后 token 数。
+固定结构无法容纳时保留明确异常；旧包缺少策略字段时继续按原方式拒绝超长输入。
+官方 LIBERO 的 `data.max_length: 1024` 是训练序列截断设置，并非模型位置编码上限。
 
 ## 可变宽高视觉
 

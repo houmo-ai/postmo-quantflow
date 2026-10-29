@@ -1,0 +1,591 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "scope": "1024-token cache and instruction-only right truncation; numerical regression, not task success",
+  "source_model": "x-square-robot/wall-oss-0.5",
+  "official_reference_revision": "ce2a1ae31d9ee1028b97ca40e3f66034cf8c0e5f",
+  "configuration": {
+    "context_length": 1024,
+    "prefill_chunk_length": 256,
+    "visual_capacity": 1024,
+    "horizon": 32,
+    "prefix_limit": 992,
+    "instruction_truncation": "right",
+    "physical_cache_shape": [
+      1,
+      2,
+      1024,
+      128
+    ],
+    "cache_ports_per_state_graph": 72,
+    "group_size": 64
+  },
+  "ci_before_sync": {
+    "test_targets": 18,
+    "passed": 901,
+    "warnings": 8,
+    "seconds": 242.0
+  },
+  "cache_boundary_tests": {
+    "passed": 6,
+    "precisions": 3,
+    "capacities": [
+      744,
+      1024
+    ]
+  },
+  "legacy_package_integrity": {
+    "w16": {
+      "registered_files": 20,
+      "sha256_unchanged": true,
+      "legacy_overflow_policy": "error"
+    },
+    "w8a16": {
+      "registered_files": 20,
+      "sha256_unchanged": true,
+      "legacy_overflow_policy": "error"
+    },
+    "w8": {
+      "registered_files": 20,
+      "sha256_unchanged": true,
+      "legacy_overflow_policy": "error"
+    },
+    "c744_w8a8": {
+      "registered_files": 20,
+      "sha256_unchanged": true,
+      "legacy_overflow_policy": "error"
+    },
+    "c744_w8a16": {
+      "registered_files": 20,
+      "sha256_unchanged": true,
+      "legacy_overflow_policy": "error"
+    }
+  },
+  "precisions": {
+    "w8a8": {
+      "artifact_directory": "work_dirs/runtime_packages/hmquant_xh2_wall_oss_05_w8a8_p256_c1024_v1024_h32_20261029",
+      "golden_directory": "work_dirs/golden_packages/hmquant_xh2_wall_oss_05_w8a8_p256_c1024_v1024_h32_20261029",
+      "quant_type": "w8a8_sefp",
+      "comparisons": {
+        "0": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0,
+          "prefix_tokens": 618
+        },
+        "87": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 0.9999999999999998,
+          "prefix_tokens": 609
+        },
+        "1344": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0000000000000002,
+          "prefix_tokens": 611
+        },
+        "1905": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 0.9999999999999998,
+          "prefix_tokens": 615
+        },
+        "boundary_992_plus_32": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0,
+          "prefix_tokens": 992
+        },
+        "long_english": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0000000000000002,
+          "prefix_tokens": 992
+        },
+        "long_unicode": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0,
+          "prefix_tokens": 991
+        }
+      },
+      "truncation": {
+        "0": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 618,
+          "retained_prefix_tokens": 618,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 19,
+          "retained_instruction_tokens": 19
+        },
+        "87": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 609,
+          "retained_prefix_tokens": 609,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 11,
+          "retained_instruction_tokens": 11
+        },
+        "1344": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 611,
+          "retained_prefix_tokens": 611,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 11,
+          "retained_instruction_tokens": 11
+        },
+        "1905": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 615,
+          "retained_prefix_tokens": 615,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 15,
+          "retained_instruction_tokens": 15
+        },
+        "boundary_992_plus_32": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 992,
+          "retained_prefix_tokens": 992,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 393,
+          "retained_instruction_tokens": 393
+        },
+        "long_english": {
+          "truncated": true,
+          "side": "right",
+          "original_prefix_tokens": 2699,
+          "retained_prefix_tokens": 992,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 2101,
+          "retained_instruction_tokens": 393
+        },
+        "long_unicode": {
+          "truncated": true,
+          "side": "right",
+          "original_prefix_tokens": 2999,
+          "retained_prefix_tokens": 991,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 2400,
+          "retained_instruction_tokens": 392
+        }
+      },
+      "checks": {
+        "graph_port_precision_group_audit": "passed",
+        "old_package_legacy_metadata": "passed",
+        "exact_capacity_boundary": "passed",
+        "over_capacity_instruction_truncation": "passed",
+        "public_inference": "passed"
+      },
+      "golden": {
+        "complete": true,
+        "backend": "hmonnx_v2",
+        "records": [
+          {
+            "step": 0,
+            "kind": "synthetic",
+            "graphs": [
+              "denoise",
+              "prefill",
+              "visual"
+            ]
+          },
+          {
+            "step": 1,
+            "kind": "representative",
+            "graphs": [
+              "denoise",
+              "prefill",
+              "visual"
+            ]
+          }
+        ]
+      },
+      "source_identity": {
+        "kind": "directory",
+        "config_sha256": "9a64a8d37fa493481e2d3d936985820d8955ee6b1c2bcdedee8654066df36c0a",
+        "sha256": "b4f25f8eff0f03d89185fe0df833378bd90e7bf3507fa849e1ba3ec43287fffc"
+      },
+      "artifact_files": [
+        {
+          "path": "denoise/wall_oss_denoise.onnx",
+          "size": 5531197,
+          "sha256": "03a6c5aecf5111f8f2957d289b965fd792bdb404b2b0205b47e15b6de71f64bc"
+        },
+        {
+          "path": "denoise/wall_oss_denoise_external_data",
+          "size": 412420096,
+          "sha256": "32d678af0dc91981576d2d72c353d48992630ffaf743e4ec88728966626d78f8"
+        },
+        {
+          "path": "effective_workflow.yaml",
+          "size": 251,
+          "sha256": "c2b736be2fbbdd8423c92ba69d6c1b6c5c47b2d2cb37d46bc167c657e7cb31ac"
+        },
+        {
+          "path": "environment.json",
+          "size": 2705,
+          "sha256": "8fcf7163952085103511fb19131ab22b323700d670c44e707fa94699b22b621c"
+        },
+        {
+          "path": "environments/build.txt",
+          "size": 465,
+          "sha256": "3ecf62f0d7838a0302a0a00c77a933007c18aaef3cd46e40cbb29457dba038c4"
+        },
+        {
+          "path": "environments/checkpoint_build.txt",
+          "size": 465,
+          "sha256": "3ecf62f0d7838a0302a0a00c77a933007c18aaef3cd46e40cbb29457dba038c4"
+        },
+        {
+          "path": "environments/inference.txt",
+          "size": 418,
+          "sha256": "3310ffff310d1c6dfd18963e64870602850ee2c58f2e9bef5b3f9039869e4d77"
+        },
+        {
+          "path": "export_meta_info.json",
+          "size": 1067,
+          "sha256": "781be5c914fcadf60d58d84aeb98ab185cd43cdeeb0a21eed4e291dabe18bc6f"
+        },
+        {
+          "path": "normalizers.json",
+          "size": 72172,
+          "sha256": "c1c8503a614ed9fe2ad6eeed7c9949b9c076d30a9cb198a829628d1bad52b968"
+        },
+        {
+          "path": "prefill/wall_oss_prefill.onnx",
+          "size": 5381949,
+          "sha256": "59f62f70e0cd0d377da71fcd1e3f33f8ed5660c5d19144356394bd3682097125"
+        },
+        {
+          "path": "prefill/wall_oss_prefill_external_data",
+          "size": 2861716480,
+          "sha256": "53e5da9da9c7d864b145d9ba85aaca456bf402a2d6a75f3f40a80445d30a9bfd"
+        },
+        {
+          "path": "processor/chat_template.jinja",
+          "size": 2427,
+          "sha256": "44d5f08f3f72b837eaad09f13a54c1f9f4eb58d75240334548b7fd52a5437fa5"
+        },
+        {
+          "path": "processor/processor_config.json",
+          "size": 1294,
+          "sha256": "81d7e9034070c3b78ea0d42c54f9eef406d4e413b62c9f9d1bd0d3f7a98ac5ac"
+        },
+        {
+          "path": "processor/tokenizer.json",
+          "size": 11422266,
+          "sha256": "3b8cf9d93bf3296f420099877b0ae77c563b20149f894a7c8789eb3b0677638b"
+        },
+        {
+          "path": "processor/tokenizer_config.json",
+          "size": 766,
+          "sha256": "4e7a59f4a39ac555ad81c0293a8e92d69447ecb5af4e388a83eeacf009cfa95d"
+        },
+        {
+          "path": "quant_embedding.safetensors",
+          "size": 638013536,
+          "sha256": "cf023386388e4e7ad5e3779d76c8a1e72544cbbfeec7ced47aa5d27742067493"
+        },
+        {
+          "path": "runtime_meta_info.json",
+          "size": 888,
+          "sha256": "15f367af7dc79fe8886eb9a60301558ba635ae6755be31d58afc99c1a7a7e4c9"
+        },
+        {
+          "path": "visual_p1024/wall_oss_visual.onnx",
+          "size": 4454088,
+          "sha256": "be6d2ee983158fd2346dabf84737e63bf237ad308135cd56d2eb08b76cf09d5e"
+        },
+        {
+          "path": "visual_p1024/wall_oss_visual_external_data",
+          "size": 691652096,
+          "sha256": "99ca9055d98f0b9b6115bc2768154b8d7e698431b900930893efb5e686bc3d82"
+        },
+        {
+          "path": "wall_config.json",
+          "size": 4472,
+          "sha256": "96fad834cfe6f1eb517e43ffa087eb53791d4bed9633b200c9c4f4c1a6086509"
+        }
+      ]
+    },
+    "w8a16": {
+      "artifact_directory": "work_dirs/runtime_packages/hmquant_xh2_wall_oss_05_w8a16_p256_c1024_v1024_h32_20261029",
+      "golden_directory": "work_dirs/golden_packages/hmquant_xh2_wall_oss_05_w8a16_p256_c1024_v1024_h32_20261029",
+      "quant_type": "w8a16_sefp",
+      "comparisons": {
+        "0": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0000000000000002,
+          "prefix_tokens": 618
+        },
+        "87": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0000000000000002,
+          "prefix_tokens": 609
+        },
+        "1344": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0,
+          "prefix_tokens": 611
+        },
+        "1905": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0,
+          "prefix_tokens": 615
+        },
+        "boundary_992_plus_32": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0000000000000002,
+          "prefix_tokens": 992
+        },
+        "long_english": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0,
+          "prefix_tokens": 992
+        },
+        "long_unicode": {
+          "bit_exact": true,
+          "max_abs": 0.0,
+          "rmse": 0.0,
+          "cosine": 1.0,
+          "prefix_tokens": 991
+        }
+      },
+      "truncation": {
+        "0": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 618,
+          "retained_prefix_tokens": 618,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 19,
+          "retained_instruction_tokens": 19
+        },
+        "87": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 609,
+          "retained_prefix_tokens": 609,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 11,
+          "retained_instruction_tokens": 11
+        },
+        "1344": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 611,
+          "retained_prefix_tokens": 611,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 11,
+          "retained_instruction_tokens": 11
+        },
+        "1905": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 615,
+          "retained_prefix_tokens": 615,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 15,
+          "retained_instruction_tokens": 15
+        },
+        "boundary_992_plus_32": {
+          "truncated": false,
+          "side": "right",
+          "original_prefix_tokens": 992,
+          "retained_prefix_tokens": 992,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 393,
+          "retained_instruction_tokens": 393
+        },
+        "long_english": {
+          "truncated": true,
+          "side": "right",
+          "original_prefix_tokens": 2699,
+          "retained_prefix_tokens": 992,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 2101,
+          "retained_instruction_tokens": 393
+        },
+        "long_unicode": {
+          "truncated": true,
+          "side": "right",
+          "original_prefix_tokens": 2999,
+          "retained_prefix_tokens": 991,
+          "prefix_limit": 992,
+          "original_instruction_tokens": 2400,
+          "retained_instruction_tokens": 392
+        }
+      },
+      "checks": {
+        "graph_port_precision_group_audit": "passed",
+        "old_package_legacy_metadata": "passed",
+        "exact_capacity_boundary": "passed",
+        "over_capacity_instruction_truncation": "passed",
+        "public_inference": "passed"
+      },
+      "golden": {
+        "complete": true,
+        "backend": "hmonnx_v2",
+        "records": [
+          {
+            "step": 0,
+            "kind": "synthetic",
+            "graphs": [
+              "denoise",
+              "prefill",
+              "visual"
+            ]
+          },
+          {
+            "step": 1,
+            "kind": "representative",
+            "graphs": [
+              "denoise",
+              "prefill",
+              "visual"
+            ]
+          }
+        ]
+      },
+      "source_identity": {
+        "kind": "directory",
+        "config_sha256": "9a64a8d37fa493481e2d3d936985820d8955ee6b1c2bcdedee8654066df36c0a",
+        "sha256": "b4f25f8eff0f03d89185fe0df833378bd90e7bf3507fa849e1ba3ec43287fffc"
+      },
+      "artifact_files": [
+        {
+          "path": "denoise/wall_oss_denoise.onnx",
+          "size": 5535233,
+          "sha256": "b7f465c89dc270f55688aa288618601bcc3be66c2760a67ea73b17216807fe6a"
+        },
+        {
+          "path": "denoise/wall_oss_denoise_external_data",
+          "size": 412420096,
+          "sha256": "32d678af0dc91981576d2d72c353d48992630ffaf743e4ec88728966626d78f8"
+        },
+        {
+          "path": "effective_workflow.yaml",
+          "size": 252,
+          "sha256": "6fd20aee2e07d4a519d023c4dc1b456dab0068db73bb1db346eeb3a6a52ce4ff"
+        },
+        {
+          "path": "environment.json",
+          "size": 2705,
+          "sha256": "8fcf7163952085103511fb19131ab22b323700d670c44e707fa94699b22b621c"
+        },
+        {
+          "path": "environments/build.txt",
+          "size": 465,
+          "sha256": "3ecf62f0d7838a0302a0a00c77a933007c18aaef3cd46e40cbb29457dba038c4"
+        },
+        {
+          "path": "environments/checkpoint_build.txt",
+          "size": 465,
+          "sha256": "3ecf62f0d7838a0302a0a00c77a933007c18aaef3cd46e40cbb29457dba038c4"
+        },
+        {
+          "path": "environments/inference.txt",
+          "size": 418,
+          "sha256": "3310ffff310d1c6dfd18963e64870602850ee2c58f2e9bef5b3f9039869e4d77"
+        },
+        {
+          "path": "export_meta_info.json",
+          "size": 1067,
+          "sha256": "781be5c914fcadf60d58d84aeb98ab185cd43cdeeb0a21eed4e291dabe18bc6f"
+        },
+        {
+          "path": "normalizers.json",
+          "size": 72172,
+          "sha256": "c1c8503a614ed9fe2ad6eeed7c9949b9c076d30a9cb198a829628d1bad52b968"
+        },
+        {
+          "path": "prefill/wall_oss_prefill.onnx",
+          "size": 5385953,
+          "sha256": "9f414b0a77af4b8626aed5da4b1ea9c435295f35d8c2a60fca1a5a5b2957f084"
+        },
+        {
+          "path": "prefill/wall_oss_prefill_external_data",
+          "size": 2861716480,
+          "sha256": "53e5da9da9c7d864b145d9ba85aaca456bf402a2d6a75f3f40a80445d30a9bfd"
+        },
+        {
+          "path": "processor/chat_template.jinja",
+          "size": 2427,
+          "sha256": "44d5f08f3f72b837eaad09f13a54c1f9f4eb58d75240334548b7fd52a5437fa5"
+        },
+        {
+          "path": "processor/processor_config.json",
+          "size": 1294,
+          "sha256": "81d7e9034070c3b78ea0d42c54f9eef406d4e413b62c9f9d1bd0d3f7a98ac5ac"
+        },
+        {
+          "path": "processor/tokenizer.json",
+          "size": 11422266,
+          "sha256": "3b8cf9d93bf3296f420099877b0ae77c563b20149f894a7c8789eb3b0677638b"
+        },
+        {
+          "path": "processor/tokenizer_config.json",
+          "size": 766,
+          "sha256": "4e7a59f4a39ac555ad81c0293a8e92d69447ecb5af4e388a83eeacf009cfa95d"
+        },
+        {
+          "path": "quant_embedding.safetensors",
+          "size": 638013536,
+          "sha256": "cf023386388e4e7ad5e3779d76c8a1e72544cbbfeec7ced47aa5d27742067493"
+        },
+        {
+          "path": "runtime_meta_info.json",
+          "size": 890,
+          "sha256": "437afb00fb78ffb1fd96f41c1552409dd3eb227f2aba74ed2e07f546592245d2"
+        },
+        {
+          "path": "visual_p1024/wall_oss_visual.onnx",
+          "size": 4457279,
+          "sha256": "efcee86f7748cd420e7f048ed65ac8b0bf4f44d379e1e503fb6165b1f7d65a14"
+        },
+        {
+          "path": "visual_p1024/wall_oss_visual_external_data",
+          "size": 691652096,
+          "sha256": "99ca9055d98f0b9b6115bc2768154b8d7e698431b900930893efb5e686bc3d82"
+        },
+        {
+          "path": "wall_config.json",
+          "size": 4472,
+          "sha256": "96fad834cfe6f1eb517e43ffa087eb53791d4bed9633b200c9c4f4c1a6086509"
+        }
+      ]
+    }
+  },
+  "ci_after_sync": {
+    "base_commit": "0f0d977ea814e83bf7e8a0378246f2414e13465f",
+    "test_targets": 18,
+    "passed": 917,
+    "warnings": 8,
+    "seconds": 245.77
+  }
+}
