@@ -86,7 +86,10 @@ def test_private_model_and_adapter_changes_select_related_cases():
     assert _selected_cases(["xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_llm_model.py"]) == {
         c.id
         for c in CASES
-        if (c.model_id.startswith(("qwen3", "ornith", "macaron", "wemm")) and c.fixture != "qwen3_vl_reranker")
+        if (
+            c.model_id.startswith(("qwen3", "ornith", "macaron", "wemm", "bonsai"))
+            and c.fixture != "qwen3_vl_reranker"
+        )
         or c.fixture in {"minicpm_ocr", "ocr_rm"}
     }
     assert _selected_cases(["xhmodel_merak/xh_llm/models/qwen3_vl_reranker/model.py"]) == {"qwen3-vl-reranker-2b/full"}
@@ -164,7 +167,7 @@ def test_helpers_select_only_actual_model_consumers():
     }
     assert selected("_unified_fixtures/deepseek_v4.py") == {case.id for case in CASES if case.fixture == "deepseek_v4"}
     assert selected("_unified_fixtures/minicpm_v47.py") == {case.id for case in CASES if case.fixture == "minicpm_v47"}
-    assert selected("fixtures/unified/qwen_dense.json") == {case.id for case in CASES if case.fixture == "qwen_dense"}
+    assert selected("fixtures/unified/qwen_dense.json") == {case.id for case in CASES if case.fixture in {"qwen_dense", "bonsai"}}
     assert selected("fixtures/depthsplat/release.json") == {case.id for case in CASES if case.fixture == "depthsplat"}
     for helper in ("_unified_runner.py", "_unified_e2e_worker.py", "_unified_preparation.py"):
         assert selected(helper) == {case.id for case in CASES}
@@ -232,7 +235,7 @@ lock.unlink()
 """)
     monkeypatch.setattr(runner, "__file__", str(script.with_name("_unified_runner.py")))
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "synthetic-0,synthetic-1")
-    selected = [CASES[0], CASES[1], next(case for case in CASES if case.owner != CASES[0].owner)]
+    selected = [CASES[0], CASES[1], next(case for case in CASES[2:] if case.owner != CASES[0].owner)]
     items = [SimpleNamespace(callspec=SimpleNamespace(params={"case": case})) for case in selected]
     request = SimpleNamespace(session=SimpleNamespace(items=items))
     root = tmp_path / "runs"

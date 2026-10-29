@@ -1,0 +1,21 @@
+quant: null
+export:
+  model:
+    model_type: BonsaiForConditionalGeneration
+    model_name: bonsai_27b_phase_a
+    chip_arch: XH2a
+    hf_model: null
+    context_max_length: 2048
+    prefill_chunk_length: 64
+    max_pe_length: 262144
+    use_cache: true
+    num_logits_to_keep: 1
+    split_conv_cache: true
+    linear_chunk_size: 64
+    fuse_gdr_ops: false
+    fuse_gdr_block_recurrent_ops: false
+    normalize_force_fp32: false
+    quant_scheme:
+      quant_type: w8a8h1_sefp
+      nodes: {}
+      ops: {}

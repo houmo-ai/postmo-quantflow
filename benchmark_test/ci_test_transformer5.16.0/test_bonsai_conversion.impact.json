@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "rules": [{
+    "id": "bonsai-artifact-conversion",
+    "patterns": [
+      "xhmodel_merak/xh_llm/models/bonsai/bonsai_ssfp4.py",
+      "xhmodel_merak/xh_llm/models/bonsai/hadamard_matmul.py",
+      "examples_merak/llm/bonsai/convert_bonsai_to_ssfp4_phase_a.py"
+    ]
+  }]
+}
