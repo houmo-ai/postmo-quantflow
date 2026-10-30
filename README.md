@@ -6,7 +6,7 @@
 
 ## 依赖项
 
-使用已预装 xhquant、Torch 及运行依赖的 xhquanttool Python 环境。以下命令不会解析或安装
+使用已预装 xhquant、Torch 及运行依赖的 SDK Python 环境。以下命令不会解析或安装
 `pyproject.toml` 中的依赖；不要在空环境中执行，否则 `flash_attn` 等构建依赖不可用。
 
 ## 安装

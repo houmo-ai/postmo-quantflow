@@ -331,3 +331,6 @@ export_model_dependencies(
 条件尚未齐备；`pending_install_validation` 表示尚未完成干净环境验证。
 只有完成发布、依赖解析与对应变体的运行验证后，才能把文件作为可复现安装清单。
 查询和导出不会执行 pip、下载权重或导入 Torch/SDK。
+构建和推理需要环境预先提供兼容的 `xhquant` SDK；该前提记录在 `system`，
+requirements 不绑定 `xhquanttool` 或 `hmquant-xh2` 的发行包名和版本。
+ModelZoo 本身支持安装包或源码导入，requirements 不包含 `xhmodel-zoo` 自依赖。

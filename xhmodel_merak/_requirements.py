@@ -2,51 +2,13 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import tomllib
 from importlib import metadata
-from pathlib import Path
 from typing import Iterable
 
 from packaging.requirements import Requirement
 from packaging.version import InvalidVersion
-from packaging.utils import canonicalize_name
 
 from xhmodel_merak.errors import ErrorCode, ModelError
-
-
-_SOURCE_PACKAGES = {"xhmodel-zoo": "xhmodel_merak", "xhquanttool": "xhquant"}
-
-
-def _source_distribution_version(name: str) -> str | None:
-    """Read the distribution version belonging to the actual imported checkout.
-
-    CI loads these repositories via PYTHONPATH, without dist-info. Their import
-    names differ from distribution names, and SDK __version__ is a separate,
-    legacy runtime version. Never guess a version from an unrelated checkout.
-    """
-    package = _SOURCE_PACKAGES.get(canonicalize_name(name))
-    if package is None:
-        return None
-    try:
-        spec = importlib.util.find_spec(package)
-    except (ImportError, AttributeError, ValueError):
-        return None
-    if spec is None or spec.origin is None:
-        return None
-    project_file = Path(spec.origin).resolve().parent.parent / "pyproject.toml"
-    if not project_file.is_file():
-        return None  # Wheel installation: use its distribution metadata.
-    try:
-        project = tomllib.loads(project_file.read_text(encoding="utf-8"))["project"]
-        if canonicalize_name(project["name"]) != canonicalize_name(name):
-            raise ValueError("Source distribution name does not match imported package")
-        return str(project["version"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise ModelError(
-            ErrorCode.RESOURCE_NOT_FOUND,
-            "Cannot verify the imported source distribution version",
-            distribution=name, project_file=str(project_file), reason=str(exc),
-        ) from exc
 
 
 def validate_worker_requirements(requirements: Iterable[str], *, model: str, operation: str) -> None:
@@ -56,10 +18,7 @@ def validate_worker_requirements(requirements: Iterable[str], *, model: str, ope
         if requirement.marker is not None and not requirement.marker.evaluate():
             continue
         module_name = requirement.name.lower().replace("-", "_")
-        # Source must precede potentially stale editable-install metadata.
-        installed = _source_distribution_version(requirement.name)
-        if installed is None:
-            installed = _installed_distribution_version(requirement.name)
+        installed = _installed_distribution_version(requirement.name)
         if installed is None and requirement.specifier:
             installed = _installed_module_version(module_name)
         if installed is None:

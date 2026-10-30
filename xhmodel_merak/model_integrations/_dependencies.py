@@ -30,7 +30,7 @@ def runtime_dependencies(
 ) -> DependencySpec:
     return DependencySpec(
         common=(
-            "xhmodel-zoo==1.0.0", "xhquanttool==0.9.2", "torch==2.8.0", "triton==3.4.0",
+            "torch==2.8.0", "triton==3.4.0",
             f"transformers=={transformers}", "numpy==2.2.6", "safetensors==0.8.0",
             "accelerate==1.13.0", "einops==0.8.2", "PyYAML==6.0.3", "onnx==1.18.0",
             "onnx-graphsurgeon==0.5.8", "sentencepiece==0.2.1", *common,
@@ -39,9 +39,14 @@ def runtime_dependencies(
         inference=inference,
         quantization=quantization,
         checkpoint_build=checkpoint_build,
-        system=("Linux x86_64; CUDA 12.8 compatible NVIDIA driver", *system),
+        system=(
+            "Linux x86_64; CUDA 12.8 compatible NVIDIA driver",
+            "ModelZoo available as an installed package or importable source checkout",
+            "Compatible xhquant SDK supplied by the release or development environment",
+            *system,
+        ),
         unresolved=(
-            "Release the tested modified xhmodel-zoo and xhquanttool sources as immutable distributions",
+            "Validate the selected xhquant SDK with the model workflow",
             "Resolve installed distribution metadata conflicts before clean-environment validation",
             "Pin CUDA 12.8 wheel sources and transitive dependencies in the installation lock",
             *unresolved,

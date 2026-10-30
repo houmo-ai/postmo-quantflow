@@ -19,6 +19,11 @@ requirements 约束保留 markers/extras，合并时拒绝无条件精确版本�
 写入 `environment.json` 和 `environments/*.txt`；拒绝覆盖既有目录。
 构建在事务内写入相同文件，再生成集成清单与 Manifest，全部摘要随包保存。
 查询不加载模型、不探测宿主环境；导出不执行安装。用法见统一接口示例 README。
+ModelZoo 本身由安装包或可导入的源码提供，作为 `system` 前提记录；不在模型的
+第三方依赖中声明 `xhmodel-zoo` 自依赖，也不读取源码工程版本作为执行门槛。
+`xhquant` SDK 由发布或开发环境预先提供，作为 `system` 前提记录；统一接口不声明
+`xhquanttool` 或 `hmquant-xh2` 的 pip 依赖，不检查其发行包名、版本或源码工程名。
+实际构建和推理仍调用所选路径需要的 SDK API，缺少模块或接口会在消费阶段报错。
 静态源码扫描与运行进程导入记录仅作为审计辅助，不能直接推定某个包是必要依赖，
 也不能代替干净环境安装验证。所有当前注册模型（包括 Pi0.5）统一声明
 Transformers 5.16.1；Pi0.5 使用 LeRobot 0.6.0。公开 requirements 与 worker 前置检查统一使用已验证的精确版本，

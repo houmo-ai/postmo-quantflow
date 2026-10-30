@@ -52,16 +52,18 @@ def register(catalog: ModelCatalog) -> None:
             source_constraints=(("model_type", "DepthSplatONNX"), ("profile", "2v_256x256")),
             dependencies=DependencySpec(
                 common=(
-                    "xhmodel-zoo==1.0.0",
-                    "xhquanttool==0.9.2",
                     "torch==2.8.0",
                     "transformers==5.16.1",
                     "onnx==1.18.0",
                     "PyYAML==6.0.3",
                 ),
-                # NumPy/ORT come from xhquanttool; accelerate comes from xhmodel-zoo.
+                # NumPy/ORT/accelerate come from the prepared ModelZoo/SDK environment.
+                system=(
+                    "ModelZoo available as an installed package or importable source checkout",
+                    "Compatible xhquant SDK supplied by the release or development environment",
+                ),
                 unresolved=(
-                    "xhquanttool 0.9.2 is consumed from the local source checkout; an immutable distribution and clean installation remain unverified",
+                    "Clean installation with the selected xhquant SDK remains unverified",
                     "Prepared float ONNX bundle must match the declared upstream checkpoint and profile",
                 ),
             ),

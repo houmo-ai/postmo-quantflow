@@ -427,12 +427,14 @@ three tested source checkouts on `PYTHONPATH`; an older checkout cannot provide
 these APIs just because its distribution version matches.
 
 For source-based CI, keep the tested ModelZoo, SDK and GPTQModel checkouts on
-`PYTHONPATH`. Dependency checks read ModelZoo (`xhmodel-zoo==1.0.0`) and SDK
-(`xhquanttool==0.9.2`) versions from the `pyproject.toml` next to the imported
-package, ahead of stale editable-install metadata. Wheel installs use their
-distribution metadata. The SDK's legacy runtime `__version__` is not its package
-release version. Missing GPTQModel distribution metadata does not justify
-replacing the modified checkout with a public PyPI package.
+`PYTHONPATH`. ModelZoo may be installed or imported directly from source; unified
+profiles do not require an `xhmodel-zoo` distribution or inspect its source project
+version. The environment must provide a compatible `xhquant` SDK; unified profiles
+do not pin or check the SDK's distribution name or release version. Other declared
+Python dependencies still undergo their version checks. Release and development
+SDKs are checked by the APIs actually consumed by the workflow. Missing GPTQModel
+distribution metadata does not justify replacing the modified checkout with a
+public PyPI package.
 Quantization also pins `datasets==3.6.0`: the CI image's 5.0.1 failed while
 fingerprinting even a one-row calibration dataset (`MonthDayNano` pickling).
 Install with dependency resolution and run `python -m pip check`; checking only

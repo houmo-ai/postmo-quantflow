@@ -551,7 +551,7 @@ def test_registry_exposes_executable_worker_dependency_profiles(monkeypatch):
     ]
     assert "misaki[en,zh]==0.9.4" in profile("kokoro-82m-v1.1-zh")["inference"]["pip"]
     assert describe_model("pi0.5-libero", full=True)["required_resources"] == ["tokenizer"]
-    assert {"xhquanttool==0.9.2", "transformers==5.16.1", "lerobot==0.6.0"} <= set(
+    assert {"transformers==5.16.1", "lerobot==0.6.0"} <= set(
         profile("pi0.5-libero")["inference"]["pip"]
     )
     assert describe_model("qwen3.5-4b", full=True)["worker_capabilities"] == []
