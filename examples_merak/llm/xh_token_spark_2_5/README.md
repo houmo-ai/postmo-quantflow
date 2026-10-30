@@ -114,6 +114,35 @@ Spark recipe 位于本工程的
 标定数据准备复用 GPTQModel 的 `prepare_calibration_dataset`，无需修改 GPTQModel。
 导出时 packed Linear 保留 checkpoint 的 W4/W8 位宽，浮点模块使用 RTN W8。
 
+### 独立 mixed 脚本的精度规则
+
+`spark_tokens_autoround_mixed.py` 从 checkpoint 的 `config.json` 读取层数 N，
+取 `k = min(2, N // 2)`。所有 attention 的 `q_k_v_proj`、`out_proj` 使用 W8；
+首 k 层和末 k 层的 MLP `gate_proj`、`up_proj`、`down_proj` 使用 W8，
+其余 MLP 跟随 `--bits`（默认 W4）。层号从 0 开始：
+
+| N | 使用 W8 的 MLP 层 |
+| --- | --- |
+| 1 | 无；仅 attention 使用 W8 |
+| 2 | 0、1 |
+| 3 | 0、2 |
+| 4 | 0、1、2、3 |
+| 5 | 0、1、3、4 |
+| 36 | 0、1、34、35 |
+
+mixed 配置对 `self_attn.g_proj` 和 `lm_head` 显式设置 `bits:16`，
+要求 AutoRound 跳过其权重量化；该值不强制把原始 BF16 权重转换为 FP16。
+embedding 不启用量化，RMSNorm 不属于 Linear 量化目标。
+这里的“保持浮点”指 AutoRound checkpoint 阶段，后续 HMONNX 导出仍按部署配置处理。
+默认输出目录的精度标记随全局位宽变化：W4 为 `w4w8`，W8 为 `w8`，W5 为 `w5w8`。
+
+两个独立脚本 `spark_tokens_autoround.py` 和 `spark_tokens_autoround_mixed.py`
+的 `--data-type` 默认值均已从 `int_sym_gptq` 改为 `int_sym_xh_hessian`，
+并作为全局 `--data_type` 传给 AutoRound；需要原值时显式传入
+`--data-type int_sym_gptq`。单层 override 的 `data_type:int` 保持自身配置。
+这项默认值变更仅描述这两个 CLI，不改变 workflow YAML 或 recipe 自身的默认值。
+普通脚本仍使用自身的 W4/浮点 gate 策略，不采用上述首尾层规则。
+
 ### Workflow 量化与导出
 
 ```bash

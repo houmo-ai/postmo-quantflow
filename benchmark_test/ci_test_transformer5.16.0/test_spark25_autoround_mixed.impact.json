@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "spark25-autoround-mixed",
+      "patterns": [
+        "examples_merak/llm/xh_token_spark_2_5/spark_tokens_autoround_mixed.py",
+        "examples_merak/llm/xh_token_spark_2_5/spark_tokens_autoround.py",
+        "xhmodel_merak/xh_llm/models/xh_token_spark_2_5/autoround_recipe.py",
+        "xhmodel_merak/xh_llm/models/xh_token_spark_2_5/spark_2_5/configuration_spark.py",
+        "xhmodel_merak/xh_llm/models/xh_token_spark_2_5/spark_2_5/modeling_spark.py"
+      ]
+    }
+  ]
+}

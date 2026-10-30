@@ -2,9 +2,10 @@
 """Spark2_5 dense AutoRound quantization (GPTQModel).
 
 The mixed-precision profile is derived from the checkpoint's ``config.json``:
-W4 is used for the bulk of the MLP. Fused attention projections and the
-first/last two MLP blocks skip quantization. Embeddings, the tied LM head,
-RMSNorm layers, and ``g_proj`` also remain in floating point.
+GQA ``q_k_v_proj`` and ``out_proj`` use W8. The first and last k MLP blocks
+also use W8, where k = min(2, num_hidden_layers // 2); remaining MLP blocks
+follow the global bit width (W4 by default). Embeddings, the tied LM head,
+RMSNorm layers, and ``g_proj`` remain in floating point.
 """
 
 import argparse
@@ -97,7 +98,8 @@ def build_autoround_command(args: argparse.Namespace, dataset: str | None = None
         str(args.seed),
     ]
     # AutoRound's layer_config accepts regex keys.  The global scheme remains
-    # W4A16 by default; these entries skip quantization for sensitive Linear layers.
+    # W4A16 by default; overrides promote projections to W8 and explicitly
+    # keep the attention gate and LM head floating point.
     # RMSNorm is intentionally absent: it is not a supported quantization
     # target in the Spark2_5 module tree and therefore stays BF16.
     command.extend(["--layer_config", build_mixed_layer_config_arg(args)])
@@ -111,9 +113,9 @@ def build_autoround_command(args: argparse.Namespace, dataset: str | None = None
 def build_mixed_layer_config_arg(args: argparse.Namespace) -> str:
     """Build AutoRound's compact mixed-precision config for Spark2_5 models.
 
-    The number of decoder layers is read from ``config.json`` so the
-    first/last two MLP blocks skip quantization for any compatible Spark2_5
-    checkpoint.
+    The number of decoder layers is read from ``config.json``. The first and
+    last k MLP blocks use W8, where k = min(2, num_hidden_layers // 2).
+    When k is zero, only the attention projections receive W8 overrides.
     RMSNorm is intentionally absent: it is not a supported quantization target
     in the Spark2_5 module tree and therefore stays BF16.
     """
@@ -122,10 +124,12 @@ def build_mixed_layer_config_arg(args: argparse.Namespace) -> str:
     edge_layers = tuple(sorted(set(range(edge_count)) | set(range(num_hidden_layers - edge_count, num_hidden_layers))))
     edge_pattern = "|".join(str(index) for index in edge_layers)
     entries = [
-        r"model.layers.[0-9]+.self_attn.(q_k_v_proj|out_proj):{bits:16}",
+        r"model.layers.[0-9]+.self_attn.(q_k_v_proj|out_proj):{bits:8,data_type:int}",
+        r"model.layers.[0-9]+.self_attn.g_proj:{bits:16}",
+        r"lm_head:{bits:16}",
     ]
     if edge_pattern:
-        entries.append(rf"model.layers.({edge_pattern}).mlp.(gate_proj|up_proj|down_proj):{{bits:16}}")
+        entries.append(rf"model.layers.({edge_pattern}).mlp.(gate_proj|up_proj|down_proj):{{bits:8,data_type:int}}")
     return "{" + ",".join(entries) + "}"
 
 
@@ -248,9 +252,10 @@ def run_autoround(args: argparse.Namespace) -> None:
 def build_default_output_dir(args):
     model_name = os.path.basename(os.path.normpath(args.model))
     time_suffix = datetime.now().strftime("%m%d%H")
+    weight_profile = "w8" if args.bits == 8 else f"w{args.bits}w8"
     return os.path.join(
         "work_dirs",
-        f"{model_name}-autoround-mixed-w{args.bits}fp16-{args.group_size}g-{args.format}_{time_suffix}",
+        f"{model_name}-autoround-mixed-{weight_profile}-{args.group_size}g-{args.format}_{time_suffix}",
     )
 
 
@@ -388,7 +393,7 @@ def parse_args():
         default="auto_gptq",
         help="AutoRound export format; auto_gptq produces a GPTQModel-compatible checkpoint",
     )
-    parser.add_argument("--data-type", type=str, default="int_sym_gptq")
+    parser.add_argument("--data-type", type=str, default="int_sym_xh_hessian")
     parser.add_argument("--sym", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--iters", type=int, default=200, help="AutoRound optimization iterations")
     parser.add_argument("--batch-size", type=int, default=8)

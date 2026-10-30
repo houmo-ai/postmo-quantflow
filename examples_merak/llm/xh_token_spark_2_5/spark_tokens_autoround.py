@@ -22,10 +22,10 @@ from pathlib import Path
 
 import torch
 from gptqmodel import GPTQModel
+from transformers import AutoTokenizer
 
 # Register Spark2_5 in GPTQModel before GPTQModel.load
 from xhmodel_merak.xh_llm.models.xh_token_spark_2_5 import gptqmodel_wrap  # noqa: F401
-from transformers import AutoTokenizer
 
 
 def read_model_config(model_dir: str) -> dict:
@@ -378,7 +378,7 @@ def parse_args():
         default="auto_gptq",
         help="AutoRound export format; auto_gptq produces a GPTQModel-compatible checkpoint",
     )
-    parser.add_argument("--data-type", type=str, default="int_sym_gptq")
+    parser.add_argument("--data-type", type=str, default="int_sym_xh_hessian")
     parser.add_argument("--sym", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--iters", type=int, default=200, help="AutoRound optimization iterations")
     parser.add_argument("--batch-size", type=int, default=8)
