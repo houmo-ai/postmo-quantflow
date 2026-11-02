@@ -5,6 +5,29 @@ Sol-H3 当前构建仅导出组件，不再附带完整 H3/LTX 去噪采样；�
 由发布后的独立验收负责。Native H3/LoRA 构建流程未改；已在运行的全量导出仍使用
 其启动时加载的源码，不能将后续编排优化追溯为该大包的构建方式。
 
+当前 schema 9 对每个时长导出一张共用权重的 LTX DiT；运行时通过末尾的 INT32 `[1]`
+`audio_mode` 选择 `0=joint` 或 `1=frozen`，默认后者。前者按原联合策略加噪、更新音视频；
+后者以音频 sigma 0 固定干净音频 latent，仅更新视频。图内按策略选择音频和交互条件表，
+Host 按同一策略选择音频状态更新；两者不可独立切换。两策略保留相同的视频噪声抽样顺序，
+最终音轨均为 H3 PCM。两时长均须重导 LTX DiT，不能仅改旧 metadata；实际提示词的画面
+质量仍须验证。调用方式和场景建议见 [Sol-H3 示例](../../../examples_merak/aigc/sol_h3/README.md)。
+
+2026-11-02 的冻结音频修复使用 schema 6，并显式记录 `ltx_audio_frozen: true`，以下是
+当时的固定语义，之后 schema 8 也只支持冻结策略：
+H3 阶段仍生成音视频；LTX 阶段把编码后的 H3 音频 latent 保持为干净条件，
+音频 sigma/timestep 为零，每步只更新视频状态。Transformer 内部的音频分支继续参与
+音视频注意力计算，最终音轨仍为原始 H3 PCM。原始随机抽样顺序保留，方便与旧包作配对对照。
+音频自身的时间表、音视频交互条件与提示词投影随新状态重新折叠；只停止 Host 音频更新不够。
+加载器接受且通过校验的 schema 3/4/5 继续按旧联合去噪语义加载。
+上游语义依据为 [Sana #543](https://github.com/NVlabs/Sana/pull/543)。下文 2026-10 月发布包仍按其历史记录解释。
+
+5 秒和 15 秒 W4 五模式配置要求首尾原图覆盖 LTX 输出画布，
+通过 `ltx_reference_conditioning.require_native_resolution` 发布该输入要求。
+runtime 在 Qwen/H3 前按原生 EXIF 旋转后的尺寸检查首尾图片，拒绝需要放大的输入；
+Ref2VA 素材预算独立。旧包缺失该字段时保留原输入行为。
+该检查仅判断尺寸，图片本身的清晰度仍属素材验收；不改变图像 encoder ABI、
+首帧固定/末帧引导、音频冻结或 DiT 时间表，无需为此重导模型图。
+
 2026-10-23 首轮 Conv3d 完整包位于
 `/data01/datasets/Sol-H3-assets/releases/unified_w4_conv3d_20261023/bundle`。
 五种模式均已通过隐藏源目录的公开推理、1344×768×121 视频解码及32kHz双声道
@@ -12,7 +35,7 @@ Sol-H3 当前构建仅导出组件，不再附带完整 H3/LTX 去噪采样；�
 该历史包 reference encoder 使用有损 zero padding。2026-10-24 源码恢复原生 reflect，
 Conv3d 仍由 SDK 拆为 Slice/Conv2d/Add；新产物需独立验收，不能沿用旧包结论。
 
-默认构建配置已改为 schema 5 五模式统一包，prompt 上限 1024，Qwen KV 容量由官方
+2026-10 月构建配置采用 schema 5 五模式统一包，prompt 上限 1024，Qwen KV 容量由官方
 processor 预算推算并向上对齐 256。首尾帧四模式共用 base H3 分支，Ref2VA 使用独立的
 transformer_ref 与 LoRA；两分支各自拥有 text refiner、DiT 和时间常量表。Qwen 视觉、
 前 50 层语言图、音频、桥接和 LTX 组件共用，运行时每个请求重置 KV 并按阶段释放 session。
@@ -41,7 +64,7 @@ Ref 图片/视频各自保留一个最大空间画布、有效域 mask 及 GN→
 `reference_vae_layout="split_v1"` 明确标识新参考编码布局；`reference_vae_base`
 记录普通图名和精确 shape，`reference_vae_tiles` / `reference_vae_masks` 只记录 Ref 图
 路由和 mask 策略。实际请求模式决定普通/Ref 分支，避免同尺寸时角色混用。
-构建阶段显式按 H3 分支选择，运行阶段使用模式视图；统一包仍为 schema 5。
+构建阶段显式按 H3 分支选择，运行阶段使用模式视图；该批统一包为 schema 5。
 旧单画布、缺失布局标识或旧无 mask 参考包明确报错，须重新导出。
 单模式构建也生成上述新布局，只包含所需角色，不输出旧参考图格式。
 当前完整包为 `Sol-H3-assets/releases/unified_w4_rms1024_reflectpad_20261024/relocated/bundle`，

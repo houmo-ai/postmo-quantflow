@@ -6,6 +6,7 @@ from copy import deepcopy
 
 from .capacity import MODES
 
+
 BRANCH_GRAPHS = ("h3_text_refiner", "h3_denoiser")
 
 
@@ -34,7 +35,7 @@ def mode_metadata(metadata, mode):
         raise ValueError("Sol-H3 mode is missing its native input contract")
     result = deepcopy(metadata)
     result.update(
-        schema_version=4,
+        schema_version=metadata["schema_version"] if metadata.get("schema_version") in (8, 9) else 4,
         mode=mode,
         profile=selected["profile"],
         capacity_plan=deepcopy(selected["capacity_plan"]),

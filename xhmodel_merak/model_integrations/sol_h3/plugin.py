@@ -25,10 +25,7 @@ _WORKFLOWS = "configs_merak/workflows/xh2a/other_models/sol_h3/"
 _QUANT_REQUIREMENTS = (*GPTQ_REQUIREMENTS, "torchao==0.17.0")
 _PROFILE_WORKFLOWS = (
     ("all-dense-384p-768p-5s", _WORKFLOWS + "sol_h3_all_384p_768p_w4.yaml"),
-    ("dense-384p-768p-5s", _WORKFLOWS + "sol_h3_dense_384p_768p_w4.yaml"),
-) + tuple(
-    (f"{mode}-dense-384p-768p-5s", _WORKFLOWS + f"sol_h3_{mode}_384p_768p_w4.yaml")
-    for mode in ("i2va", "l2va", "fl2va", "ref2va")
+    ("all-dense-384p-768p-15s", _WORKFLOWS + "sol_h3_all_384p_768p_15s_w4.yaml"),
 )
 __all__ = ("PROVIDER_ID", "COMPONENTS", "register")
 
@@ -73,7 +70,7 @@ def register(catalog):
             artifact_format="sol_h3",
             default_profile="all-dense-384p-768p-5s",
             profiles=tuple(profile for profile, _ in _PROFILE_WORKFLOWS),
-            artifact_name_template="hmquant_xh2_sol_h3_{deployment_precision}_384p_768p_5s",
+            artifact_name_template="hmquant_xh2_sol_h3_{deployment_precision}_384p_768p",
             config_resolver="xhmodel_merak.model_integrations.sol_h3.source:resolve_config",
             checkpoint_config_projection="xhmodel_merak.model_integrations.sol_h3.source:normalize_checkpoint_config",
             dependencies=runtime_dependencies(
@@ -115,6 +112,13 @@ def register(catalog):
                         },
                     },
                     "seed": {"type": "integer", "minimum": 0, "maximum": 2**63 - 1, "default": 42},
+                    "ltx_audio_mode": {
+                        "type": "string", "enum": ["joint", "frozen"],
+                        "description": (
+                            "LTX audio policy; schema-9 bundles default to frozen, "
+                            "older bundles retain their fixed policy"
+                        ),
+                    },
                     "output_path": {"type": "string", "minLength": 1, "default": "sol_h3.mp4"},
                 },
             },

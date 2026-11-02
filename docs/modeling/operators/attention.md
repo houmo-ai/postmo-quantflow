@@ -53,6 +53,17 @@ K/V 的 SEFP 指数对齐轴不同，不能把相同浮点 latent 当成可共�
 
 ## MaskAdd：数学式相似不代表图契约相同
 
+当前 XH2a 编译器的 FlashAttention 要求静态 K/V 序列维至少为 512，
+不以本次有效前缀长度替代图中的静态 KV 容量。短于 512 时，模型图使用
+`xhquant.nn.MatMul`（先缩放 Q）→ `xhquant.nn.MaskedAdd` → Softmax →
+`xhquant.nn.MatMul`，同时保留 causal、GQA、有效长度和空 KV 的输出语义。
+Sol-H3 的参考音频 VAE、LTX 音频自注意力和视频查询音频的交叉注意力需要此路径。
+
+带二值 key mask 的 XH2a FlashAttention 使用五输入 ONNX：`Q, K, V, LUT, mask`。
+mask 是 `[B,1,1,KV]` FP16，0 有效、-65504 无效，放在下标 4；
+不与 causal、长度、sinks 或 range 输入混用。原下标 11 的 mask 产物必须重新导出。
+普通 causal/cache 模式的整数长度 ABI 保持原样。
+
 [Gemma4 视觉适配](../../../xhmodel_merak/xh_llm/models/gemma4_series/gemma4_series_vision_model.py)
 使用 `xhquant.nn.MaskedAdd` 表达 Softmax 前的 mask；不能直接“简化”为一个普通 Add。
 [Kokoro ALBERT](../../../xhmodel_merak/xh_other_model/models/kokoro/graph.py) 的

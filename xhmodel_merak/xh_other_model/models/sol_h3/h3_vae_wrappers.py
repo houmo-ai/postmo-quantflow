@@ -69,7 +69,7 @@ class _SolH3AudioSnake1d(_audio._MiniMaxH3AudioSnake1d):
 class _SolH3AudioCausalAttention(_audio._MiniMaxH3AudioCausalAttention):
     def _setup(self, *args, **kwargs):
         del args, kwargs
-        from xhquant.nn import FlashAttention
+        from ...common.attention import CompilerAttention as FlashAttention
 
         projection = nn.Linear(
             self.qkv.in_features,

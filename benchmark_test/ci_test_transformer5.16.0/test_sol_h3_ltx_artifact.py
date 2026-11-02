@@ -18,11 +18,66 @@ from xhmodel_merak.xh_other_model.models.sol_h3.artifacts import (
 from xhmodel_merak.xh_other_model.models.sol_h3.build import validate_build_config
 
 
+@pytest.mark.parametrize(
+    "latent_frames,output_frames,tiles,graphs",
+    [
+        (16, 121, [(0, 16, 0, 121)], ["ltx_video_decode"]),
+        (46, 361, [(0, 16, 0, 121), (12, 29, 96, 225), (25, 42, 200, 329), (38, 46, 304, 361)],
+         ["ltx_video_decode_t16", "ltx_video_decode_t17", "ltx_video_decode_t8"]),
+    ],
+)
+def test_decoder_temporal_gears_route_tiles_and_stitch_every_frame(
+    tmp_path, monkeypatch, latent_frames, output_frames, tiles, graphs
+):
+    from types import SimpleNamespace
+
+    import numpy as np
+    from _sol_h3_tiny_components import video_decoder_source
+    from torch.nn import functional as F
+
+    from xhmodel_merak.xh_other_model.models.sol_h3 import source_io
+    from xhmodel_merak.xh_other_model.models.sol_h3.build import BundleExporter
+    from xhmodel_merak.xh_other_model.models.sol_h3.runtime import SolH3Runtime
+
+    native = [SimpleNamespace(
+        in_coords=(slice(0, 1), slice(0, 128), slice(start, end), slice(0, 1), slice(0, 2)),
+        out_coords=(slice(0, 1), slice(0, 3), slice(first, last), slice(0, 2), slice(0, 2)),
+        masks_1d=[torch.ones(1) for _ in range(5)],
+    ) for start, end, first, last in tiles]
+    monkeypatch.setattr(source_io, "video_decoder", lambda *_: (video_decoder_source(), native, True))
+    monkeypatch.setattr(source_io, "prepare_video_decoder", lambda source: source)
+    runner = object.__new__(BundleExporter)
+    runner.assets, runner.cfg = None, {}
+    runner.refined_latent = torch.linspace(-1, 1, latent_frames).view(1, 1, -1, 1, 1).expand(1, 128, -1, 1, 2)
+    runner.meta = {"schema_version": 8, "mode": "all", "video_decoder_graphs": [], "graphs": {}}
+    runner.progress = lambda *_: None
+    runner.resource = lambda _name, masks, **_: np.savez(tmp_path / "masks.npz", **masks)
+    runner.graph = lambda name, *_args, **_kwargs: runner.meta["graphs"].update({name: {}})
+    runner.video_vae()
+    assert runner.meta["video_decoder_graphs"] == graphs
+    assert [tile["output"][2][:2] for tile in runner.meta["decoder_tiles"]] == [[a, b] for _, _, a, b in tiles]
+
+    # The learned decoder is replaced by a linear ramp; tile routing, overlap
+    # normalization and the final frame still run through the real Host.
+    runtime = object.__new__(SolH3Runtime)
+    runtime.meta = {**runner.meta, "refiner_frames": output_frames, "refiner_size": [2, 2]}
+    runtime.device, runtime.sessions = torch.device("cpu"), {}
+    runtime.numpy_resource = lambda _: np.load(tmp_path / "masks.npz")
+    runtime.invoke = lambda _name, sample, *_: (
+        F.interpolate(sample[:, 0, :, 0, 0].unsqueeze(1), size=(sample.shape[2] - 1) * 8 + 1,
+                      mode="linear", align_corners=True).view(1, 1, -1, 1, 1).expand(-1, 3, -1, 2, 2),
+    )
+    result = runtime.video_decode(runner.refined_latent)
+    expected = ((torch.linspace(-1, 1, output_frames) + 1) * 127.5).round().byte().numpy()
+    assert result.shape == (output_frames, 2, 2, 3)
+    np.testing.assert_allclose(result[:, 0, 0, 0], expected, atol=1, rtol=0)
+
+
 @pytest.mark.parametrize("epsilon", [None, 2**-24])
 def test_encoder_epsilon_is_an_explicit_optional_build_policy(epsilon):
     repo = Path(__file__).resolve().parents[2]
     config = yaml.safe_load(
-        (repo / "configs_merak/workflows/xh2a/other_models/sol_h3/sol_h3_dense_384p_768p_w8.yaml").read_text()
+        (repo / "configs_merak/workflows/xh2a/other_models/sol_h3/sol_h3_all_384p_768p_w4.yaml").read_text()
     )["export"]
     config["ltx_reference_conditioning"] = {"enabled": True, "encoder_norm_eps": epsilon}
     before = deepcopy(config)

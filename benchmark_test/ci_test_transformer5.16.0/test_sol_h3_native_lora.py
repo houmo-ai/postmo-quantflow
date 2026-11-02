@@ -7,7 +7,7 @@ from copy import deepcopy
 import pytest
 import torch
 from safetensors.torch import save_file
-from test_sol_h3_static_graph import tiny_source
+from test_sol_h3_static_graph import text_key_mask, tiny_source
 
 from xhmodel_merak.xh_other_model.models.sol_h3.conditioning import H3Schedule, fold_h3_conditioning, modality_tables
 from xhmodel_merak.xh_other_model.models.sol_h3.h3_graph import H3DenoiserGraph, H3TextGraph
@@ -79,8 +79,8 @@ def test_native_lora_preserves_base_and_matches_explicit_ba_native_model(tmp_pat
     for name, value in source.state_dict().items():
         torch.testing.assert_close(value, original[name], rtol=0, atol=0)
     video, audio, text, positions, cos, sin = graph_inputs(source)
-    refined = text_graph(text / 16, torch.tensor([3]))
-    expected_refined = H3TextGraph(oracle, policy, input_divisor=16)(text / 16, torch.tensor([3]))
+    refined = text_graph(text / 16, text_key_mask(3, 3))
+    expected_refined = H3TextGraph(oracle, policy, input_divisor=16)(text / 16, text_key_mask(3, 3))
     torch.testing.assert_close(refined, expected_refined, rtol=2e-5, atol=2e-6)
     tags = torch.tensor([0] * 6 + [2] * 4 + [1] * 3)
     for step in (0, 3):

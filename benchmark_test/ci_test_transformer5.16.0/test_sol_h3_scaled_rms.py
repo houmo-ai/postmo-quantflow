@@ -56,9 +56,10 @@ def test_sol_norm_and_reference_yaml_flags_default_on_and_validate_types():
 
 
 @torch.no_grad()
-def test_refiner_div4_exports_plain_rms_and_matches_native(tmp_path):
+@pytest.mark.parametrize("capacity", [5, 1792])
+def test_refiner_div4_exports_plain_rms_and_matches_native(tmp_path, capacity):
     import onnx
-    from test_sol_h3_static_graph import tiny_source
+    from test_sol_h3_static_graph import text_key_mask, tiny_source
 
     from xhmodel_merak.xh_other_model.models.sol_h3.h3_graph import H3TextGraph
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
@@ -74,20 +75,27 @@ def test_refiner_div4_exports_plain_rms_and_matches_native(tmp_path):
     for module in source.modules():
         if isinstance(module, nn.RMSNorm):
             module.eps = 1e-5
-    values = torch.randn(1, 5, 24) / 16
+    values = torch.randn(1, capacity, 24) / 16
     values[:, 3:] = 0
-    valid = torch.tensor([3], dtype=torch.int32)
-    expected = H3TextGraph(source, input_divisor=16)(values[:, :3], valid)
+    mask = text_key_mask(capacity, 3)
+    expected = source.token_refiner(source.context_embedder(values[:, :3] * 16))
     path = tmp_path / "refiner.onnx"
     export_graph(
         H3TextGraph(source, input_divisor=16, sdk_ops=True),
-        (values, valid),
+        (values, mask),
         path,
-        ["features", "valid_length"],
+        ["features", "key_mask"],
         ["refined"],
         quant_scheme={"target_device": "XH2a", "quant_type": "w16a16_sefp"},
     )
     nodes = onnx.load(path, load_external_data=False).graph.node
+    graph = onnx.load(path, load_external_data=False).graph
+    assert [value.name for value in graph.input] == ["features", "key_mask"]
+    assert [dim.dim_value for dim in graph.input[1].type.tensor_type.shape.dim] == [1, 1, 1, capacity]
+    flashes = [node for node in nodes if node.op_type == "FlashAttention"]
+    assert len(flashes) == 2 * int(capacity >= 512)
+    assert all(len(node.input) == 5 and node.input[4] == "key_mask" for node in flashes)
+    assert not any(node.op_type in {"Less", "LessOrEqual"} for node in nodes)
     assert not any(node.op_type in {"Abs", "ReduceMax", "Max"} for node in nodes)
     norms = [node for node in nodes if node.op_type == "RMSNorm"]
     attrs = [{a.name: onnx.helper.get_attribute_value(a) for a in node.attribute} for node in norms]
@@ -95,7 +103,7 @@ def test_refiner_div4_exports_plain_rms_and_matches_native(tmp_path):
     assert sum(abs(a["eps"] - 1e-5 / 16) < 1e-12 for a in attrs) == 5
     assert all(a["force_fp32"] == 1 for a in attrs)
     session = HMONNXInferenceV2(str(path), session_config=HMONNXInferenceConfig(exec_devices=["cuda:0"]))
-    output = session.run({"features": values.cuda().half(), "valid_length": valid.cuda()})
+    output = session.run({"features": values.cuda().half(), "key_mask": mask.cuda().half()})
     actual = output[0] if isinstance(output, (tuple, list)) else output
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual[:, :3].cpu().float(), expected, rtol=0.03, atol=0.03)

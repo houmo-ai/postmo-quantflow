@@ -9,7 +9,8 @@
         "xhmodel_merak/xh_other_model/models/sol_h3/export.py",
         "xhmodel_merak/xh_other_model/models/sol_h3/conv_graph.py",
         "xhmodel_merak/xh_other_model/models/minimax_h3/vae_encoder_wrapper.py",
-        "xhmodel_merak/xh_other_model/models/sol_h3/masked_vae.py"
+        "xhmodel_merak/xh_other_model/models/sol_h3/masked_vae.py",
+        "xhmodel_merak/xh_other_model/common/attention.py"
       ]
     }
   ]

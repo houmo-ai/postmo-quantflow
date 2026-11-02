@@ -205,8 +205,16 @@ def configure_component_loaders(monkeypatch):
             cache,
             size=config["refiner_size"],
             keyframe=config.get("ltx_reference_conditioning", {}).get("enabled", True),
+            freeze_audio=True,
         )
-        return model, cache, video, audio, rope, mask
+        joint_video, joint_audio, _, _ = components.refiner_conditioning(
+            model,
+            cache,
+            size=config["refiner_size"],
+            keyframe=config.get("ltx_reference_conditioning", {}).get("enabled", True),
+            freeze_audio=False,
+        )
+        return model, cache, video, audio, rope, mask, joint_video, joint_audio
 
     def decoder(assets, latent, config):
         source = load(components.video_decoder_source, assets["output_video_vae"], "decoder.")
@@ -267,21 +275,13 @@ def configure_small_recipe(catalog, recipe, monkeypatch):
                     if canonicalize_name(Requirement(value).name) not in {"openimageio", "scipy"}
                 ),
             ),
-            default_profile="dense-32p-64p-5s",
+            default_profile="all-dense-32p-64p-5s",
             workflows_by_profile=(),
             profiles=tuple(profile.replace("384p-768p", "32p-64p") for profile in recipe.profiles),
-            variants=(
-                replace(
-                    next(variant for variant in recipe.variants if variant.name == "full"),
-                    workflow_config=(
-                        "configs_merak/workflows/xh2a/other_models/sol_h3/sol_h3_dense_384p_768p_w4.yaml"
-                    ),
-                ),
-            ),
             artifact_name_template="hmquant_xh2_sol_h3_{deployment_precision}_small",
             config_replacements=(
                 *recipe.config_replacements,
-                ("export.profile", "dense-32p-64p-5s"),
+                ("export.profile", "all-dense-32p-64p-5s"),
                 ("export.draft_size", [32, 32]),
                 ("export.refiner_size", [64, 64]),
                 ("export.prompt.max_tokens", 8),
@@ -352,7 +352,7 @@ def prepare_conditioned_source(tmp_path, monkeypatch, mode):
         if (mode == "i2va" and key == "last_image") or (mode == "l2va" and key == "image"):
             continue
         path = tmp_path / f"{key}.png"
-        Image.new("RGB", (32, 32), color).save(path)
+        Image.new("RGB", (64, 64), color).save(path)
         media[key] = str(path)
     keyframes = dict(media)
     extra = ()
@@ -503,6 +503,7 @@ def assert_all_export_layout(source, artifact, inputs, profile):
         "acsin",
         "first_role",
         "video_valid_length",
+        "audio_mode",
     ]
     for mode in ("t2va", "i2va", "l2va", "fl2va", "ref2va"):
         selected = mode_metadata(meta, mode)

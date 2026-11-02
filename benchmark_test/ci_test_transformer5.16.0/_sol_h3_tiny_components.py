@@ -233,7 +233,7 @@ def refiner_source():
 
 
 @torch.no_grad()
-def refiner_conditioning(source, cache, *, size, keyframe=False):
+def refiner_conditioning(source, cache, *, size, keyframe=False, freeze_audio=False):
     from xhmodel_merak.xh_other_model.models.sol_h3.conditioning import REFINER_SIGMAS
 
     source.half()
@@ -241,15 +241,21 @@ def refiner_conditioning(source, cache, *, size, keyframe=False):
     args = [[], []]
     for sigma in REFINER_SIGMAS[:-1]:
         for index, tokens in enumerate((count, 126)):
-            times = torch.tensor([sigma, 0.0] if index == 0 and keyframe else [sigma]).half()
+            own_sigma = 0.0 if index == 1 and freeze_audio else sigma
+            other_sigma = 0.0 if index == 0 and freeze_audio else sigma
+            times = torch.tensor([own_sigma, 0.0] if index == 0 and keyframe else [own_sigma]).half()
             features = torch.stack((times, times.square(), times.sin(), times.cos()), -1)
             global_features = features[:1]
+            other_time = torch.tensor([other_sigma]).half()
+            other_features = torch.stack(
+                (other_time, other_time.square(), other_time.sin(), other_time.cos()), -1
+            )
             args[index].append(
                 SimpleNamespace(
                     x=torch.zeros(1, tokens, 128).half(),
                     timesteps=source.time_projection(features)[None],
                     cross_scale_shift_timestep=source.cross_projection(features)[None],
-                    cross_gate_timestep=source.gate_projection(global_features)[None],
+                    cross_gate_timestep=source.gate_projection(other_features)[None],
                     embedded_timestep=source.output_time_projection(features)[None],
                     prompt_timestep=source.prompt_projection(global_features)[None],
                     context=cache["contexts"]["video" if index == 0 else "audio"].half(),

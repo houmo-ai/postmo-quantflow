@@ -14,12 +14,12 @@ class LengthMaskedAttention(nn.Module):
         self.scale = scale
         if type(use_flash_attention) is not bool:
             raise ValueError("use_flash_attention must be a bool")
-        self.use_flash_attention = use_flash_attention
+        self.use_flash_attention = use_flash_attention and kv_capacity >= 512
         self.register_buffer("query_positions", torch.arange(query_capacity, dtype=torch.int32))
         self.register_buffer("kv_positions", torch.arange(kv_capacity, dtype=torch.int32))
         self.valid = Greater()
         self.mask_cast = Cast(torch.float32)
-        if use_flash_attention:
+        if self.use_flash_attention:
             from xhquant.nn import FlashAttention
 
             self.attention = FlashAttention(num_heads=num_heads, is_causal=False, scale=scale)
@@ -34,7 +34,8 @@ class LengthMaskedAttention(nn.Module):
         # Clear unused cache slots before SEFP quantization as well as Softmax.
         q, k, v = q * valid_q, k * valid_kv, v * valid_kv
         if self.use_flash_attention:
-            output = self.attention(q, k, v, current_input_length=query_length, kv_valid_length=kv_length)
+            mask = (1 - valid_kv.transpose(-1, -2)) * -65504.0
+            output = self.attention(q, k, v, key_mask=mask)
         else:
             mask = (1 - valid_kv.transpose(-1, -2)) * -65504.0
             # Match native FA: scale Q before SEFP quantization/QK FP16 writeback.

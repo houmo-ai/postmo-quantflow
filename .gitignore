@@ -205,6 +205,15 @@ data/
 !data/calib_data/NeelNanda-pile-10k.jsonl
 !data/calib_data/sampledata/
 !data/calib_data/sampledata/*.png
+!data/sol_h3/
+data/sol_h3/*
+!data/sol_h3/README.md
+!data/sol_h3/cafe_first_hd.png
+!data/sol_h3/cafe_last_15s.png
+!data/sol_h3/cafe_ref_middle.png
+!data/sol_h3/cafe_ref_last.png
+!data/sol_h3/cafe_reference.mp4
+!data/sol_h3/cafe_reference.wav
 benchmark_test/allure-results
 benchmark_test/.env_benchmark
 /drafts

@@ -23,6 +23,10 @@
 - 涉及量化接入或权重格式时，遵循 [ModelZoo / GPTQModel 开发边界](docs/architecture/quantization-boundary.md)。
 - 算子、结构和芯片适配知识从 [建模知识索引](docs/modeling/README.md) 按需读取；
   设备支持结论必须带适用配置和验证证据，不能由芯片名称或单个模型类推。
+- 当前 XH2a 编译器要求 FlashAttention 的静态 KV 长度至少为 512；更短的 KV 在模型图中
+  使用 `xhquant.nn.MatMul` → `xhquant.nn.MaskedAdd` → Softmax → `xhquant.nn.MatMul`，
+  保留原有 scale、causal/有效长度 mask 和 GQA 语义。带二值 key mask 的 FlashAttention
+  使用五输入 ONNX ABI：`Q, K, V, LUT, FP16 mask`；旧的第 12 输入 mask 产物须重新导出。
 - 涉及 MLA/权重吸收或 cache 共享时，先核对 [Ling MLA 约束](docs/modeling/structures/ling-mla-quantization.md)：
   融合须在权重量化前完成；SEFP 指数域不同的 K/V 不得因浮点 latent 相同就共享缓存。
 - 涉及 Kokoro / M50 路径的 LSTM 时，先读 [Merak 的 LSTM 约定](xhmodel_merak/AGENTS.md)：

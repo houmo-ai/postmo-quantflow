@@ -103,7 +103,9 @@ class TextFeatureBlock(nn.Module):
         self.sdk_ops = sdk_ops
         self.use_cache = False
         if sdk_ops:
-            from xhquant.nn import FlashAttention, Rope
+            from xhquant.nn import Rope
+
+            from ...common.attention import CompilerAttention as FlashAttention
 
             self.rotary = Rope()
             self.attention = FlashAttention(

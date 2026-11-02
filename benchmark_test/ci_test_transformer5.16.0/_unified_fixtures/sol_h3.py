@@ -60,6 +60,12 @@ def validate_build(case, result, record):
     import numpy as np
 
     meta = json.loads((artifact / "runtime_meta_info.json").read_text())
+    assert meta["schema_version"] == 9
+    assert meta["ltx_audio_policy"] == {
+        "input_name": "audio_mode", "dtype": "int32", "shape": [1],
+        "modes": {"joint": 0, "frozen": 1}, "default": "frozen",
+    }
+    assert meta["attention_contract"] == {"mask_input_index": 4, "min_flash_kv_length": 512}
     assert meta["text_feature_divisor"] == meta["text_refiner_input_divisor"] == 16
     assert meta["text_rms_policy"] == "plain_wide_reduction" and meta["ltx_rope_mode"] == "inputs"
     assert all(item["path"].endswith(".onnx") for item in meta["graphs"].values())
@@ -85,13 +91,16 @@ def check_inference(moved, inputs, record):
     assert output.model_id == "sol-h3"
     assert (output.height, output.width, output.frames, output.fps) == (64, 64, 121, 24)
     assert output.stats["draft_updates"] == 4 and output.stats["refiner_updates"] == 3
+    assert output.stats["ltx_audio_mode"] == "frozen" and output.stats["ltx_audio_frozen"] is True
     with av.open(output.output_path) as video:
         assert len(video.streams.audio) == 1
         first = np.stack([frame.to_ndarray(format="rgb24") for frame in video.decode(video=0)])
         assert len(first) == 121
     first_media = inputs["generated_media"][output.output_path]
     meta = json.loads((moved / "runtime_meta_info.json").read_text())
-    assert meta["schema_version"] == 5 and meta["mode"] == "all" and meta["profile"] == inputs["profile"]
+    assert meta["schema_version"] == 9 and meta["mode"] == "all" and meta["profile"] == inputs["profile"]
+    assert meta["attention_contract"] == {"mask_input_index": 4, "min_flash_kv_length": 512}
+    assert meta["ltx_audio_policy"]["modes"] == {"joint": 0, "frozen": 1}
     assert set(meta["branches"]) == {"base", "ref"}
     assert "h3_reference_encode_ref_t17" in meta["reference_vae_tiles"].values()
     assert set(meta["reference_vae_masks"]) == set(meta["reference_vae_tiles"].values())
@@ -125,6 +134,15 @@ def check_inference(moved, inputs, record):
                 if mode == "t2va":
                     assert inputs["generated_media"][str(result["output_path"])] == first_media
         assert runtime.bundle_meta["mode"] == "all"
+        joint = inference_model(
+            artifact_dir=str(moved), device="cuda:0",
+            inputs={**request, **inputs["inventory"]["ref2va"], "ltx_audio_mode": "joint",
+                    "output_path": str(moved.parent / "ref2va_joint.mp4")},
+        )
+        assert joint.stats["ltx_audio_mode"] == "joint" and joint.stats["ltx_audio_frozen"] is False
+        with av.open(joint.output_path) as video:
+            assert len(video.streams.audio) == 1
+            assert sum(1 for _ in video.decode(video=0)) == 121
         reference = mode_metadata(meta, "ref2va")
         assert reference["h3_adapter"]["format"] == "peft"
         assert "h3_reference_audio_encode" in reference["graphs"]
@@ -140,4 +158,5 @@ def check_inference(moved, inputs, record):
         "source_removed": True,
         "return_t2va_bitexact": True,
         "return_t2va_comparison": "pre_codec_pixels_and_pcm",
+        "ltx_audio_modes": ["joint", "frozen"],
     }

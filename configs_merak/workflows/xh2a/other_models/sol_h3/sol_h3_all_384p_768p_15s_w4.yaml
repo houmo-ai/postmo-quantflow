@@ -1,4 +1,9 @@
-quant: null
+quant:
+  method: autoround
+  bits: 4
+  group_size: 64
+  iters: 200
+  calibration_file: calibration.pt
 export:
   # DiT RMSNorm uses the SDK exponent-scaled FP16 reduction; VAE/Qwen stay wide.
   norm_fp16: true
@@ -6,26 +11,41 @@ export:
   upscaler_conv3d_fastpath: false
   ltx_reference_conditioning:
     enabled: true
+    require_native_resolution: true
     encoder_norm_eps: 5.960464477539063e-8
+  conditioner_quant_type: w4a8h0_ssfp
   model:
     type: XHSolH3Model
     quant_scheme:
       target_device: XH2a
       quant_type: w8a8_sefp
   target_device: XH2a
-  profile: i2va-dense-384p-768p-5s
-  mode: i2va
+  profile: all-dense-384p-768p-15s
+  mode: all
   prompt:
     max_tokens: 1024
   qwen3_vl:
     prefill_chunk_length: 256
     # Pixel budgets are inherited from the checkpoint processor.
+  references:
+    independent_duration: true
+    image:
+      max_count: 3
+      target_area: 258048
+      vae_gears: [[384, 672], [448, 672], [672, 448], [512, 512]]
+    video:
+      max_count: 1
+      max_duration_seconds: 5
+      vae_size: [384, 672]
+    audio:
+      max_count: 1
+      max_duration_seconds: 5
   text_layers: 50
   text_layers_per_graph: 50
   draft_size: [384, 672]
-  draft_frames: 124
+  draft_frames: 362
   refiner_size: [768, 1344]
-  refiner_frames: 121
+  refiner_frames: 361
   fps: 24
   draft_attention: dense
   refiner_attention: dense
@@ -39,6 +59,10 @@ export:
     ffn_output_scale: 512.0
   video_tile: [128, 448, 768]
   video_overlap: [24, 64, 64]
-  calibration_prompt: A majestic eagle flies above a tranquil mountain lake, with snow-covered peaks in the background. Cinematic lighting, detailed feathers, natural movement, and gentle ambient sounds.
+  calibration_prompt: >-
+    A close-up of Medusa in detailed 3D Chinese animation style, with long black hair,
+    a golden crown and red-and-gold clothing in a warm palace chamber. Fixed camera,
+    natural expression and gentle movement. She speaks clearly in Mandarin:
+    后摩智能，我的最爱. Quiet room, no background music.
   calibration_seed: 42
 # Supply export.calibration_inputs in a custom YAML, or model_dir/calibration_inputs.json.

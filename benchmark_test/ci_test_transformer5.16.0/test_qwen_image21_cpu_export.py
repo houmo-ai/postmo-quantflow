@@ -226,11 +226,9 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
             nodes = [node for node in graph.node if node.op_type == "FlashAttention"]
             assert nodes and all(len(node.input) >= 6 and node.input[4] and node.input[5] for node in nodes)
             assert not any(node.op_type in {"Softmax", "MaskedSoftmax", "BfpFlashAttention"} for node in graph.node)
-        elif native_attention:
-            nodes = [node for node in graph.node if node.op_type == "FlashAttention"]
-            assert nodes and all(len(node.input) >= 10 and node.input[5] and node.input[9] for node in nodes)
-            assert not any(node.op_type in {"Softmax", "MatMul"} for node in graph.node)
         else:
+            # Every noncausal capacity in this fixture is below 512. A request
+            # for native FA must therefore use the compiler's short-KV path too.
             assert not any(node.op_type == "FlashAttention" for node in graph.node)
             assert any(node.op_type == "Softmax" for node in graph.node)
             assert any(node.op_type == "MatMul" for node in graph.node)

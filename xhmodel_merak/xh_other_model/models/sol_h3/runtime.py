@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .artifacts import artifact_path, read_metadata
+from .artifacts import artifact_path, read_metadata, resolve_ltx_audio_mode
 from .host import (
     audio_mel,
     h3_rope,
@@ -97,16 +97,24 @@ class SolH3Runtime:
             additions = [torch.zeros_like(hidden) for _ in range(3)]
             hidden = self.feature_prefill(hidden, cos, sin, additions)
             hidden = torch.nn.functional.pad(hidden, (0, 0, 0, capacity - len(ids)))
-            result = self.invoke("h3_text_refiner", hidden, valid)[0]
+            result = self.refine_text(hidden, len(ids))
             self.close()
             return result, len(ids)
         for name in self.meta["feature_graphs"]:
             hidden = self.invoke(name, hidden, cos, sin, valid)[0]
             # A text prefix component is used once; retain no GPU weights for it.
             self.close()
-        result = self.invoke("h3_text_refiner", hidden, valid)[0]
+        result = self.refine_text(hidden, len(ids))
         self.close()
         return result, len(ids)
+
+    def refine_text(self, features, length):
+        capacity = self.meta["text_capacity"]
+        if type(length) is not int or not 0 < length <= capacity or features.shape[1] != capacity:
+            raise ValueError("text refiner requires a nonempty prefix fitting its fixed capacity")
+        key_mask = torch.full((1, 1, 1, capacity), -65504.0, dtype=torch.float16)
+        key_mask[..., :length] = 0
+        return self.invoke("h3_text_refiner", features, key_mask)[0]
 
     def feature_prefill(self, hidden, cos, sin, additions):
         from .prefill import prefill_feature_graphs
@@ -165,7 +173,7 @@ class SolH3Runtime:
         features = torch.nn.functional.pad(
             features / self.meta["text_feature_divisor"], (0, 0, 0, self.meta["text_capacity"] - length)
         )
-        text = self.invoke("h3_text_refiner", features, torch.tensor([length], dtype=torch.int32))[0]
+        text = self.refine_text(features, length)
         self.close()
         return text, length, request
 
@@ -202,6 +210,9 @@ class SolH3Runtime:
         )
 
     def draft(self, text, length, seed, *, request=None):
+        from .duration import duration_gear
+
+        gear = duration_gear(self.meta["draft_frames"], self.meta["refiner_frames"], self.meta["fps"])
         size = self.meta["draft_size"]
         if request is not None or self.meta.get("h3_packed_inputs", False):
             from .host import ConditionedDraft, RolePartitionedDraft
@@ -219,16 +230,24 @@ class SolH3Runtime:
             draft = (
                 draft_type(request, **options)
                 if request is not None
-                else draft_type.from_text(size=size, text_length=length, **options)
+                else draft_type.from_text(
+                    size=size, text_length=length, video_frames=gear.h3_video_frames,
+                    audio_frames=gear.h3_audio_frames, **options
+                )
             )
             video, audio = draft.run(lambda *args: self.invoke("h3_denoiser", *args), text)
             self.close()
-            return unpatch_h3(video, size=size), audio.reshape(2, 207, 32).permute(0, 2, 1).contiguous()
-        video, audio = initial_h3(seed, size=size)
-        cos, sin = h3_rope(length, text_capacity=self.meta["text_capacity"], size=size)
+            audio = audio.reshape(2, gear.h3_audio_frames, 32).permute(0, 2, 1).contiguous()
+            return unpatch_h3(video, size=size, frames=gear.h3_video_frames), audio
+        video, audio = initial_h3(seed, size=size, video_frames=gear.h3_video_frames, audio_frames=gear.h3_audio_frames)
+        cos, sin = h3_rope(
+            length, text_capacity=self.meta["text_capacity"], size=size,
+            video_frames=gear.h3_video_frames, audio_frames=gear.h3_audio_frames,
+        )
         video, audio = h3_updates(lambda *args: self.invoke("h3_denoiser", *args), video, audio, text, cos, sin, length)
         self.close()
-        return unpatch_h3(video, size=size), audio.reshape(2, 207, 32).permute(0, 2, 1).contiguous()
+        audio = audio.reshape(2, gear.h3_audio_frames, 32).permute(0, 2, 1).contiguous()
+        return unpatch_h3(video, size=size, frames=gear.h3_video_frames), audio
 
     def audio_decode(self, latent):
         config = self.json_resource("h3_audio_config")
@@ -250,11 +269,14 @@ class SolH3Runtime:
         return result
 
     def audio_encode(self, pcm):
+        from .duration import duration_gear
+
+        gear = duration_gear(self.meta["draft_frames"], self.meta["refiner_frames"], self.meta["fps"])
         mel = audio_mel(pcm, source_rate=32000, config=self.json_resource("ltx_audio_frontend"))
         encoded = self.invoke("ltx_audio_encode", mel)[0]
         self.close()
-        result = torch.zeros(1, 8, 126, 16)
-        count = min(126, encoded.shape[2])
+        result = torch.zeros(1, 8, gear.ltx_audio_frames, 16)
+        count = min(gear.ltx_audio_frames, encoded.shape[2])
         result[:, :, :count] = encoded[:, :, :count]
         return result
 
@@ -264,9 +286,10 @@ class SolH3Runtime:
         policy = self.meta["ltx_reference_conditioning"]
         if not policy["enabled"]:
             return []
+        self._validate_keyframe_resolution(image, last_image)
         latents = []
         try:
-            for value, index in ((image, 0), (last_image, 120)):
+            for value, index in ((image, 0), (last_image, self.meta["refiner_frames"] - 1)):
                 if value is not None:
                     pixels = prepare_keyframe_pixels(value, size=self.meta["refiner_size"], crf=policy["image_crf"])
                     latents.append((index, self.invoke("ltx_image_encode", pixels)[0]))
@@ -274,20 +297,37 @@ class SolH3Runtime:
             self.close()
         return latents
 
-    def refine(self, video, audio, seed, *, image=None, last_image=None):
+    def _validate_keyframe_resolution(self, image, last_image):
+        policy = self.meta.get("ltx_reference_conditioning", {})
+        if not policy.get("require_native_resolution", False):
+            return
+        from .ltx_keyframes import validate_keyframe_resolution
+
+        for value in (image, last_image):
+            if value is not None:
+                validate_keyframe_resolution(value, self.meta["refiner_size"])
+
+    def refine(self, video, audio, seed, *, image=None, last_image=None, ltx_audio_mode=None):
+        selected_audio_mode = resolve_ltx_audio_mode(self.meta, ltx_audio_mode)
+        freeze_audio = selected_audio_mode == "frozen"
+        audio_mode_input = ()
+        if "ltx_audio_policy" in self.meta:
+            audio_mode_input = (
+                torch.tensor([self.meta["ltx_audio_policy"]["modes"][selected_audio_mode]], dtype=torch.int32),
+            )
         rope = ()
         if self.meta.get("ltx_rope_mode", "inputs") == "inputs":
             with self.numpy_resource("ltx_rope") as rope_data:
                 rope = tuple(torch.from_numpy(rope_data[f"rope_{i}"]) for i in range(8))
         policy = self.meta["ltx_reference_conditioning"]
         if policy["graph_mode"] == "static_maximum_guide":
-            from .ltx_keyframes import prepare_static_keyframe_state, static_keyframe_step, clear_static_keyframe_state
-
             from .conditioning import REFINER_SIGMAS
+            from .ltx_keyframes import clear_static_keyframe_state, prepare_static_keyframe_state, static_keyframe_step
 
             keyframes = self.ltx_image_encode(image=image, last_image=last_image)
             state = prepare_static_keyframe_state(
-                video, audio, keyframe_latents=keyframes, seed=seed, size=self.meta["refiner_size"], device=self.device
+                video, audio, keyframe_latents=keyframes, seed=seed, size=self.meta["refiner_size"],
+                refiner_frames=self.meta["refiner_frames"], device=self.device, freeze_audio=freeze_audio
             )
             try:
                 for step, (sigma, next_sigma) in enumerate(zip(REFINER_SIGMAS[:-1], REFINER_SIGMAS[1:], strict=True)):
@@ -299,30 +339,37 @@ class SolH3Runtime:
                         *rope,
                         state.first_role,
                         state.video_valid_length,
+                        *audio_mode_input,
                     )
                     state = static_keyframe_step(state, v.to(self.device), a.to(self.device), sigma, next_sigma)
                 return clear_static_keyframe_state(state).cpu()
             finally:
                 self.close()
-        video, audio = initial_ltx(video, audio, seed, device=self.device)
+        video, audio = initial_ltx(video, audio, seed, device=self.device, freeze_audio=freeze_audio)
         try:
-            video, audio = ltx_updates(lambda *args: self.invoke("ltx_denoiser", *args), video, audio, rope)
-            return unpatch_ltx(video, size=self.meta["refiner_size"])
+            video, audio = ltx_updates(
+                lambda *args: self.invoke("ltx_denoiser", *args, *audio_mode_input),
+                video, audio, rope, freeze_audio=freeze_audio,
+            )
+            return unpatch_ltx(video, size=self.meta["refiner_size"], frames=(self.meta["refiner_frames"] - 1) // 8 + 1)
         finally:
             self.close()
 
     def video_decode(self, latent):
         masks = self.numpy_resource("decoder_masks")
-        output = torch.zeros(1, 3, 121, *self.meta["refiner_size"], dtype=torch.float32)
-        weights = torch.zeros(1, 1, 121, *self.meta["refiner_size"], dtype=torch.float32)
+        output = torch.zeros(1, 3, self.meta["refiner_frames"], *self.meta["refiner_size"], dtype=torch.float32)
+        weights = torch.zeros(1, 1, self.meta["refiner_frames"], *self.meta["refiner_size"], dtype=torch.float32)
         for i, tile in enumerate(self.meta["decoder_tiles"]):
             ic = tuple(slice(*value) for value in tile["input"])
             oc = tuple(slice(*value) for value in tile["output"])
             sample = latent[ic]
-            if "video_decoder_mask" in self.meta:
+            if "video_decoder_mask" in self.meta or "video_decoder_masks" in self.meta:
                 from .vae_graph import decoder_mask_inputs
 
-                policy = self.meta["video_decoder_mask"]
+                policy = (
+                    self.meta["video_decoder_masks"][tile["graph"]]
+                    if "video_decoder_masks" in self.meta else self.meta["video_decoder_mask"]
+                )
                 pixels = self.invoke(tile["graph"], *decoder_mask_inputs(sample, **policy))[0].float()
                 pixels = pixels[..., : oc[3].stop - oc[3].start, : oc[4].stop - oc[4].start]
             else:
@@ -348,11 +395,15 @@ class SolH3Runtime:
         require_finite(output, name="decoded video")
         return ((output[0].permute(1, 2, 3, 0) + 1) * 127.5).round().clamp(0, 255).to(torch.uint8).numpy()
 
-    def generate(self, prompt, *, seed=42, output_path="sol_h3.mp4", image=None, last_image=None, references=None):
+    def generate(
+        self, prompt, *, seed=42, output_path="sol_h3.mp4", image=None, last_image=None, references=None,
+        ltx_audio_mode=None,
+    ):
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("Sol-H3 requires a nonempty prompt")
         if type(seed) is not int or not 0 <= seed < 2**63:
             raise ValueError("Sol-H3 seed is outside the supported range")
+        selected_audio_mode = resolve_ltx_audio_mode(self.bundle_meta, ltx_audio_mode)
         if self.device.type != "cuda":
             raise ValueError("this full Sol-H3 gear requires a CUDA HMONNX simulator")
         if self.bundle_meta.get("mode") == "all":
@@ -362,6 +413,8 @@ class SolH3Runtime:
             self.close()
             mode = infer_mode(image=image, last_image=last_image, references=references)
             self.meta = mode_metadata(self.bundle_meta, mode)
+        if self.meta.get("mode") in ("i2va", "l2va", "fl2va"):
+            self._validate_keyframe_resolution(image, last_image)
         stages = {}
 
         def stage(name, action):
@@ -383,8 +436,17 @@ class SolH3Runtime:
         pcm = stage("audio_decode", lambda: self.audio_decode(audio))
         video = stage("bridge", lambda: self.bridge(video))
         audio = stage("audio_encode", lambda: self.audio_encode(pcm))
-        video = stage("refiner", lambda: self.refine(video, audio, seed, image=image, last_image=last_image))
+        video = stage(
+            "refiner",
+            lambda: self.refine(
+                video, audio, seed, image=image, last_image=last_image, ltx_audio_mode=selected_audio_mode
+            ),
+        )
         pixels = stage("video_decode", lambda: self.video_decode(video))
+        if self.meta["refiner_frames"] != 121:
+            from .host import audio_for_video
+
+            pcm = audio_for_video(pcm, frames=len(pixels), fps=self.meta["fps"])
         path = Path(output_path).expanduser().resolve()
         stage("mux", lambda: write_video(path, pixels, pcm))
         return dict(
@@ -398,6 +460,8 @@ class SolH3Runtime:
                 quant_type=self.meta["quant_type"],
                 attention="dense",
                 refiner_cache_policy=self.meta["refiner_cache_policy"],
+                ltx_audio_mode=selected_audio_mode,
+                ltx_audio_frozen=selected_audio_mode == "frozen",
             ),
         )
 

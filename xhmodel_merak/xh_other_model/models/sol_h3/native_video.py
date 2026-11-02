@@ -63,7 +63,9 @@ class _Attention(nn.Module):
         self.q_norm, self.k_norm = _norm(source.norm_q, sdk_ops), _norm(source.norm_k, sdk_ops)
         self.sdk_ops = sdk_ops
         if sdk_ops:
-            from xhquant.nn import FlashAttention, Rope
+            from xhquant.nn import Rope
+
+            from ...common.attention import CompilerAttention as FlashAttention
 
             self.attention = FlashAttention(num_heads=self.heads, is_causal=False, scale=self.head_dim**-0.5)
             self.rope = Rope()

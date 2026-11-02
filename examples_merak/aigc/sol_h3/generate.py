@@ -14,12 +14,18 @@ def main():
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--ltx-audio-mode", choices=("joint", "frozen"),
+        help="LTX audio policy (new bundles default to frozen)",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--image", help="First keyframe")
     parser.add_argument("--last-image", help="Last keyframe")
     parser.add_argument("--references", help='JSON array of ordered {"kind", "path"} references')
     args = parser.parse_args()
     inputs = {"prompt": args.prompt, "seed": args.seed, "output_path": args.output}
+    if args.ltx_audio_mode is not None:
+        inputs["ltx_audio_mode"] = args.ltx_audio_mode
     for name in ("image", "last_image"):
         if getattr(args, name) is not None:
             inputs[name] = getattr(args, name)

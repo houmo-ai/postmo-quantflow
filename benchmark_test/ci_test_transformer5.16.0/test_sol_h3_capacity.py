@@ -100,6 +100,32 @@ def test_native_video_odd_sampling_and_audio_labels_fit_derived_bounds(component
     assert plan["dit_capacity"] == sum(plan[key] for key in ("text_capacity", "video_capacity", "audio_capacity"))
 
 
+@pytest.mark.parametrize("draft_frames", [124, 362])
+def test_compact_reference_budget_is_independent_of_target_duration(components, draft_frames):
+    from xhmodel_merak.xh_other_model.models.sol_h3.reference_geometry import image_size, video_size
+
+    config = dict(
+        mode="ref2va", prompt=dict(max_tokens=1024), draft_size=[384, 672], draft_frames=draft_frames,
+        references=dict(
+            independent_duration=True,
+            image=dict(
+                max_count=3, target_area=384 * 672,
+                vae_gears=[[384, 672], [448, 672], [672, 448], [512, 512]],
+            ),
+            video=dict(max_count=1, max_duration_seconds=5, vae_size=[384, 672]),
+            audio=dict(max_count=1, max_duration_seconds=5),
+        ),
+    )
+    plan = plan_capacities(config, **components)
+    assert plan["reference_video_tokens"] == 32 * 12 * 21 + 3 * 14 * 21
+    assert plan["reference_audio_tokens"] == 2 * 2 * 5 * 40
+    assert plan["qwen_visual_max_patches"] <= 1280
+    gears = config["references"]["image"]["vae_gears"]
+    assert image_size(1080, 1920, gears, 384 * 672) == (384, 672)
+    assert image_size(1920, 1080, gears, 384 * 672) == (672, 448)
+    assert video_size(1080, 1920, config["references"]["video"]["vae_size"]) == (384, 672)
+
+
 def test_native_rounding_geometries_and_processor_override_are_shared(components):
     from diffusers.modular_pipelines.minimax_h3.modular_pipeline import resolve_canvas_size
 
@@ -218,7 +244,7 @@ def test_unified_modes_share_graph_slots_without_changing_request_limits(compone
         mode_configs({**config, "mode": "t2va"})
 
 
-def test_production_visual_gears_keep_native_limits_without_padding_every_image_to_max(components):
+def test_small_visual_gears_merge_without_padding_native_large_inputs_to_maximum(components):
     processor = SimpleNamespace(
         image_processor=Qwen2VLImageProcessor(
             patch_size=16, merge_size=2, temporal_patch_size=2,
@@ -235,10 +261,10 @@ def test_production_visual_gears_keep_native_limits_without_padding_every_image_
                         video=dict(max_count=1, max_duration_seconds=5)),
     )
     plan = plan_unified_capacities(config, **{**components, "processor": processor})
-    assert plan["encoder"]["qwen_visual_patch_gears"] == [1024, 1280, 65536]
+    assert plan["encoder"]["qwen_visual_patch_gears"] == [1280, 65536]
     assert plan["encoder"]["qwen_visual_max_patches"] == 65536
     for mode in plan["modes"].values():
-        assert mode["qwen_visual_patch_gears"] == [1024, 1280, 65536]
+        assert mode["qwen_visual_patch_gears"] == [1280, 65536]
     single = plan_capacities(mode_configs(config)["i2va"], **{**components, "processor": processor})
     assert single["qwen_visual_patch_gears"] == [1024]
     assert single["image_qwen_tokens"] == 252

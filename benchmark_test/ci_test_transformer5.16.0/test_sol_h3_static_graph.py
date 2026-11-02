@@ -37,6 +37,24 @@ def tiny_source():
     )
 
 
+def text_key_mask(capacity, length):
+    mask = torch.full((1, 1, 1, capacity), -65504.0)
+    mask[..., :length] = 0
+    return mask
+
+
+@torch.no_grad()
+def test_text_refiner_accepts_external_mask_with_interior_padding():
+    source = tiny_source()
+    features = torch.randn(1, 7, 24)
+    visible = torch.tensor([0, 2, 5])
+    mask = torch.full((1, 1, 1, 7), -65504.0)
+    mask[..., visible] = 0
+    expected = source.token_refiner(source.context_embedder(features[:, visible]))
+    actual = H3TextGraph(source)(features, mask)
+    torch.testing.assert_close(actual[:, visible], expected, atol=3e-6, rtol=3e-5)
+
+
 @pytest.mark.parametrize("step", range(4))
 @torch.no_grad()
 def test_four_folded_steps_match_native_with_padding_and_no_projection(step):
@@ -61,7 +79,7 @@ def test_four_folded_steps_match_native_with_padding_and_no_projection(step):
         return_dict=False,
     )
     text_graph = H3TextGraph(source)
-    refined = text_graph(torch.cat((text, torch.zeros(1, 2, 24)), 1), torch.tensor([3]))
+    refined = text_graph(torch.cat((text, torch.zeros(1, 2, 24)), 1), text_key_mask(5, 3))
     graph = H3DenoiserGraph(source, tables, output, 6, 4, H3PrecisionPolicy(rms_norm_mode="stable"))
     cos, sin = source.rope(torch.cat((positions, torch.zeros(2, 3))))
     actual = graph(v, a, refined, torch.tensor([step]), cos[None, None], sin[None, None], torch.tensor([13]))
@@ -86,7 +104,7 @@ def test_fp16_graph_survives_large_text_projection_and_residual_without_clips():
     tables, output = modality_tables(folded)
     text_graph = H3TextGraph(source).half()
     graph = H3DenoiserGraph(source, tables, output, 6, 4).half()
-    refined = text_graph(torch.full((1, 3, 24), 10000.0, dtype=torch.float16), torch.tensor([3]))
+    refined = text_graph(torch.full((1, 3, 24), 10000.0, dtype=torch.float16), text_key_mask(3, 3))
     cos, sin = source.rope(torch.zeros(13, 3))
     actual = graph(
         torch.ones(1, 6, 8, dtype=torch.float16),

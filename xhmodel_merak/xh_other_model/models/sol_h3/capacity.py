@@ -9,16 +9,29 @@ from math import ceil, isfinite, lcm, sqrt
 MODES = ("t2va", "i2va", "l2va", "fl2va", "ref2va")
 
 
+def _visual_gears(capacities):
+    """Merge small Sol-H3 gears while retaining larger native/custom routes."""
+    values = sorted({capacity for capacity in capacities if capacity})
+    small = [capacity for capacity in values if capacity <= 1280]
+    return small[-1:] + [capacity for capacity in values if capacity > 1280]
+
+
 def mode_configs(config):
     """Resolve one unified profile into the existing native request contracts."""
     if config.get("mode") != "all":
         raise ValueError("unified capacity planning requires mode=all")
     result = {}
+    from .duration import GEARS
+
+    matches = [gear.seconds for gear in GEARS.values() if gear.draft_frames == config.get("draft_frames")]
+    if len(matches) != 1:
+        raise ValueError("unified profile requires a supported draft temporal gear")
+    seconds = matches[0]
     for mode in MODES:
         value = deepcopy(config)
         value["mode"] = mode
         size = value["draft_size"]
-        value["profile"] = ("" if mode == "t2va" else mode + "-") + f"dense-{size[0]}p-{size[0] * 2}p-5s"
+        value["profile"] = ("" if mode == "t2va" else mode + "-") + f"dense-{size[0]}p-{size[0] * 2}p-{seconds}s"
         if "calibration_inputs" in value:
             inventory = value.pop("calibration_inputs")
             if not isinstance(inventory, dict) or any(key not in MODES for key in inventory):
@@ -42,8 +55,8 @@ def plan_unified_capacities(config, **components):
         field: max(plan[field] for plan in plans.values())
         for field in ("text_capacity", "kv_capacity", "qwen_visual_max_patches")
     }
-    encoder["qwen_visual_patch_gears"] = sorted(
-        {capacity for plan in plans.values() for capacity in plan["qwen_visual_patch_gears"]}
+    encoder["qwen_visual_patch_gears"] = _visual_gears(
+        capacity for plan in plans.values() for capacity in plan["qwen_visual_patch_gears"]
     )
     branches = {}
     for branch, modes in (("base", MODES[:-1]), ("ref", ("ref2va",))):
@@ -136,6 +149,8 @@ def plan_capacities(config, *, tokenizer, processor=None, max_position_embedding
         video_latent_num_frames,
     )
 
+    from .reference_geometry import image_gears, video_gear
+
     mode = config.get("mode", "t2va")
     if mode not in MODES:
         raise ValueError(f"unsupported Sol-H3 mode: {mode}")
@@ -151,6 +166,8 @@ def plan_capacities(config, *, tokenizer, processor=None, max_position_embedding
     target_video = video_latent_num_frames(frames, 17, 5) * (size[0] // 32) * (size[1] // 32)
     target_audio = audio_latent_num_frames(frames) * 2
     refs = config.get("references", {})
+    if "independent_duration" in refs and type(refs["independent_duration"]) is not bool:
+        raise ValueError("references.independent_duration must be a boolean")
     if mode != "ref2va" and refs:
         raise ValueError("references limits apply only to ref2va; keyframe count follows the mode")
     counts = {
@@ -170,8 +187,10 @@ def plan_capacities(config, *, tokenizer, processor=None, max_position_embedding
     image_tokens = video_tokens = visual_patches = reference_video = reference_audio = overhead = 0
     image_patches = video_patches = 0
     if image_count:
-        edge = _integer(refs.get("image", {}).get("vae_short_edge", 2048), "image.vae_short_edge")
-        shapes = image_geometries(edge) if mode == "ref2va" else [tuple(size)]
+        image_options = refs.get("image", {})
+        edge = _integer(image_options.get("vae_short_edge", 2048), "image.vae_short_edge")
+        fixed_gears = image_gears(image_options) if mode == "ref2va" else None
+        shapes = (fixed_gears or image_geometries(edge)) if mode == "ref2va" else [tuple(size)]
         ip = processor.image_processor
         patches = max(ip.get_number_of_image_patches(h, w) for h, w in shapes)
         image_patches = visual_patches = patches
@@ -183,8 +202,11 @@ def plan_capacities(config, *, tokenizer, processor=None, max_position_embedding
         from diffusers.modular_pipelines.minimax_h3.encoders import MiniMaxH3Ref2VATextEncoderStep
 
         seconds = _duration(refs["video"].get("max_duration_seconds", 5), "video.max_duration_seconds")
-        frame_limit = min(frames, ceil(seconds * 24))
-        shapes, vp = video_geometries(size), processor.video_processor
+        frame_limit = ceil(seconds * 24)
+        if not refs.get("independent_duration", False):
+            frame_limit = min(frames, frame_limit)
+        fixed_video = video_gear(refs.get("video", {}))
+        shapes, vp = ([fixed_video] if fixed_video else video_geometries(size)), processor.video_processor
         timestamp_overhead = 0
         for num_frames in range(48, frame_limit + 1):
             sampled, timestamps = MiniMaxH3Ref2VATextEncoderStep._sample_video_condition_frames(
@@ -209,7 +231,8 @@ def plan_capacities(config, *, tokenizer, processor=None, max_position_embedding
         tracks = counts["audio"] + counts["video"]
         # Native preparation truncates every soundtrack to the target duration.
         # Reserve each separately; the request's aggregate 15s limit can only lower use.
-        standalone = ceil(min(audio_seconds, frames / 24) * 40)
+        duration = audio_seconds if refs.get("independent_duration", False) else min(audio_seconds, frames / 24)
+        standalone = ceil(duration * 40)
         reference_audio = 2 * tracks * standalone
         overhead += sum(label(f"<Audio {i}>: ") for i in range(1, tracks + 1))
 
@@ -233,7 +256,7 @@ def plan_capacities(config, *, tokenizer, processor=None, max_position_embedding
         prefill_chunk_length=chunk,
         kv_capacity=kv_capacity,
         qwen_visual_max_patches=aligned(visual_patches),
-        qwen_visual_patch_gears=sorted({aligned(n) for n in (image_patches, video_patches) if n}),
+        qwen_visual_patch_gears=_visual_gears(aligned(n) for n in (image_patches, video_patches)),
         image_qwen_tokens=image_tokens,
         video_qwen_tokens=video_tokens,
         presentation_overhead=overhead,

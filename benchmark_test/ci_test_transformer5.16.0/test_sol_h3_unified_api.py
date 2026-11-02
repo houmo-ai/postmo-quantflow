@@ -11,6 +11,7 @@ import pytest
 import yaml
 from onnx import TensorProto, helper
 
+from xhmodel_merak.errors import ModelError
 from xhmodel_merak.model_build.resolver import resolve_build_plan
 from xhmodel_merak.model_build.workflow import materialize_workflow_config
 from xhmodel_merak.model_catalog import get_recipe
@@ -67,6 +68,35 @@ def test_unified_mode_views_bind_native_weights_without_mutating_shared_inventor
     assert json.dumps(unified_mode_metadata, sort_keys=True) == before
 
 
+@pytest.mark.parametrize("field,size", [("image", (63, 32)), ("last_image", (64, 31))])
+def test_low_resolution_keyframes_fail_before_model_loading(tmp_path, unified_mode_metadata, field, size):
+    import torch
+    from PIL import Image
+
+    from xhmodel_merak.xh_other_model.models.sol_h3.ltx_keyframes import validate_keyframe_resolution
+    from xhmodel_merak.xh_other_model.models.sol_h3.runtime import SolH3Runtime
+
+    rotated = Image.new("RGB", (32, 64))
+    rotated.getexif()[274] = 6
+    rotated.save(tmp_path / "rotated.png", exif=rotated.getexif())
+    validate_keyframe_resolution(tmp_path / "rotated.png", (32, 64))
+    Image.new("RGB", size).save(tmp_path / "low_resolution.png")
+    runtime = object.__new__(SolH3Runtime)
+    runtime.device, runtime.sessions = torch.device("cuda:0"), {}
+    runtime.bundle_meta = unified_mode_metadata
+    runtime.bundle_meta.update(
+        schema_version=8, ltx_audio_frozen=True, refiner_size=[32, 64],
+        ltx_reference_conditioning={"enabled": True, "require_native_resolution": True},
+    )
+    runtime.meta = runtime.bundle_meta
+    runtime.close = runtime.sessions.clear
+    runtime.condition = lambda *args, **kwargs: pytest.fail("conditioning loaded before keyframe validation")
+    runtime.invoke = lambda *args, **kwargs: pytest.fail("model loaded before keyframe validation")
+    with pytest.raises(ValueError, match="requires at least 64x32"):
+        runtime.generate("A person in a cafe", **{field: str(tmp_path / "low_resolution.png")})
+    assert runtime.sessions == {}
+
+
 @pytest.mark.parametrize("fault", ["wrong_branch", "shared_path", "missing_graph"])
 def test_unified_mode_views_reject_incomplete_or_cross_bound_branches(unified_mode_metadata, fault):
     from xhmodel_merak.xh_other_model.models.sol_h3.bundle import mode_metadata
@@ -89,7 +119,10 @@ def test_unified_mode_views_reject_incomplete_or_cross_bound_branches(unified_mo
 @pytest.mark.parametrize("field", ["text_capacity", "dit_capacity", "root_text"])
 def test_unified_metadata_rejects_root_capacity_drift(tmp_path, unified_mode_metadata, field):
     meta = unified_mode_metadata
-    meta.update(schema_version=5, draft_size=[384, 672], profile="all-dense-384p-768p-5s", text_capacity=512)
+    meta.update(
+        schema_version=5, draft_size=[384, 672], draft_frames=124, refiner_frames=121, fps=24,
+        profile="all-dense-384p-768p-5s", text_capacity=512,
+    )
     for profile in meta["mode_profiles"].values():
         profile["capacity_plan"].update(
             video_capacity=1024, audio_capacity=256, kv_capacity=768, qwen_visual_max_patches=256
@@ -284,13 +317,14 @@ def test_independent_public_plan_materializes_sefp8_static_workflow(tmp_path):
     assert "gptqmodel==5.8.0" in plan.worker_requirements
     assert "torchao==0.17.0" in plan.worker_requirements
     assert "auto-round==0.12.0" not in plan.worker_requirements
-    assert plan.artifact_name == "hmquant_xh2_sol_h3_w8a8_384p_768p_5s"
+    assert plan.artifact_name == "hmquant_xh2_sol_h3_w8a8_384p_768p"
     materialize_workflow_config(plan, tmp_path / "workflow.yaml")
     data = yaml.safe_load((tmp_path / "workflow.yaml").read_text())
     assert data["export"]["model"]["type"] == "XHSolH3Model"
     assert data["export"]["model"]["quant_scheme"]["quant_type"] == "w8a8_sefp"
     config = validate_build_config(data["export"])
     assert config["refiner_frames"] == 121
+    assert config["ltx_reference_conditioning"]["require_native_resolution"] is True
     assert config["h3_precision"]["residual_scale"] == 1024
     assert config["h3_precision"]["rms_norm_mode"] == "plain"
     assert config["h3_precision"]["rms_norm_eps"] == 2.0**-24
@@ -344,12 +378,14 @@ def test_missing_refiner_or_path_escape_is_rejected(tmp_path):
         read_metadata(tmp_path)
 
 
-@pytest.mark.parametrize("mode", ["all", "t2va", "i2va", "l2va", "fl2va", "ref2va"])
-def test_public_mode_profiles_select_matching_workflows(tmp_path, mode):
+def test_public_duration_profiles_select_unified_workflows(tmp_path):
+    recipe = get_recipe("sol-h3")
+    assert recipe.profiles == ("all-dense-384p-768p-5s", "all-dense-384p-768p-15s")
+    assert recipe.default_profile == recipe.profiles[0]
     source = tmp_path / "source"
     source.mkdir()
     source_fixture(source)
-    profile = ("" if mode == "t2va" else mode + "-") + "dense-384p-768p-5s"
+    profile = recipe.profiles[1]
     plan = resolve_build_plan(
         model_id="sol-h3",
         model_dir=str(source),
@@ -361,28 +397,19 @@ def test_public_mode_profiles_select_matching_workflows(tmp_path, mode):
     materialize_workflow_config(plan, destination)
     cfg = validate_build_config(yaml.safe_load(destination.read_text())["export"])
     assert plan.variant == "full"
-    assert cfg["mode"] == mode and cfg["profile"] == profile
+    assert cfg["mode"] == "all" and cfg["profile"] == profile
+    assert (cfg["draft_frames"], cfg["refiner_frames"]) == (362, 361)
+    assert cfg["ltx_reference_conditioning"]["require_native_resolution"] is True
     assert cfg["conditioner_quant_type"] == "w4a8h0_ssfp"
     assert cfg["prompt"]["max_tokens"] == 1024
     assert cfg["qwen3_vl"]["prefill_chunk_length"] == 256
     assert "image_max_pixels" not in cfg["qwen3_vl"]
     assert "video_max_pixels" not in cfg["qwen3_vl"]
-    if mode in ("ref2va", "all"):
-        assert cfg["references"]["image"]["max_count"] == 1
-        assert cfg["references"]["image"]["vae_short_edge"] == 2048
-        assert cfg["references"]["video"]["max_count"] == 1
-    from xhmodel_merak.model_inference.inputs import validate_inputs
-
-    media = {
-        "all": {},
-        "t2va": {},
-        "i2va": {"image": "first.png"},
-        "l2va": {"last_image": "last.png"},
-        "fl2va": {"image": "first.png", "last_image": "last.png"},
-        "ref2va": {"references": [{"kind": "video", "path": "clip.mp4"}]},
-    }[mode]
-    values = validate_inputs(get_recipe("sol-h3"), {"prompt": "example", **media})
-    assert all(values[key] == value for key, value in media.items())
+    assert cfg["references"]["image"]["max_count"] == 3
+    assert cfg["references"]["image"]["vae_gears"] == [[384, 672], [448, 672], [672, 448], [512, 512]]
+    assert cfg["references"]["video"]["vae_size"] == [384, 672]
+    with pytest.raises(ModelError, match="profile"):
+        resolve_build_plan(model_id="sol-h3", model_dir=str(source), profile="all-dense-384p-768p-2s")
 
 
 def test_calibration_inventory_resolves_relative_media_and_yaml_takes_precedence(tmp_path):

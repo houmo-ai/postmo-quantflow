@@ -48,7 +48,13 @@ def refiner(assets, config, video_latent, audio_latent):
 
     from .assets import read_prompt_cache
     from .ltx_keyframes import prepare_keyframe_states
-    from .ltx_prepare import cpu_lora_fuse_rule, native_tools, prepare_conditioning, prepare_keyframe_conditioning
+    from .ltx_prepare import (
+        cpu_lora_fuse_rule,
+        freeze_audio_state,
+        native_tools,
+        prepare_conditioning,
+        prepare_keyframe_conditioning,
+    )
 
     size = config["refiner_size"]
     stage = DiffusionStage.from_checkpoint(
@@ -58,7 +64,8 @@ def refiner(assets, config, video_latent, audio_latent):
         loras=(LoraPathStrengthAndSDOps(str(assets["refiner_lora"]), 0.8, LTXV_LORA_COMFY_RENAMING_MAP),),
     )
     stage = stage.with_builder(stage._prepared_builder().with_fuse_rule(cpu_lora_fuse_rule()))
-    video_tools, _ = native_tools(size=size)
+    frames, fps = config["refiner_frames"], config["fps"]
+    video_tools, _ = native_tools(size=size, frames=frames, fps=fps)
     with torch.no_grad():
         source = stage._build_transformer(video_tools=video_tools).velocity_model.eval().requires_grad_(False)
     cache = read_prompt_cache(
@@ -70,16 +77,24 @@ def refiner(assets, config, video_latent, audio_latent):
         video, audio, _, _ = prepare_keyframe_states(
             video_latent,
             audio_latent,
-            keyframe_latents=[(120, torch.zeros(image_shape))],
+            keyframe_latents=[(frames - 1, torch.zeros(image_shape))],
             seed=config["calibration_seed"],
             size=size,
+            refiner_frames=frames,
+            freeze_audio=False,
         )
-        video_args, audio_args, rope = prepare_keyframe_conditioning(source, cache, video, audio)
+        video_args, audio_args, rope = prepare_keyframe_conditioning(source, cache, video, freeze_audio_state(audio))
+        joint_video_args, joint_audio_args, _ = prepare_keyframe_conditioning(source, cache, video, audio)
         mask = video.keyframes_mask
     else:
-        video_args, audio_args, rope = prepare_conditioning(source, cache, size=size)
+        video_args, audio_args, rope = prepare_conditioning(
+            source, cache, size=size, frames=frames, fps=fps, freeze_audio=True
+        )
+        joint_video_args, joint_audio_args, _ = prepare_conditioning(
+            source, cache, size=size, frames=frames, fps=fps, freeze_audio=False
+        )
         mask = video_tools.create_initial_state(device="cpu", dtype=torch.float16).keyframes_mask
-    return source, cache, video_args, audio_args, rope, mask
+    return source, cache, video_args, audio_args, rope, mask, joint_video_args, joint_audio_args
 
 
 def video_decoder(assets, latent, config):
@@ -100,7 +115,7 @@ def video_decoder(assets, latent, config):
         }
     )
     native = decoder._prepare_tiles(latent, tiles)
-    complementary = masks_are_complementary(native, (1, 3, 121, *config["refiner_size"]))
+    complementary = masks_are_complementary(native, (1, 3, config["refiner_frames"], *config["refiner_size"]))
     return decoder, native, complementary
 
 

@@ -32,12 +32,45 @@ class StepTable(nn.Module):
         return result.squeeze(0)
 
 
+class AudioModeStepTable(nn.Module):
+    """Select a step and then the joint/frozen audio conditioning for it."""
+
+    def __init__(self, value, *, sdk_ops=False):
+        super().__init__()
+        if value.shape[1] != 2:
+            raise ValueError("LTX audio policy tables require joint and frozen entries")
+        validate_fp16_constants(value, name="LTX folded audio policy constants")
+        self.register_buffer("value", value.detach().float().contiguous())
+        self.sdk_ops = sdk_ops
+        if sdk_ops:
+            from xhquant.nn import Gather
+
+            self.step_gather, self.mode_gather = Gather(axis=0), Gather(axis=1)
+
+    def forward(self, step, audio_mode):
+        if self.sdk_ops:
+            value = self.mode_gather(self.step_gather(self.value, step), audio_mode)
+        else:
+            value = self.value.index_select(0, step.long()).index_select(1, audio_mode.long())
+        return value.squeeze(0).squeeze(0)
+
+
 def unit_rms(dim, eps, *, sdk_ops=False):
     return StableRMSNorm(nn.RMSNorm(dim, eps=eps), sdk_ops=sdk_ops)
 
 
 class LTXAttention(nn.Module):
-    def __init__(self, source, *, sdk_ops=False, cached_kv=None, rotary=False, query_tokens=None, key_tokens=None):
+    def __init__(
+        self,
+        source,
+        *,
+        sdk_ops=False,
+        cached_kv=None,
+        rotary=False,
+        query_tokens=None,
+        key_tokens=None,
+        audio_mode_tables=False,
+    ):
         super().__init__()
         self.heads, self.head_dim = source.heads, source.dim_head
         self.query = source.to_q
@@ -46,6 +79,7 @@ class LTXAttention(nn.Module):
         self.gate = source.to_gate_logits
         self.sdk_ops, self.rotary_enabled = sdk_ops, rotary
         self.cached = cached_kv is not None
+        self.audio_mode_tables = audio_mode_tables
         if query_tokens is not None:
             self.register_buffer("query_positions", torch.arange(query_tokens, dtype=torch.int32).reshape(1, -1, 1))
             self.register_buffer("query_zero", torch.tensor(0.0))
@@ -63,14 +97,17 @@ class LTXAttention(nn.Module):
 
                 self.key_less, self.key_where = Less(), Where()
         if self.cached:
-            self.keys = StepTable(cached_kv[0], sdk_ops=sdk_ops)
-            self.values = StepTable(cached_kv[1] / ATTENTION_VALUE_DIVISOR, sdk_ops=sdk_ops)
+            table_type = AudioModeStepTable if audio_mode_tables else StepTable
+            self.keys = table_type(cached_kv[0], sdk_ops=sdk_ops)
+            self.values = table_type(cached_kv[1] / ATTENTION_VALUE_DIVISOR, sdk_ops=sdk_ops)
         else:
             self.key = source.to_k
             self.value = scaled_linear(source.to_v, output_divisor=ATTENTION_VALUE_DIVISOR)
             self.k_norm = StableRMSNorm(source.k_norm, sdk_ops=sdk_ops)
         if sdk_ops:
-            from xhquant.nn import FlashAttention, Rope
+            from xhquant.nn import Rope
+
+            from ...common.attention import CompilerAttention as FlashAttention
 
             self.attention = FlashAttention(num_heads=self.heads, scale=self.head_dim**-0.5, is_causal=False)
             self.rotary = Rope()
@@ -84,10 +121,25 @@ class LTXAttention(nn.Module):
         first, second = x.chunk(2, -1)
         return x * cos + torch.cat((-second, first), -1) * sin
 
-    def forward(self, x, context, step, qcos, qsin, kcos, ksin, query_valid_length=None, key_valid_length=None):
+    def forward(
+        self,
+        x,
+        context,
+        step,
+        qcos,
+        qsin,
+        kcos,
+        ksin,
+        query_valid_length=None,
+        key_valid_length=None,
+        audio_mode=None,
+    ):
         q = self.heads_view(self.q_norm(self.query(x)))
         if self.cached:
-            k, v = self.keys(step), self.values(step)
+            if self.audio_mode_tables:
+                k, v = self.keys(step, audio_mode), self.values(step, audio_mode)
+            else:
+                k, v = self.keys(step), self.values(step)
         else:
             k = self.heads_view(self.k_norm(self.key(context)))
             v = self.heads_view(self.value(context))
@@ -147,8 +199,17 @@ class LTXFFN(nn.Module):
 
 
 @torch.no_grad()
-def fold_ltx_block(source, video_args, audio_args):
-    """Time features plus learned per-layer tables; prompt K/V is cached per sigma."""
+def fold_ltx_block(source, video_args, audio_args, *, joint_video_args=None, joint_audio_args=None):
+    """Fold step tables, optionally retaining joint and frozen audio policies.
+
+    ``video_args`` and ``audio_args`` describe the frozen policy when the joint
+    arguments are supplied. Video's own tables are shared; its cross gate is
+    conditioned on the other modality and must retain both policy entries.
+    """
+
+    if (joint_video_args is None) != (joint_audio_args is None):
+        raise ValueError("joint video and audio conditioning must be provided together")
+    dual_audio_modes = joint_audio_args is not None
 
     def block_values(table, args):
         return torch.stack(source.get_ada_values(table, 1, args.timesteps, slice(None)), 0).squeeze(1)
@@ -182,18 +243,34 @@ def fold_ltx_block(source, video_args, audio_args):
         "audio_k": [],
         "audio_v": [],
     }
-    for video, audio in zip(video_args, audio_args, strict=True):
+    if dual_audio_modes:
+        steps = zip(video_args, audio_args, joint_video_args, joint_audio_args, strict=True)
+    else:
+        steps = ((video, audio, None, None) for video, audio in zip(video_args, audio_args, strict=True))
+    for video, audio, joint_video, joint_audio in steps:
         output["video"].append(block_values(source.scale_shift_table, video))
-        output["audio"].append(block_values(source.audio_scale_shift_table, audio))
-        output["av_video"].append(av_values(source.scale_shift_table_a2v_ca_video, video))
-        output["av_audio"].append(av_values(source.scale_shift_table_a2v_ca_audio, audio))
-        for role, attn, table, args in (
-            ("video", source.attn2, source.prompt_scale_shift_table, video),
-            ("audio", source.audio_attn2, source.audio_prompt_scale_shift_table, audio),
-        ):
-            key, value = prompt_kv(attn, table, args)
-            output[role + "_k"].append(key)
-            output[role + "_v"].append(value)
+        key, value = prompt_kv(source.attn2, source.prompt_scale_shift_table, video)
+        output["video_k"].append(key)
+        output["video_v"].append(value)
+
+        def audio_policy_values(policy_video, policy_audio):
+            key, value = prompt_kv(source.audio_attn2, source.audio_prompt_scale_shift_table, policy_audio)
+            return dict(
+                audio=block_values(source.audio_scale_shift_table, policy_audio),
+                av_video=av_values(source.scale_shift_table_a2v_ca_video, policy_video),
+                av_audio=av_values(source.scale_shift_table_a2v_ca_audio, policy_audio),
+                audio_k=key,
+                audio_v=value,
+            )
+
+        frozen = audio_policy_values(video, audio)
+        if dual_audio_modes:
+            joint = audio_policy_values(joint_video, joint_audio)
+            for name, value in frozen.items():
+                output[name].append(torch.stack((joint[name], value)))
+        else:
+            for name, value in frozen.items():
+                output[name].append(value)
     return {name: torch.stack(values).detach() for name, values in output.items()}
 
 
@@ -202,7 +279,8 @@ def video_modulation(x, params, ranges, *, shift=None, scale=None, gate=None):
 
     ``ranges`` partition the video sequence into contiguous ``(start, end,
     role)`` spans. The same clean role covers both the frozen first frame and
-    appended keyframe guides. Audio and prompt K/V retain global sigma.
+    appended keyframe guides. Audio and prompt K/V use their own modality's
+    global sigma, selected for joint or clean frozen audio.
     """
     if ranges is None:
         if gate is not None:
@@ -223,13 +301,26 @@ class LTXBlock(nn.Module):
     """Six attentions with simultaneous A2V/V2A snapshots and two GELU FFNs."""
 
     def __init__(
-        self, source, folded, *, sdk_ops=False, video_timestep_ranges=None, video_tokens=None, audio_tokens=None
+        self,
+        source,
+        folded,
+        *,
+        sdk_ops=False,
+        video_timestep_ranges=None,
+        video_tokens=None,
+        audio_tokens=None,
+        dual_audio_modes=False,
     ):
         super().__init__()
         self.video_timestep_ranges = video_timestep_ranges
         self.first_time = FirstFrameTimeTable(sdk_ops=sdk_ops) if video_tokens is not None else None
-        self.video_params, self.audio_params = (StepTable(folded[name], sdk_ops=sdk_ops) for name in ("video", "audio"))
-        self.av_video, self.av_audio = (StepTable(folded[name], sdk_ops=sdk_ops) for name in ("av_video", "av_audio"))
+        self.dual_audio_modes = dual_audio_modes
+        self.video_params = StepTable(folded["video"], sdk_ops=sdk_ops)
+        audio_table_type = AudioModeStepTable if dual_audio_modes else StepTable
+        self.audio_params = audio_table_type(folded["audio"], sdk_ops=sdk_ops)
+        self.av_video, self.av_audio = (
+            audio_table_type(folded[name], sdk_ops=sdk_ops) for name in ("av_video", "av_audio")
+        )
         self.video_norm = unit_rms(source.attn1.to_q.in_features, source.norm_eps, sdk_ops=sdk_ops)
         self.audio_norm = unit_rms(source.audio_attn1.to_q.in_features, source.norm_eps, sdk_ops=sdk_ops)
         self.video_self = LTXAttention(
@@ -244,7 +335,10 @@ class LTXBlock(nn.Module):
             key_tokens=folded["video_k"].shape[-2] if video_tokens is not None else None,
         )
         self.audio_text = LTXAttention(
-            source.audio_attn2, sdk_ops=sdk_ops, cached_kv=(folded["audio_k"], folded["audio_v"])
+            source.audio_attn2,
+            sdk_ops=sdk_ops,
+            cached_kv=(folded["audio_k"], folded["audio_v"]),
+            audio_mode_tables=dual_audio_modes,
         )
         self.audio_to_video = LTXAttention(
             source.audio_to_video_attn, sdk_ops=sdk_ops, rotary=True, query_tokens=video_tokens, key_tokens=audio_tokens
@@ -273,8 +367,13 @@ class LTXBlock(nn.Module):
         acsin,
         first_role=None,
         video_valid_length=None,
+        audio_mode=None,
     ):
-        vp, ap = self.video_params(step), self.audio_params(step)
+        vp = self.video_params(step)
+        if self.dual_audio_modes:
+            ap = self.audio_params(step, audio_mode)
+        else:
+            ap = self.audio_params(step)
         if self.first_time is not None:
             vp = self.first_time(vp, first_role)
         ranges = self.video_timestep_ranges
@@ -292,10 +391,13 @@ class LTXBlock(nn.Module):
         a = self.affine(self.audio_norm(audio), ap, 0, 1)
         audio = audio + self.audio_self(a, a, step, acos, asin, acos, asin) * ap[2]
         a = self.affine(self.audio_norm(audio), ap, 6, 7)
-        audio = audio + self.audio_text(a, a, step, acos, asin, acos, asin) * ap[8]
+        audio = audio + self.audio_text(a, a, step, acos, asin, acos, asin, audio_mode=audio_mode) * ap[8]
         # Both directions use the state before either direction's residual update.
         v, a = self.video_norm(video), self.audio_norm(audio)
-        cv, ca = self.av_video(step), self.av_audio(step)
+        if self.dual_audio_modes:
+            cv, ca = self.av_video(step, audio_mode), self.av_audio(step, audio_mode)
+        else:
+            cv, ca = self.av_video(step), self.av_audio(step)
         if self.first_time is not None:
             cv = self.first_time(cv, first_role)
         va, aa = video_modulation(v, cv, ranges, shift=1, scale=0), self.affine(a, ca, 1, 0)
@@ -316,22 +418,36 @@ class LTXBlock(nn.Module):
 
 class LTXOutput(nn.Module):
     def __init__(
-        self, source, video_args, audio_args, *, sdk_ops=False, video_timestep_ranges=None, dynamic_first_role=False
+        self,
+        source,
+        video_args,
+        audio_args,
+        *,
+        sdk_ops=False,
+        video_timestep_ranges=None,
+        dynamic_first_role=False,
+        joint_audio_args=None,
     ):
         super().__init__()
         self.video_timestep_ranges = video_timestep_ranges
         self.first_time = FirstFrameTimeTable(sdk_ops=sdk_ops) if dynamic_first_role else None
         self.video_norm, self.audio_norm = source.norm_out, source.audio_norm_out
         self.video_head, self.audio_head = source.proj_out, source.audio_proj_out
-        for role, table, args in (
-            ("video", source.scale_shift_table, video_args),
-            ("audio", source.audio_scale_shift_table, audio_args),
-        ):
-            values = torch.stack([table.to(x.x.dtype)[None, None] + x.embedded_timestep[:, :, None] for x in args])
-            setattr(self, role + "_params", StepTable(values, sdk_ops=sdk_ops))
+        self.dual_audio_modes = joint_audio_args is not None
 
-    def forward(self, video, audio, step, first_role=None):
-        vp, ap = self.video_params(step), self.audio_params(step)
+        def values(table, args):
+            return torch.stack([table.to(x.x.dtype)[None, None] + x.embedded_timestep[:, :, None] for x in args])
+
+        self.video_params = StepTable(values(source.scale_shift_table, video_args), sdk_ops=sdk_ops)
+        audio_values = values(source.audio_scale_shift_table, audio_args)
+        if self.dual_audio_modes:
+            audio_values = torch.stack((values(source.audio_scale_shift_table, joint_audio_args), audio_values), dim=1)
+        audio_table_type = AudioModeStepTable if self.dual_audio_modes else StepTable
+        self.audio_params = audio_table_type(audio_values, sdk_ops=sdk_ops)
+
+    def forward(self, video, audio, step, first_role=None, audio_mode=None):
+        vp = self.video_params(step)
+        ap = self.audio_params(step, audio_mode) if self.dual_audio_modes else self.audio_params(step)
         if self.video_timestep_ranges is None:
             video = self.video_head(self.video_norm(video) * (1 + vp[:, :, 1]) + vp[:, :, 0])
         else:
@@ -357,6 +473,7 @@ class LTXDenoiserGraph(nn.Module):
         video_timestep_ranges=None,
         keyframes_mask=None,
         first_frame_tokens=None,
+        joint_audio_args=None,
     ):
         super().__init__()
         video_tokens = None
@@ -364,12 +481,13 @@ class LTXDenoiserGraph(nn.Module):
             if video_timestep_ranges is not None or type(first_frame_tokens) is not int or first_frame_tokens <= 0:
                 raise ValueError("static LTX guides require a positive first-frame count and implicit time ranges")
             video_tokens = video_args[0].x.shape[1]
-            if video_tokens != 17 * first_frame_tokens:
-                raise ValueError("static LTX guides require sixteen target frames and one guide frame")
+            if video_tokens % first_frame_tokens or video_tokens < 3 * first_frame_tokens:
+                raise ValueError("static LTX guides require target frames and one complete guide frame")
+            target_tokens = video_tokens - first_frame_tokens
             video_timestep_ranges = (
                 (0, first_frame_tokens, 0),
-                (first_frame_tokens, 16 * first_frame_tokens, 1),
-                (16 * first_frame_tokens, video_tokens, 2),
+                (first_frame_tokens, target_tokens, 1),
+                (target_tokens, video_tokens, 2),
             )
             self.register_buffer("video_positions", torch.arange(video_tokens, dtype=torch.int32).reshape(1, -1, 1))
             self.register_buffer("video_zero", torch.tensor(0.0))
@@ -404,6 +522,7 @@ class LTXDenoiserGraph(nn.Module):
                     video_timestep_ranges=video_timestep_ranges,
                     video_tokens=video_tokens,
                     audio_tokens=audio_args[0].x.shape[1] if video_tokens is not None else None,
+                    dual_audio_modes=joint_audio_args is not None,
                 )
                 for block, folded in zip(source.transformer_blocks, folded_blocks, strict=True)
             ]
@@ -415,9 +534,11 @@ class LTXDenoiserGraph(nn.Module):
             sdk_ops=sdk_ops,
             video_timestep_ranges=video_timestep_ranges,
             dynamic_first_role=video_tokens is not None,
+            joint_audio_args=joint_audio_args,
         )
         self.static_guide = video_tokens is not None
         self.sdk_ops = sdk_ops
+        self.register_buffer("default_audio_mode", torch.tensor([1], dtype=torch.int32))
 
     def forward(
         self,
@@ -434,7 +555,10 @@ class LTXDenoiserGraph(nn.Module):
         acsin,
         first_role=None,
         video_valid_length=None,
+        audio_mode=None,
     ):
+        if audio_mode is None:
+            audio_mode = self.default_audio_mode
         if self.static_guide:
             if self.sdk_ops:
                 video = self.video_where(
@@ -447,9 +571,22 @@ class LTXDenoiserGraph(nn.Module):
             video = video + self.keyframe_mask.to(video.dtype) * self.keyframe_embedding.to(video.dtype)
         for block in self.blocks:
             video, audio = block(
-                video, audio, step, vcos, vsin, acos, asin, vccos, vcsin, accos, acsin, first_role, video_valid_length
+                video,
+                audio,
+                step,
+                vcos,
+                vsin,
+                acos,
+                asin,
+                vccos,
+                vcsin,
+                accos,
+                acsin,
+                first_role,
+                video_valid_length,
+                audio_mode,
             )
-        video, audio = self.output(video, audio, step, first_role)
+        video, audio = self.output(video, audio, step, first_role, audio_mode)
         if self.static_guide:
             if self.sdk_ops:
                 video = self.video_where(
@@ -461,16 +598,18 @@ class LTXDenoiserGraph(nn.Module):
 
 
 class LTXInputRoPEGraph(nn.Module):
-    """Give the target-only graph an exact eleven-input FX entry point."""
+    """Expose RoPE and audio policy without static guide controls."""
 
     def __init__(self, denoiser):
         super().__init__()
         if denoiser.static_guide:
-            raise ValueError("eleven-input LTX graphs cannot accept static guide controls")
+            raise ValueError("target-only LTX graphs cannot accept static guide controls")
         self.denoiser = denoiser
 
-    def forward(self, video, audio, step, vcos, vsin, acos, asin, vccos, vcsin, accos, acsin):
-        return self.denoiser(video, audio, step, vcos, vsin, acos, asin, vccos, vcsin, accos, acsin)
+    def forward(self, video, audio, step, vcos, vsin, acos, asin, vccos, vcsin, accos, acsin, audio_mode=None):
+        return self.denoiser(
+            video, audio, step, vcos, vsin, acos, asin, vccos, vcsin, accos, acsin, audio_mode=audio_mode
+        )
 
 
 class LTXConstantRoPEGraph(nn.Module):
@@ -486,7 +625,7 @@ class LTXConstantRoPEGraph(nn.Module):
                 raise ValueError("LTX RoPE constants must be finite")
             self.register_buffer(name, value.detach().clone())
 
-    def forward(self, video, audio, step):
+    def forward(self, video, audio, step, audio_mode=None):
         return self.denoiser(
             video,
             audio,
@@ -499,4 +638,5 @@ class LTXConstantRoPEGraph(nn.Module):
             self.vcsin,
             self.accos,
             self.acsin,
+            audio_mode=audio_mode,
         )

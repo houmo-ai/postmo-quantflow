@@ -7,6 +7,23 @@ from __future__ import annotations
 from collections import Counter
 
 
+def validate_external_key_mask(path, audit, capacity):
+    """Require the public FP16 mask to reach FlashAttention without graph conversion."""
+    import onnx
+
+    graph = onnx.load(path, load_external_data=False).graph
+    types = {value.name: value.type.tensor_type.elem_type for value in graph.input}
+    if (
+        audit["input_shapes"].get("key_mask") != [1, 1, 1, capacity]
+        or types.get("key_mask") != onnx.TensorProto.FLOAT16
+        or any(
+            len(node.input) != 5 or node.input[4] != "key_mask"
+            for node in graph.node if node.op_type == "FlashAttention"
+        )
+    ):
+        raise ValueError("encoder attention requires a direct external FP16 [1,1,1,capacity] key_mask; re-export")
+
+
 def audit_graph(path, *, quant_type, inputs, outputs, norm_fp16=False):
     import onnx
     from onnx import TensorProto, helper
@@ -29,6 +46,10 @@ def audit_graph(path, *, quant_type, inputs, outputs, norm_fp16=False):
     weight_bits, bits, mode = precisions[quant_type]
     counts = Counter(v.op_type for v in graph.node)
     initializers = {value.name: value for value in graph.initializer}
+    shapes = {
+        value.name: [dim.dim_value for dim in value.type.tensor_type.shape.dim]
+        for value in (*graph.input, *graph.value_info)
+    }
     vp_convolutions = []
     for node in graph.node:
         attrs = {v.name: helper.get_attribute_value(v) for v in node.attribute}
@@ -62,6 +83,12 @@ def audit_graph(path, *, quant_type, inputs, outputs, norm_fp16=False):
             # and is no longer emitted. Q/K/V/P remain the precision contract.
             if any(attrs.get(k) != bits for k in ("q_bits", "k_bits", "v_bits", "p_bits")):
                 raise ValueError(f"Sol-H3 attention precision differs from deployment precision: {path}: {node.name}")
+        if node.op_type == "FlashAttention":
+            key_shape = shapes.get(node.input[1], [])
+            if len(key_shape) != 4 or key_shape[-2] < 512:
+                raise ValueError(f"compiler FlashAttention requires static KV >= 512: {path}: {node.name}")
+            if any(node.input[11:]):
+                raise ValueError(f"legacy FlashAttention mask ABI; re-export with mask at input 4: {path}")
         if node.op_type in ("SparseFlashAttention", "SparseFlashAttentionStats") and attrs.get("block_size") not in (
             64,
             128,
@@ -76,7 +103,9 @@ def audit_graph(path, *, quant_type, inputs, outputs, norm_fp16=False):
             if attrs.get("force_fp32") != int(not half) or (
                 node.op_type == "LayerNorm" and attrs.get("sum_dtype") != b"float32"
             ):
-                raise ValueError(f"Sol-H3 normalization precision disagrees with norm_fp16={norm_fp16}: {path}: {node.name}")
+                raise ValueError(
+                    f"Sol-H3 normalization precision disagrees with norm_fp16={norm_fp16}: {path}: {node.name}"
+                )
             if half and attrs.get("keep_fp32_variance") != 0:
                 raise ValueError(f"Sol-H3 FP16 RMSNorm must use the FP16 variance path: {path}: {node.name}")
         if node.op_type == "RMSNorm" and 0 < attrs.get("eps", 0) < 65504.0**-2:

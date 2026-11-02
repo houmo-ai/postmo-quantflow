@@ -4,7 +4,9 @@
     "id": "sol-h3-native-capacity-planning",
     "patterns": [
       "xhmodel_merak/xh_other_model/models/sol_h3/capacity.py",
-      "configs_merak/workflows/xh2a/other_models/sol_h3/*.yaml"
+      "xhmodel_merak/xh_other_model/models/sol_h3/reference_geometry.py",
+      "configs_merak/workflows/xh2a/other_models/sol_h3/*.yaml",
+      "configs_merak/workflows/xh2a/other_models/h3/h3_native*.yaml"
     ]
   }]
 }

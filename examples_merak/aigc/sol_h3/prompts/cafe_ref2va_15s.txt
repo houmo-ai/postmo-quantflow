@@ -1,0 +1,20 @@
+subject_definitions:
+<Subject 1> is the adult woman shown in <Picture 1>, <Picture 2>, <Picture 3> and <Video 1>, with a black ponytail, pale-purple hair accessory, star earrings and light-blue sleeveless top.
+<Video 1> provides the warm cafe setting and small, natural gestures.
+<Audio 1> is a voice-timbre reference for <Subject 1> (S1).
+<Audio 2> is a voice-timbre reference for <Subject 1> (S1).
+
+summary:
+[reference generation + audio reference] A single fifteen-second shot of <Subject 1> at the cafe counter. She speaks one newly scripted sentence, then quietly handles her glass and smiles.
+
+retention_analysis:
+<Subject 1>: preserve her facial appearance, hairstyle, accessories and clothing from the three pictures.
+<Video 1>: reference only its cafe setting, lighting and restrained physical gestures.
+<Audio 1>: reference only the relaxed female voice timbre and Mandarin delivery; its original dialogue and audio signal are not reused.
+<Audio 2>: reference only the relaxed female voice timbre and Mandarin delivery; its original dialogue and audio signal are not reused.
+
+detailed_description: [Shot 1] A single continuous fifteen-second photographic shot begins with the adult woman and cafe counter shown in <Picture 1>. Retain her facial features, hairstyle, accessories, clothing, hand position, framing and warm lighting. The camera stays still. She looks toward the viewer, smiles gently and makes a small natural movement. Between 1.0 and 12.5 seconds, <Subject 1> (S1), with the relaxed female Mandarin voice timbre referenced from <Audio 1>, says once: <d>[Chinese]帅哥，要喝一杯吗？今晚别那么着急，坐下来陪我聊聊天吧。把今天的烦恼先放一边，慢慢喝，慢慢说。微醺的感觉真好！</d> Her lips follow the spoken words; she then closes her mouth and holds a soft smile. All dialogue is audible speech only. The picture remains free of subtitles, captions, letters, logos, watermarks and graphic overlays throughout the shot.
+
+overall_soundscape: Low cafe room tone with faint cup and glass sounds. No other people speak.
+
+non_diegetic_music: N/A

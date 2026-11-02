@@ -235,7 +235,9 @@ def test_chunk_prefill_layer_group_exports_separate_caches(tmp_path):
     )
     audit = audit_graph(path, quant_type="w16a16_sefp", inputs=names, outputs=["features"])
     assert audit["operators"]["KVcache"] == 6
-    assert audit["operators"]["FlashAttention"] == 3
+    assert audit["operators"].get("FlashAttention", 0) == 0
+    assert audit["operators"]["MatMul"] + audit["operators"].get("GroupMatMul", 0) == 6
+    assert audit["operators"]["Softmax"] == 3
     from xhmodel_merak.xh_other_model.models.sol_h3.feature_graph import MultimodalTextFeatureStack
     from xhmodel_merak.xh_other_model.models.sol_h3.prefill import prefill_feature_group
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2

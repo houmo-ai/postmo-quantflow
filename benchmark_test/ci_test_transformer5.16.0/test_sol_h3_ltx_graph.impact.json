@@ -6,9 +6,11 @@
       "patterns": [
         "xhmodel_merak/xh_other_model/models/sol_h3/ltx_graph.py",
         "xhmodel_merak/xh_other_model/models/sol_h3/conditioning.py",
+        "xhmodel_merak/xh_other_model/models/sol_h3/ltx_keyframes.py",
         "xhmodel_merak/xh_other_model/models/sol_h3/precision.py",
         "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_ltx_graph.py",
-        "benchmark_test/ci_test_transformer5.16.0/_sol_h3_tiny_components.py"
+        "benchmark_test/ci_test_transformer5.16.0/_sol_h3_tiny_components.py",
+        "xhmodel_merak/xh_other_model/common/attention.py"
       ]
     },
     {
@@ -20,7 +22,8 @@
         "xhmodel_merak/xh_other_model/models/sol_h3/feature_graph.py",
         "xhmodel_merak/xh_other_model/models/sol_h3/export.py",
         "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_long_attention.py",
-        "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_long_attention.impact.json"
+        "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_long_attention.impact.json",
+        "xhmodel_merak/xh_other_model/common/attention.py"
       ],
       "nodes": [
         "test_cross_attention_sefp8_keeps_large_value_mean_finite"

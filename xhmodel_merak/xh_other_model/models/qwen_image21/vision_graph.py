@@ -11,9 +11,10 @@ from .length_attention import LengthMaskedAttention
 
 
 VISION_INPUT_NAMES = ["patches", "position_indices", "position_weights", "cos", "sin", "patch_mask", "input_length"]
+KEY_MASK_VISION_INPUT_NAMES = ["patches", "position_indices", "position_weights", "cos", "sin", "key_mask"]
 
 
-def geometry_inputs(grid_hw, capacity, grid_side, head_dim, *, device, dtype):
+def geometry_inputs(grid_hw, capacity, grid_side, head_dim, *, device, dtype, key_mask_only=False):
     """Host geometry in the processor's merge-major 2x2 patch order."""
     height, width = map(int, grid_hw)
     if height <= 0 or width <= 0 or height % 2 or width % 2 or height * width > capacity:
@@ -47,6 +48,8 @@ def geometry_inputs(grid_hw, capacity, grid_side, head_dim, *, device, dtype):
     cos = torch.nn.functional.pad(angle.cos(), (0, 0, 0, pad), value=1).to(device=device, dtype=dtype)
     sin = torch.nn.functional.pad(angle.sin(), (0, 0, 0, pad)).to(device=device, dtype=dtype)
     mask = (torch.arange(capacity, device=device) < count).to(dtype).reshape(1, capacity, 1)
+    if key_mask_only:
+        return indices, weights, cos[None, None], sin[None, None], (1 - mask.reshape(1, 1, 1, capacity)) * -65504
     return (
         indices,
         weights,
@@ -58,7 +61,7 @@ def geometry_inputs(grid_hw, capacity, grid_side, head_dim, *, device, dtype):
 
 
 class PackedVisionBlock(nn.Module):
-    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False):
+    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False, key_mask_only=False):
         super().__init__()
         from xhquant.nn import Rope
 
@@ -70,30 +73,45 @@ class PackedVisionBlock(nn.Module):
         self.qkv, self.proj = deepcopy(source.attn.qkv), deepcopy(source.attn.proj)
         self.mlp = deepcopy(source.mlp)
         self.rotary = Rope()
-        self.attention = LengthMaskedAttention(
-            capacity, capacity, scale=self.head_dim**-0.5,
-            use_flash_attention=use_noncausal_flash_attention, num_heads=self.heads,
-        )
+        self.key_mask_only = key_mask_only
+        if key_mask_only:
+            from ...common.attention import CompilerAttention
 
-    def forward(self, hidden, cos, sin, mask, length):
+            self.attention = CompilerAttention(
+                query_capacity=capacity, kv_capacity=capacity, scale=self.head_dim**-0.5, num_heads=self.heads
+            )
+        else:
+            self.attention = LengthMaskedAttention(
+                capacity, capacity, scale=self.head_dim**-0.5,
+                use_flash_attention=use_noncausal_flash_attention, num_heads=self.heads,
+            )
+
+    def forward(self, hidden, cos, sin, mask, length=None):
         batch, capacity, _ = hidden.shape
         packed = self.qkv(self.norm1(hidden)).reshape(batch, capacity, 3, self.heads, self.head_dim)
         packed = packed.permute(2, 0, 3, 1, 4)
         q, k, v = packed[0], packed[1], packed[2]
         q, k = self.rotary(q, cos, sin), self.rotary(k, cos, sin)
-        visible = mask.transpose(1, 2).unsqueeze(-1)
-        q, k, v = q * visible, k * visible, v * visible
+        if not self.key_mask_only:
+            visible = mask.transpose(1, 2).unsqueeze(-1)
+            q, k, v = q * visible, k * visible, v * visible
         if self.physical_dim > self.head_dim:
             pad = (0, self.physical_dim - self.head_dim)
             q, k, v = (torch.nn.functional.pad(x, pad) for x in (q, k, v))
-        out = self.attention(q, k, v, length, length)[..., : self.head_dim]
+        if self.key_mask_only:
+            out = self.attention(q, k, v, key_mask=mask)[..., : self.head_dim]
+        else:
+            out = self.attention(q, k, v, length, length)[..., : self.head_dim]
         out = out.transpose(1, 2).reshape(batch, capacity, self.heads * self.head_dim)
+        if self.key_mask_only:
+            hidden = hidden + self.proj(out)
+            return hidden + self.mlp(self.norm2(hidden))
         hidden = (hidden + self.proj(out)) * mask
         return (hidden + self.mlp(self.norm2(hidden))) * mask
 
 
 class PackedVision(nn.Module):
-    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False):
+    def __init__(self, source, capacity, *, use_noncausal_flash_attention=False, key_mask_only=False):
         super().__init__()
         config = source.config
         if (config.patch_size, config.temporal_patch_size, config.spatial_merge_size, config.in_channels) != (
@@ -113,40 +131,61 @@ class PackedVision(nn.Module):
         if projection.bias is not None:
             self.patch_projection.bias = nn.Parameter(projection.bias.detach().clone())
         self.position_embedding = deepcopy(source.pos_embed)
+        self.key_mask_only = key_mask_only
         self.blocks = nn.ModuleList(
-            PackedVisionBlock(block, capacity, use_noncausal_flash_attention=use_noncausal_flash_attention)
+            PackedVisionBlock(
+                block, capacity,
+                use_noncausal_flash_attention=use_noncausal_flash_attention, key_mask_only=key_mask_only,
+            )
             for block in source.blocks
         )
         self.merger = deepcopy(source.merger)
         self.deep_mergers = deepcopy(source.deepstack_merger_list)
         self.deep_indexes = tuple(source.deepstack_visual_indexes)
 
-    def forward(self, patches, indices, weights, cos, sin, mask, length):
+    def forward(self, patches, indices, weights, cos, sin, mask, length=None):
         position = self.position_embedding(indices.long()) * weights[:, :, None]
         position = position[0] + position[1] + position[2] + position[3]
-        hidden = (self.patch_projection(patches * mask) + position[None]) * mask
-        merged_mask = mask.reshape(1, -1, 4, 1)[:, :, 0]
+        if self.key_mask_only:
+            hidden = self.patch_projection(patches) + position[None]
+        else:
+            hidden = (self.patch_projection(patches * mask) + position[None]) * mask
+            merged_mask = mask.reshape(1, -1, 4, 1)[:, :, 0]
         deep = []
         for index, block in enumerate(self.blocks):
             hidden = block(hidden, cos, sin, mask, length)
             if index in self.deep_indexes:
                 value = self.deep_mergers[self.deep_indexes.index(index)](hidden).unsqueeze(0)
-                deep.append(value * merged_mask)
+                deep.append(value if self.key_mask_only else value * merged_mask)
+        if self.key_mask_only:
+            return (self.merger(hidden).unsqueeze(0), *deep)
         return (self.merger(hidden).unsqueeze(0) * merged_mask, *deep)
 
 
+class KeyMaskedVision(PackedVision):
+    """Six-input vision ABI: one external mask, with no length or row clearing."""
+
+    def __init__(self, source, capacity):
+        super().__init__(source, capacity, key_mask_only=True)
+
+    def forward(self, patches, position_indices, position_weights, cos, sin, key_mask):
+        return super().forward(patches, position_indices, position_weights, cos, sin, key_mask)
+
+
 class PackedVisionSession:
-    def __init__(self, session, capacity, grid_side, head_dim, *, device, dtype=torch.float16):
+    def __init__(self, session, capacity, grid_side, head_dim, *, device, dtype=torch.float16, key_mask_only=False):
         self.session, self.capacity = session, capacity
         self.grid_side, self.head_dim, self.device = grid_side, head_dim, device
         self.dtype = dtype
+        self.key_mask_only = key_mask_only
 
     def __call__(self, patches, grid_thw):
         time, height, width = map(int, grid_thw)
         if time != 1 or patches.shape != (height * width, 1536):
             raise ValueError("vision session requires one image's processor patches")
         geometry = geometry_inputs(
-            (height, width), self.capacity, self.grid_side, self.head_dim, device=self.device, dtype=self.dtype
+            (height, width), self.capacity, self.grid_side, self.head_dim,
+            device=self.device, dtype=self.dtype, key_mask_only=self.key_mask_only,
         )
         patches = patches.to(device=self.device, dtype=self.dtype)
         patches = torch.nn.functional.pad(patches, (0, 0, 0, self.capacity - patches.shape[0]))[None]

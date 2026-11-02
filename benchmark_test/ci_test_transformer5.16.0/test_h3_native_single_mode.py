@@ -84,7 +84,7 @@ def test_native_schema_one_is_rejected_before_graph_loading(tmp_path):
     (tmp_path / "runtime_meta_info.json").write_text(
         json.dumps(dict(kind="native_h3", schema_version=1, complete=True))
     )
-    with pytest.raises(ValueError, match="schema-2"):
+    with pytest.raises(ValueError, match="schema-3"):
         read_metadata(tmp_path)
 
 

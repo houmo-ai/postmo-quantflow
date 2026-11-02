@@ -41,6 +41,29 @@ def _local_image(value):
         return image.convert("RGB")
 
 
+def _reference_image(value):
+    """Convert an already decoded native reference to an RGB PIL image."""
+    if isinstance(value, Image.Image):
+        return value.convert("RGB")
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().movedim(0, -1).numpy()
+    value = np.asarray(value)
+    if value.ndim != 3 or value.shape[2] != 3:
+        raise ValueError("reference images must contain RGB pixels")
+    if value.dtype != np.uint8:
+        value = (value * 255).round().clip(0, 255).astype(np.uint8)
+    return Image.fromarray(value, mode="RGB")
+
+
+def _reference_video_shape(frames):
+    if isinstance(frames, list):
+        width, height = frames[0].size
+        return height, width
+    if isinstance(frames, torch.Tensor):
+        return int(frames.shape[-2]), int(frames.shape[-1])
+    return int(frames.shape[1]), int(frames.shape[2])
+
+
 def _reference(value):
     from diffusers.modular_pipelines.minimax_h3.references import (
         MiniMaxH3AudioReference,
@@ -191,8 +214,10 @@ def prepare_request(
         fps=24,
         vae_frames_per_chunk=17,
         vae_latents_per_chunk=5,
-        min_duration=5,
-        max_duration=15,
+        # The 15-second Sol-H3 gear uses 362 aligned H3 frames, slightly
+        # exceeding 15 seconds before the adapter crops to 361 output frames.
+        min_duration=min(5, num_frames / 24),
+        max_duration=max(15, num_frames / 24),
         audio_sampling_rate=32000,
     )
     components._execution_device = torch.device("cpu")
@@ -210,10 +235,63 @@ def prepare_request(
         setattr(components, name, getattr(MiniMaxH3ModularPipeline, name).fget(components))
     state = PipelineState(values=dict(prompt=prompt, height=size[0], width=size[1], num_frames=num_frames))
     if inferred == "ref2va":
+        from .reference_geometry import image_gears, image_size, video_gear, video_size
+
         entries = [_reference(value) for value in references]
         _validate_durations(entries, reference_limits)
+        limits = reference_limits or {}
+        gears = image_gears(limits.get("image", {}))
+        canvas = video_gear(limits.get("video", {}))
+        if gears:
+            # The native setup normalizes references in order; its short-edge
+            # result is replaced below by one direct aspect-aware resize.
+            components.config.reference_image_short_edge = 32
+        if limits.get("independent_duration", False):
+            from diffusers.modular_pipelines.minimax_h3.modular_pipeline import align_num_frames
+
+            reference_seconds = max(
+                limits.get("video", {}).get("max_duration_seconds", 0),
+                limits.get("audio", {}).get("max_duration_seconds", 0),
+            )
+            target_frames = align_num_frames(num_frames, 17, 5)
+            reference_frames = align_num_frames(ceil(reference_seconds * 24), 17, 5) if reference_seconds else 0
+            state.set("num_frames", max(target_frames, reference_frames))
+            components.max_duration = max(components.max_duration, state.get("num_frames") / 24)
         state.set("references", entries)
-        MiniMaxH3Ref2VASetupStep()(components, state)
+        if canvas:
+            class FixedCanvasSetup(MiniMaxH3Ref2VASetupStep):
+                @staticmethod
+                def _normalize_video_condition(frames, fps, count, multiple, short_edge, max_pixels, target_fps):
+                    height, width = _reference_video_shape(frames)
+                    wanted = video_size(height, width, canvas)
+                    result = MiniMaxH3Ref2VASetupStep._normalize_video_condition(
+                        frames, fps, count, multiple, min(wanted), wanted[0] * wanted[1], target_fps
+                    )
+                    if tuple(result.shape[1:3]) != wanted:
+                        result = np.stack([
+                            np.asarray(Image.fromarray(frame).resize((wanted[1], wanted[0]), Image.Resampling.LANCZOS))
+                            for frame in result
+                        ])
+                    return result
+
+            setup = FixedCanvasSetup()
+        else:
+            setup = MiniMaxH3Ref2VASetupStep()
+        setup(components, state)
+        if limits.get("independent_duration", False):
+            state.set("num_frames", target_frames)
+        if gears:
+            from diffusers.modular_pipelines.minimax_h3.references import MiniMaxH3ImageReference
+
+            normalized = list(state.get("normalized_references"))
+            area = limits["image"].get("target_area", size[0] * size[1])
+            for index, entry in enumerate(entries):
+                if entry.kind == "image":
+                    image_value = _reference_image(entry.image)
+                    height, width = image_size(image_value.height, image_value.width, gears, area)
+                    image_value = image_value.resize((width, height), Image.Resampling.LANCZOS)
+                    normalized[index] = MiniMaxH3ImageReference(image=image_value)
+            state.set("normalized_references", normalized)
     else:
         state.set("image", None if image is None else _local_image(image))
         state.set("last_image", None if last_image is None else _local_image(last_image))
@@ -256,6 +334,7 @@ def prepare_configured_request(prompt, *, config, tokenizer, image=None, last_im
 def prepare_encoder_calibration(request, processor, config):
     """Collect real prepared media and derive the complete reference tile gears."""
     from .capacity import image_geometries, video_geometries
+    from .reference_geometry import image_gears, video_gear
 
     images, videos, soundtracks = list(request.keyframes), [], []
     image_shapes, video_shapes = [tuple(config["draft_size"])], []
@@ -271,12 +350,23 @@ def prepare_encoder_calibration(request, processor, config):
             raise ValueError("reference video capacity requires a real calibration video")
         if has_audio and not soundtracks:
             raise ValueError("reference audio capacity requires a real calibration soundtrack")
-        image_shapes = image_geometries(limits["image"].get("vae_short_edge", 2048)) if has_images else []
-        video_shapes = video_geometries(config["draft_size"]) if has_videos else []
+        image_shapes = (
+            (image_gears(limits["image"]) or image_geometries(limits["image"].get("vae_short_edge", 2048)))
+            if has_images else []
+        )
+        video_shape = video_gear(limits.get("video", {})) if has_videos else None
+        video_shapes = ([video_shape] if video_shape else video_geometries(config["draft_size"])) if has_videos else []
     visual_calibrations = []
     if images:
         vision = processor.image_processor(images=images, return_tensors="pt")
         visual_calibrations.append((vision["pixel_values"], vision["image_grid_thw"]))
+        if request.mode == "ref2va" and image_gears(config["references"]["image"]):
+            from PIL import ImageOps
+
+            height, width = max(image_shapes, key=lambda shape: shape[0] * shape[1])
+            boundary = ImageOps.fit(images[0], (width, height), method=Image.Resampling.LANCZOS)
+            vision = processor.image_processor(images=[boundary], return_tensors="pt")
+            visual_calibrations.append((vision["pixel_values"], vision["image_grid_thw"]))
     if videos:
         from diffusers.modular_pipelines.minimax_h3.encoders import MiniMaxH3Ref2VATextEncoderStep
 

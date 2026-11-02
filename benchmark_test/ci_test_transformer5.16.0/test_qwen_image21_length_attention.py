@@ -44,13 +44,20 @@ def test_length_attention_matches_sliced_reference_and_ignores_padding(
 def test_large_qk_export_preserves_score_differences(tmp_path, quant_type, native_attention, head_dim):
     """Independent reference catches saturation shared by quanted/runtime golden."""
     import onnx
+
     from xhquant.api import (
-        ConfigDict, DeviceType, QuantScheme, create_quant_config,
-        convert_fx_model_to_quanted_model, convert_quanted_model_to_hmonnx,
+        ConfigDict,
+        DeviceType,
+        QuantScheme,
+        convert_fx_model_to_quanted_model,
+        convert_quanted_model_to_hmonnx,
+        create_quant_config,
     )
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
 
-    capacity = 64
+    # Exercise the compiler FlashAttention boundary once; the other existing
+    # precision/head-width cases retain their small, short-KV exports.
+    capacity = 512 if native_attention and head_dim == 128 and quant_type == "w16a16_sefp" else 64
     q = torch.full((1, 1, capacity, head_dim), 24.0)
     k, v = torch.zeros_like(q), torch.zeros_like(q)
     for index, key in enumerate((24, 27, 30)):
@@ -72,10 +79,9 @@ def test_large_qk_export_preserves_score_differences(tmp_path, quant_type, nativ
     graph = onnx.load(path).graph
     producers = {output: node for node in graph.node for output in node.output}
     flash = [node for node in graph.node if node.op_type == "FlashAttention"]
-    assert len(flash) == int(native_attention)
-    if native_attention:
-        assert flash[0].input[5] == "query_length"
-        assert flash[0].input[9] == "kv_length"
+    assert len(flash) == int(module.use_flash_attention)
+    if module.use_flash_attention:
+        assert len(flash[0].input) == 5 and flash[0].input[4]
         attrs = {a.name: onnx.helper.get_attribute_value(a) for a in flash[0].attribute}
         assert attrs["is_causal"] == 0
         assert attrs["scale"] == pytest.approx(head_dim**-0.5)
@@ -104,13 +110,14 @@ def test_large_qk_export_preserves_score_differences(tmp_path, quant_type, nativ
 def test_w8a8_length_attention_export_matches_quantized_golden(tmp_path, head_dim):
     assert torch.cuda.is_available(), "W8A8 golden comparison requires a visible CUDA GPU"
     import onnx
+
     from xhquant.api import (
         ConfigDict,
         DeviceType,
         QuantScheme,
-        create_quant_config,
         convert_fx_model_to_quanted_model,
         convert_quanted_model_to_hmonnx,
+        create_quant_config,
     )
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
 
@@ -154,4 +161,6 @@ def test_w8a8_length_attention_export_matches_quantized_golden(tmp_path, head_di
             poisoned[0][:, :, query_length:] = 1000
             poisoned[1][:, :, kv_length:] = 1000
             poisoned[2][:, :, kv_length:] = -1000
-            torch.testing.assert_close(runtime(*poisoned, *current_lengths).clone(), actual, atol=0, rtol=0, msg=context)
+            torch.testing.assert_close(
+                runtime(*poisoned, *current_lengths).clone(), actual, atol=0, rtol=0, msg=context
+            )

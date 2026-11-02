@@ -11,6 +11,7 @@ export:
   upscaler_conv3d_fastpath: false
   ltx_reference_conditioning:
     enabled: true
+    require_native_resolution: true
     encoder_norm_eps: 5.960464477539063e-8
   conditioner_quant_type: w4a8h0_ssfp
   model:
@@ -27,12 +28,15 @@ export:
     prefill_chunk_length: 256
     # Pixel budgets are inherited from the checkpoint processor.
   references:
+    independent_duration: true
     image:
-      max_count: 1
-      vae_short_edge: 2048
+      max_count: 3
+      target_area: 258048
+      vae_gears: [[384, 672], [448, 672], [672, 448], [512, 512]]
     video:
       max_count: 1
       max_duration_seconds: 5
+      vae_size: [384, 672]
     audio:
       max_count: 1
       max_duration_seconds: 5

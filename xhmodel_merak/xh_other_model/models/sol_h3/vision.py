@@ -54,6 +54,7 @@ class VisionFeatureAdapter(torch.nn.Module):
                     config["hidden_size"] // config["num_heads"],
                     device=device,
                     dtype=dtype,
+                    key_mask_only=True,
                 ),
             )
             for gear in gears

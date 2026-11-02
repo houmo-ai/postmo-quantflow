@@ -17,7 +17,7 @@ __all__ = ("PROVIDER_ID", "register")
 
 PROVIDER_ID = "h3"
 _DEFAULT_PROFILE = "all-native-768p-5s"
-_WORKFLOW = "configs_merak/workflows/xh2a/other_models/sol_h3/h3_native_768p_w4.yaml"
+_WORKFLOW = "configs_merak/workflows/xh2a/other_models/h3/h3_native_768p_w4.yaml"
 _QUANT = (*GPTQ_REQUIREMENTS, "torchao==0.17.0")
 
 

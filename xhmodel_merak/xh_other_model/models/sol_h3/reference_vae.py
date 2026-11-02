@@ -39,6 +39,10 @@ def invoke_reference_tile(metadata, shape, pixels, invoke, *, mode=None):
     name = metadata["reference_vae_tiles"].get("x".join(map(str, shape)))
     if name is None:
         raise ValueError(f"reference VAE tile {shape} is outside the exported profile")
+    if metadata.get("reference_vae_layout") == "fixed_v1":
+        if tuple(pixels.shape[2:]) != tuple(shape):
+            raise ValueError("reference VAE pixels do not match the fixed exported geometry")
+        return invoke(name, pixels)
     policy = metadata["reference_vae_masks"][name]
     from .masked_vae import reference_mask_inputs
 

@@ -1,0 +1,7 @@
+How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the 15.00-second mark of the target video.
+
+integrated_multimodal_description: [Shot 1] A single continuous fifteen-second photographic shot shows the adult woman at the cafe counter and converges continuously to the pose and framing in <Picture 1> at the ending. Retain her facial features, hairstyle, accessories, clothing, hand position, framing and warm lighting. The camera stays still. She looks toward the viewer, smiles gently and makes a small natural movement. Between 1.0 and 12.5 seconds, the woman (S1), with a relaxed, clear Mandarin voice, says once: <d>[Chinese]帅哥，要喝一杯吗？今晚别那么着急，坐下来陪我聊聊天吧。把今天的烦恼先放一边，慢慢喝，慢慢说。微醺的感觉真好！</d> Her lips follow the spoken words; she then closes her mouth and holds a soft smile. All dialogue is audible speech only. The picture remains free of subtitles, captions, letters, logos, watermarks and graphic overlays throughout the shot.
+
+overall_soundscape: Low cafe room tone with faint cup and glass sounds. No other people speak.
+
+non_diegetic_music: N/A

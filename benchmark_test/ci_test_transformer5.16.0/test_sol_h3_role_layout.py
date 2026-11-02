@@ -6,6 +6,7 @@ from copy import deepcopy
 
 import pytest
 import torch
+from test_sol_h3_static_graph import text_key_mask
 
 from xhmodel_merak.xh_other_model.models.sol_h3.conditioning import (
     ConditionedH3Schedule,
@@ -121,7 +122,7 @@ def test_fixed_roles_match_native_h3_with_qwen_vision_and_both_reference_types(s
         torch.arange(10, 13),
         return_dict=False,
     )
-    refined = H3TextGraph(deepcopy(source))(torch.nn.functional.pad(text, (0, 0, 0, 3)), torch.tensor([3]))
+    refined = H3TextGraph(deepcopy(source))(torch.nn.functional.pad(text, (0, 0, 0, 3)), text_key_mask(6, 3))
     graph = RolePartitionedH3DenoiserGraph(
         deepcopy(source),
         tables,
@@ -225,7 +226,7 @@ def test_t2va_native_oracle_with_zero_reference_capacities():
         role_capacities=layout.capacities,
         attention_block_size=64,
     )
-    refined = H3TextGraph(deepcopy(source))(torch.nn.functional.pad(text, (0, 0, 0, 3)), torch.tensor([3]))
+    refined = H3TextGraph(deepcopy(source))(torch.nn.functional.pad(text, (0, 0, 0, 3)), text_key_mask(6, 3))
     cos, sin = source.rope(layout.positions)
     actual = graph(
         torch.nn.functional.pad(video, (0, 0, 0, 2)),
@@ -310,7 +311,7 @@ def test_fixed_roles_export_only_boundary_gathers_and_execute_masked_hmonnx(tmp_
         attention_block_size=64,
         sdk_ops=True,
     )
-    refined = H3TextGraph(deepcopy(source))(torch.randn(1, 6, 24), torch.tensor([3]))
+    refined = H3TextGraph(deepcopy(source))(torch.randn(1, 6, 24), text_key_mask(6, 3))
     cos, sin = source.rope(layout.positions)
     inputs = (
         torch.randn(1, 8, 8),
@@ -344,8 +345,8 @@ def test_fixed_roles_export_only_boundary_gathers_and_execute_masked_hmonnx(tmp_
     # boundary permutations. No token-shaped AdaLN vector is materialized.
     assert len(gathers) == 4
     attentions = [node for node in model.graph.node if node.op_type == "FlashAttention"]
-    assert len(attentions) == 1 and len(attentions[0].input) == 12
-    assert attentions[0].input[11] == "key_mask"
+    assert len(attentions) == 1 and len(attentions[0].input) == 5
+    assert attentions[0].input[4] == "key_mask"
     assert not any(node.op_type.startswith("SparseFlash") for node in model.graph.node)
     session = HMONNXInferenceV2(str(path), session_config=HMONNXInferenceConfig(exec_devices=["cuda:0"]))
 

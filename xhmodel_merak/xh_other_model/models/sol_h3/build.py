@@ -37,6 +37,7 @@ def _example_reference_moments(shape, geometry, *, seed):
 def validate_build_config(config):
     cfg = deepcopy(dict(config))
     from .capacity import MODES
+    from .duration import duration_gear
 
     cfg.setdefault("norm_fp16", True)
     if type(cfg["norm_fp16"]) is not bool:
@@ -48,11 +49,14 @@ def validate_build_config(config):
     if type(cfg["upscaler_conv3d_fastpath"]) is not bool:
         raise ValueError("upscaler_conv3d_fastpath must be a boolean")
     reference = cfg.get("ltx_reference_conditioning", {})
-    if not isinstance(reference, dict) or set(reference) - {"enabled", "encoder_norm_eps"}:
-        raise ValueError("ltx_reference_conditioning accepts enabled and encoder_norm_eps")
+    if not isinstance(reference, dict) or set(reference) - {"enabled", "encoder_norm_eps", "require_native_resolution"}:
+        raise ValueError("ltx_reference_conditioning accepts enabled, encoder_norm_eps and require_native_resolution")
     reference.setdefault("enabled", True)
     if type(reference["enabled"]) is not bool:
         raise ValueError("ltx_reference_conditioning.enabled must be a boolean")
+    require_native = reference.get("require_native_resolution", False)
+    if type(require_native) is not bool or (require_native and not reference["enabled"]):
+        raise ValueError("require_native_resolution must be a boolean and requires enabled LTX image conditioning")
     epsilon = reference.setdefault("encoder_norm_eps", 2**-24)
     if epsilon is not None:
         import math
@@ -77,8 +81,6 @@ def validate_build_config(config):
     ):
         raise ValueError("Sol-H3 requires XH2a W8A8/W16A16 SEFP")
     expected = {
-        "draft_frames": 124,
-        "refiner_frames": 121,
         "fps": 24,
         "draft_attention": "dense",
         "refiner_attention": "dense",
@@ -86,6 +88,7 @@ def validate_build_config(config):
     for name, value in expected.items():
         if cfg.get(name) != value:
             raise ValueError(f"this Sol-H3 gear requires {name}={value}")
+    gear = duration_gear(cfg.get("draft_frames"), cfg.get("refiner_frames"), cfg.get("fps"))
     size = cfg.get("draft_size")
     if (
         not isinstance(size, (list, tuple))
@@ -94,8 +97,8 @@ def validate_build_config(config):
         or cfg.get("refiner_size") != [n * 2 for n in size]
         or cfg.get("profile")
         not in (
-            f"dense-{size[0]}p-{size[0] * 2}p-5s",
-            f"{cfg.get('mode', 't2va')}-dense-{size[0]}p-{size[0] * 2}p-5s",
+            f"dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s",
+            f"{cfg.get('mode', 't2va')}-dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s",
         )
     ):
         raise ValueError("Sol-H3 static canvases must be aligned to 32 with a fixed x2 refiner")
@@ -134,7 +137,7 @@ class BundleExporter:
         self.branch = None
         self.root.mkdir(parents=True, exist_ok=False)
         self.meta = dict(
-            schema_version=4,
+            schema_version=9,
             kind="sol_h3",
             complete=False,
             target_device="XH2a",
@@ -158,6 +161,10 @@ class BundleExporter:
             text_refiner_input_divisor=16.0,
             text_rms_policy="plain_wide_reduction",
             refiner_cache_policy="per_sigma_exact_fixed_prompt",
+            ltx_audio_policy=dict(
+                input_name="audio_mode", dtype="int32", shape=[1], modes=dict(joint=0, frozen=1), default="frozen"
+            ),
+            attention_contract=dict(mask_input_index=4, min_flash_kv_length=512),
             norm_fp16=config.get("norm_fp16", False),
             ltx_reference_conditioning=deepcopy(config.get("ltx_reference_conditioning", {"enabled": False})),
         )
@@ -290,6 +297,7 @@ class BundleExporter:
         """Export every native reference tile gear from real normalized media."""
         from torch.nn import functional as F
 
+        from .reference_geometry import image_gears, video_gear
         from .reference_vae import ReferenceVAEAdapter, load_reference_vae
 
         if (
@@ -308,12 +316,31 @@ class BundleExporter:
         options = self.cfg.get("reference_vae", {})
         tile_size, overlap = options.get("tile_size", [768, 768]), options.get("overlap", [64, 64])
         planner = ReferenceVAEAdapter(config, None, tile_size=tile_size, overlap=overlap)
-        gears = sorted(set(planner.tile_shapes(image_shapes) + planner.tile_shapes(video_shapes, video=True)))
+        refs = self.cfg.get("references", {})
+        fixed_images = image_gears(refs.get("image", {}))
+        fixed_video = video_gear(refs.get("video", {}))
+        fixed = fixed_images is not None or fixed_video is not None
+        if fixed:
+            if (image_shapes and fixed_images is None) or (video_shapes and fixed_video is None):
+                raise ValueError("fixed reference VAE profiles require explicit gears for every media kind")
+            if any(tuple(shape) not in (fixed_images or ()) for shape in image_shapes) or any(
+                tuple(shape) != fixed_video for shape in video_shapes
+            ):
+                raise ValueError("reference VAE calibration geometries must match configured fixed gears")
+            image_tiles = planner.tile_shapes(image_shapes)
+            video_tiles = planner.tile_shapes(video_shapes, video=True)
+            expected_images = {(1, *shape) for shape in image_shapes}
+            expected_videos = {(source.config.clip_length, *shape) for shape in video_shapes}
+            if set(image_tiles) != expected_images or set(video_tiles) != expected_videos:
+                raise ValueError("fixed reference VAE geometries must fit without spatial tiling")
+            gears = sorted(expected_images | expected_videos)
+        else:
+            gears = sorted(set(planner.tile_shapes(image_shapes) + planner.tile_shapes(video_shapes, video=True)))
         if not gears and base_image_shape is None:
             raise ValueError("reference VAE export requires at least one image or video geometry")
         self.resource("reference_vae_config", config)
         self.meta["reference_vae_policy"] = dict(tile_size=list(tile_size), overlap=list(overlap))
-        self.meta["reference_vae_layout"] = "split_v1"
+        self.meta["reference_vae_layout"] = "fixed_v1" if fixed else "split_v1"
         self.meta["reference_vae_tiles"] = {}
         if base_image_shape is not None:
             from copy import deepcopy
@@ -340,6 +367,32 @@ class BundleExporter:
             )
             self.meta["reference_vae_base"] = dict(graph=name, shape=shape, spatial_padding_mode="reflect")
             self.close()
+        if fixed:
+            from copy import deepcopy
+
+            from .h3_vae_wrappers import MiniMaxH3VAEEncoderTileWrapper, wrap_vae_encoder
+
+            for shape in gears:
+                base = self.meta.get("reference_vae_base")
+                if base is not None and tuple(base["shape"]) == shape:
+                    name = base["graph"]
+                else:
+                    frames, height, width = shape
+                    plain = wrap_vae_encoder(deepcopy(source))
+                    module = MiniMaxH3VAEEncoderTileWrapper(plain.encoder, plain.quant_conv)
+                    sample = calibration_pixels.detach().cpu().float()
+                    if frames == 1:
+                        sample = sample[:, :, :1]
+                    sample = F.interpolate(sample, size=shape, mode="trilinear", align_corners=False)
+                    suffix = f"t{frames}_h{height}_w{width}"
+                    name = f"h3_reference_encode_ref_{suffix}"
+                    self.graph(
+                        name, f"vae_encode_h3_reference_ref_{suffix}", module, (sample,), ["pixels"], ["moments"],
+                        dynamo=True,
+                    )
+                    self.close()
+                self.meta["reference_vae_tiles"]["x".join(map(str, shape))] = name
+            return
         from .masked_vae import MaskedReferenceEncodeGraph, reference_mask_inputs, reference_mask_names
 
         # Ref images and videos each share a masked spatial canvas. Ordinary
@@ -357,7 +410,7 @@ class BundleExporter:
                 sample = sample[:, :, :1]
             sample = F.interpolate(sample, size=maximum, mode="trilinear", align_corners=False)
             policy = dict(shape=maximum, levels=module.levels, spatial_padding_mode=module.spatial_padding_mode)
-            suffix = f"t1_h{height}_w{width}" if frames == 1 else f"t{frames}"
+            suffix = f"t{frames}_h{height}_w{width}" if frames == 1 else f"t{frames}"
             name = f"h3_reference_encode_ref_{suffix}"
             self.graph(
                 name,
@@ -370,7 +423,11 @@ class BundleExporter:
             )
             self.meta["reference_vae_masks"][name] = policy
             self.meta["reference_vae_tiles"].update(
-                {"x".join(map(str, shape)): name for shape in gears if shape[0] == frames}
+                {
+                    "x".join(map(str, shape)): name
+                    for shape in gears
+                    if shape[0] == frames
+                }
             )
             self.close()
 
@@ -379,7 +436,7 @@ class BundleExporter:
         import torch
         from torch.nn import functional as F
 
-        from ..qwen_image21.vision_graph import VISION_INPUT_NAMES, PackedVision, geometry_inputs
+        from ..qwen_image21.vision_graph import KEY_MASK_VISION_INPUT_NAMES, KeyMaskedVision, geometry_inputs
         from .vision import load_vision_source
 
         capacities = self.meta["capacity_plan"]["qwen_visual_patch_gears"]
@@ -416,15 +473,16 @@ class BundleExporter:
                 config["hidden_size"] // config["num_heads"],
                 device="cpu",
                 dtype=torch.float32,
+                key_mask_only=True,
             )
             pixels = F.pad(pixels.detach().cpu().float(), (0, 0, 0, capacity - pixels.shape[0]))[None]
             name = f"h3_visual_p{capacity}"
             self.graph(
                 name,
                 f"visual_qwen3_vl_p{capacity}",
-                PackedVision(source, capacity, use_noncausal_flash_attention=True),
+                KeyMaskedVision(source, capacity),
                 (pixels, *geometry),
-                VISION_INPUT_NAMES,
+                KEY_MASK_VISION_INPUT_NAMES,
                 ["image_features", "deepstack_0", "deepstack_1", "deepstack_2"],
             )
             self.meta["visual_graphs"].append(dict(graph=name, capacity=capacity))
@@ -443,7 +501,9 @@ class BundleExporter:
         if hop != 800 or config["sampling_rate"] != 32000:
             raise ValueError("Sol-H3 reference audio requires the native 32kHz / 800-sample encoder")
         seconds = self.cfg.get("references", {}).get("audio", {}).get("max_duration_seconds", 5)
-        frames = math.ceil(min(seconds, self.cfg["draft_frames"] / 24) * 40)
+        if not self.cfg.get("references", {}).get("independent_duration", False):
+            seconds = min(seconds, self.cfg["draft_frames"] / 24)
+        frames = math.ceil(seconds * 40)
         self.resource("reference_audio_config", config)
         self.meta["reference_audio_frames"] = frames
         if self.meta["capacity_plan"]["reference_audio_tokens"]:
@@ -744,9 +804,12 @@ class BundleExporter:
         import torch
         from torch import nn
 
+        from .duration import gear_for_draft
         from .h3_graph import H3TextGraph, PackedConditionedH3DenoiserGraph, RolePartitionedH3DenoiserGraph
         from .host import ConditionedDraft, RolePartitionedDraft, unpatch_h3
         from .precision import H3PrecisionPolicy
+
+        gear = gear_for_draft(self.cfg["draft_frames"])
 
         for block in source.transformer_blocks:
             block.adaln_proj = nn.Identity()
@@ -765,13 +828,15 @@ class BundleExporter:
 
         suffix = "" if variant is None else "_" + variant
         text = bind(H3TextGraph(source, policy, sdk_ops=True, input_divisor=self.meta["text_feature_divisor"]), "text")
-        text_inputs = (self.text_features, torch.tensor([self.text_length], dtype=torch.int32))
+        key_mask = torch.full((1, 1, 1, self.cfg["text_capacity"]), -65504.0)
+        key_mask[..., : self.text_length] = 0
+        text_inputs = (self.text_features, key_mask)
         self.graph(
             "h3_text_refiner",
             f"text_encode_h3_refine_s{self.cfg['text_capacity']}{suffix}",
             text,
             text_inputs,
-            ["text_features", "valid_text_length"],
+            ["text_features", "key_mask"],
             ["refined_text"],
         )
         fixed_roles = self.meta["kind"] == "sol_h3"
@@ -806,7 +871,10 @@ class BundleExporter:
             )
             draft = draft_type(request, **options)
         else:
-            draft = draft_type.from_text(size=self.cfg["draft_size"], text_length=self.text_length, **options)
+            draft = draft_type.from_text(
+                size=self.cfg["draft_size"], text_length=self.text_length,
+                video_frames=gear.h3_video_frames, audio_frames=gear.h3_audio_frames, **options
+            )
         if fixed_roles:
             self.meta["h3_role_layout"] = draft.layout.metadata()
         graph = bind(
@@ -827,7 +895,7 @@ class BundleExporter:
         size = self.cfg["draft_size"]
         self.graph(
             "h3_denoiser",
-            f"denoise_h3_{size[1]}x{size[0]}x124{suffix}",
+            f"denoise_h3_{size[1]}x{size[0]}x{gear.draft_frames}{suffix}",
             graph,
             draft.inputs(refined),
             (
@@ -865,13 +933,13 @@ class BundleExporter:
             # Downstream bridge/codecs need finite export examples, while real
             # denoising belongs to the separate published-package validation.
             seed = self.cfg["calibration_seed"]
-            self.h3_latent = _example_latent((1, 24, 37, size[0] // 16, size[1] // 16), seed=seed)
-            self.audio_latent = _example_latent((2, 32, 207), seed=seed + 1)
+            self.h3_latent = _example_latent((1, 24, gear.h3_video_frames, size[0] // 16, size[1] // 16), seed=seed)
+            self.audio_latent = _example_latent((2, 32, gear.h3_audio_frames), seed=seed + 1)
         else:
             # Native H3 and its switchable LoRA variants keep their own flow.
             video, audio = draft.run(lambda *values: self.infer("h3_denoiser", values), refined, schedule=schedule)
-            self.h3_latent = unpatch_h3(video, size=size)
-            self.audio_latent = audio.reshape(2, 207, 32).permute(0, 2, 1).contiguous()
+            self.h3_latent = unpatch_h3(video, size=size, frames=gear.h3_video_frames)
+            self.audio_latent = audio.reshape(2, gear.h3_audio_frames, 32).permute(0, 2, 1).contiguous()
         self.close()
         return dict(
             graphs={name: self.graph_name(name) for name in ("h3_text_refiner", "h3_denoiser")},
@@ -884,6 +952,9 @@ class BundleExporter:
     def bridge(self):
         from . import source_io
         from .bridge_graph import AdapterGraph, UpscalerSegment, upscaler_segments
+        from .duration import duration_gear
+
+        gear = duration_gear(self.cfg["draft_frames"], self.cfg["refiner_frames"], self.cfg["fps"])
 
         self.progress("bridge_source")
         upscaler, receipt = source_io.upscaler(self.assets, self.device)
@@ -895,7 +966,7 @@ class BundleExporter:
             ),
         )
         upscaler.cpu()
-        segments = upscaler_segments()
+        segments = upscaler_segments(gear.h3_video_frames)
         module = UpscalerSegment(upscaler).eval()
         for frames in sorted({plan["input_end"] - plan["input_start"] for plan in segments}):
             name = f"h3_upscale_t{frames}"
@@ -919,13 +990,19 @@ class BundleExporter:
         del module, upscaler
         gc.collect()
         size = self.cfg["refiner_size"]
-        highres = _example_latent((1, 24, 37, size[0] // 16, size[1] // 16), seed=self.cfg["calibration_seed"])
+        highres = _example_latent(
+            (1, 24, gear.h3_video_frames, size[0] // 16, size[1] // 16), seed=self.cfg["calibration_seed"]
+        )
         adapter = source_io.adapter(self.assets)
-        module = AdapterGraph(adapter, sdk_ops=True)
+        module = AdapterGraph(
+            adapter, pixel_frames=gear.draft_frames, target_frames=gear.ltx_video_frames, sdk_ops=True
+        )
         self.graph("h3_to_ltx", "visual_h3_to_ltx", module, (highres.float(),), ["upscaled_h3"], ["ltx_latent"])
         del module, adapter
         gc.collect()
-        self.ltx_latent = _example_latent((1, 128, 16, size[0] // 32, size[1] // 32), seed=self.cfg["calibration_seed"])
+        self.ltx_latent = _example_latent(
+            (1, 128, gear.ltx_video_frames, size[0] // 32, size[1] // 32), seed=self.cfg["calibration_seed"]
+        )
 
     def h3_audio(self):
         """Export the shared native audio decoder; Native retains its replay."""
@@ -946,7 +1023,10 @@ class BundleExporter:
         )
         module = MiniMaxH3AudioVAEDecoderWrapper(vae)
         pcm_shape = (raw.shape[0], 1, raw.shape[-1] * vae.hop_length)
-        self.graph("h3_audio_decode", "vae_decode_h3_audio_f207", module, (raw,), ["latents"], ["pcm"], dynamo=True)
+        self.graph(
+            "h3_audio_decode", f"vae_decode_h3_audio_f{raw.shape[-1]}", module, (raw,), ["latents"], ["pcm"],
+            dynamo=True,
+        )
         del module, vae
         gc.collect()
         self.audio_pcm = (
@@ -958,6 +1038,7 @@ class BundleExporter:
     def audio(self):
         from . import source_io
         from .audio_graph import AudioEncodeGraph
+        from .duration import duration_gear
         from .host import audio_mel
 
         self.h3_audio()
@@ -981,7 +1062,8 @@ class BundleExporter:
         )
         del encoder
         gc.collect()
-        self.ltx_audio = _example_latent((1, 8, 126, 16), seed=self.cfg["calibration_seed"])
+        gear = duration_gear(self.cfg["draft_frames"], self.cfg["refiner_frames"], self.cfg["fps"])
+        self.ltx_audio = _example_latent((1, 8, gear.ltx_audio_frames, 16), seed=self.cfg["calibration_seed"])
 
     def ltx_image_encoder(self):
         """One FP16 T=1 encoder, released before loading the large refiner."""
@@ -1002,7 +1084,7 @@ class BundleExporter:
         )
         images = []
         if request is not None and request.mode in ("i2va", "l2va", "fl2va"):
-            for name, index in (("image", 0), ("last_image", 120)):
+            for name, index in (("image", 0), ("last_image", self.cfg["refiner_frames"] - 1)):
                 image = media.get(name)
                 if image is None:
                     image = request.state.get(name)
@@ -1047,27 +1129,39 @@ class BundleExporter:
         import torch
 
         from . import source_io
+        from .duration import duration_gear
         from .ltx_graph import LTXDenoiserGraph, LTXInputRoPEGraph, fold_ltx_block
 
         size = self.cfg["refiner_size"]
+        gear = duration_gear(self.cfg["draft_frames"], self.cfg["refiner_frames"], self.cfg["fps"])
         enabled = self.cfg.get("ltx_reference_conditioning", {}).get("enabled", True)
         frame_tokens = (size[0] // 32) * (size[1] // 32)
         self.meta["ltx_reference_conditioning"] = dict(
             enabled=enabled,
+            require_native_resolution=self.cfg.get("ltx_reference_conditioning", {}).get(
+                "require_native_resolution", False
+            ),
             graph_mode="static_maximum_guide" if enabled else "target_only",
             first_frame_tokens=frame_tokens,
-            target_tokens=16 * frame_tokens,
-            video_tokens=(17 if enabled else 16) * frame_tokens,
-            end_pixel_frame=120,
+            target_tokens=gear.ltx_video_frames * frame_tokens,
+            video_tokens=(gear.ltx_video_frames + int(enabled)) * frame_tokens,
+            end_pixel_frame=gear.refiner_frames - 1,
             encoder_residual_scale=32.0,
             encoder_norm_eps=self.cfg.get("ltx_reference_conditioning", {}).get("encoder_norm_eps", 2**-24),
         )
         keyframes = self.ltx_image_encoder() if enabled else []
 
         self.progress("ltx_source")
-        source, cache, video_args, audio_args, rope, keyframes_mask = source_io.refiner(
-            self.assets, self.cfg, self.ltx_latent, self.ltx_audio
-        )
+        (
+            source,
+            cache,
+            video_args,
+            audio_args,
+            rope,
+            keyframes_mask,
+            joint_video_args,
+            joint_audio_args,
+        ) = source_io.refiner(self.assets, self.cfg, self.ltx_latent, self.ltx_audio)
         self.meta["refiner_prompt_fingerprint"] = cache["fingerprint"]
         self.resource(
             "refiner_prompt_recipe", {key: cache[key] for key in ("prompt", "recipe", "fingerprint", "prompt_stats")}
@@ -1078,7 +1172,12 @@ class BundleExporter:
         self.meta["ltx_rope_mode"] = "inputs"
         rope = tuple(value.detach().cpu() for value in rope)
         self.resource("ltx_rope", {f"rope_{i}": value.numpy() for i, value in enumerate(rope)}, extension="npz")
-        tables = [fold_ltx_block(block, video_args, audio_args) for block in source.transformer_blocks]
+        tables = [
+            fold_ltx_block(
+                block, video_args, audio_args, joint_video_args=joint_video_args, joint_audio_args=joint_audio_args
+            )
+            for block in source.transformer_blocks
+        ]
         # Native LTX marks the target's first frame even without a supplied
         # image. Keep that learned positional marker independent of time masks.
         graph = LTXDenoiserGraph(
@@ -1089,16 +1188,17 @@ class BundleExporter:
             sdk_ops=True,
             keyframes_mask=keyframes_mask,
             first_frame_tokens=frame_tokens if enabled else None,
+            joint_audio_args=joint_audio_args,
         ).cpu()
         if not enabled:
             graph = LTXInputRoPEGraph(graph)
-        del source, tables, video_args, audio_args
+        del source, tables, video_args, audio_args, joint_video_args, joint_audio_args
         gc.collect()
         # These are trace inputs, not a denoising replay. Keep the maximum
         # canvas and dynamic controls, with an unused guide represented by zero.
-        target_tokens = 16 * frame_tokens
+        target_tokens = gear.ltx_video_frames * frame_tokens
         video = _example_latent(
-            (1, (17 if enabled else 16) * frame_tokens, self.ltx_latent.shape[1]),
+            (1, (gear.ltx_video_frames + int(enabled)) * frame_tokens, self.ltx_latent.shape[1]),
             seed=self.cfg["calibration_seed"],
         )
         audio = _example_latent(
@@ -1108,20 +1208,25 @@ class BundleExporter:
         extra = ()
         if enabled:
             supplied = {index for index, _ in keyframes}
-            if 120 not in supplied:
+            if gear.refiner_frames - 1 not in supplied:
                 video[:, target_tokens:] = 0
             extra = (
                 torch.tensor([int(0 in supplied)], dtype=torch.int32),
-                torch.tensor([target_tokens + (frame_tokens if 120 in supplied else 0)], dtype=torch.int32),
+                torch.tensor(
+                    [target_tokens + (frame_tokens if gear.refiner_frames - 1 in supplied else 0)], dtype=torch.int32
+                ),
             )
-        inputs = (video, audio, torch.tensor([0], dtype=torch.int32), *rope, *extra)
+        inputs = (
+            video, audio, torch.tensor([0], dtype=torch.int32), *rope, *extra, torch.tensor([1], dtype=torch.int32)
+        )
         self.graph(
             "ltx_denoiser",
-            f"denoise_ltx_{size[1]}x{size[0]}_v{(17 if enabled else 16) * frame_tokens}",
+            f"denoise_ltx_{size[1]}x{size[0]}_v{(gear.ltx_video_frames + int(enabled)) * frame_tokens}",
             graph,
             inputs,
             ["video", "audio", "step", "vcos", "vsin", "acos", "asin", "vccos", "vcsin", "accos", "acsin"]
-            + (["first_role", "video_valid_length"] if enabled else []),
+            + (["first_role", "video_valid_length"] if enabled else [])
+            + ["audio_mode"],
             ["video_velocity", "audio_velocity"],
         )
         del graph
@@ -1129,7 +1234,7 @@ class BundleExporter:
         # The decoder consumes normalized target latents, never the appended
         # reference guide. Its RTN export does not require a generated video.
         self.refined_latent = _example_latent(
-            (1, 128, 16, size[0] // 32, size[1] // 32), seed=self.cfg["calibration_seed"]
+            (1, 128, gear.ltx_video_frames, size[0] // 32, size[1] // 32), seed=self.cfg["calibration_seed"]
         )
         self.close()
 
@@ -1141,24 +1246,38 @@ class BundleExporter:
         decoder, native, complementary = source_io.video_decoder(self.assets, self.refined_latent, self.cfg)
         self.meta["decoder_complementary_masks"] = complementary
         plans, masks = [], {}
-        shared = self.meta.get("schema_version") == 5
+        shared = self.meta.get("mode") == "all"
         module = MaskedVideoDecodeGraph(decoder) if shared else VideoDecodeGraph(decoder)
         if shared:
             shapes = [tuple(self.refined_latent[tile.in_coords].shape[2:]) for tile in native]
-            if len({shape[0] for shape in shapes}) != 1:
-                raise ValueError("shared LTX decode requires one native temporal tile size")
-            maximum = tuple(max(shape[axis] for shape in shapes) for axis in range(3))
-            self.meta["video_decoder_mask"] = dict(shape=maximum, scales=module.mask_scales)
+            temporal_gears = sorted({shape[0] for shape in shapes})
+            maxima = {
+                frames: tuple(max(shape[axis] for shape in shapes if shape[0] == frames) for axis in range(3))
+                for frames in temporal_gears
+            }
+            if len(temporal_gears) == 1:
+                self.meta["video_decoder_mask"] = dict(shape=maxima[temporal_gears[0]], scales=module.mask_scales)
+            else:
+                self.meta["video_decoder_masks"] = {
+                    f"ltx_video_decode_t{frames}": dict(shape=maxima[frames], scales=module.mask_scales)
+                    for frames in temporal_gears
+                }
         for i, tile in enumerate(native):
             sample = self.refined_latent[tile.in_coords].float()
             shape = tuple(sample.shape)
-            name = "ltx_video_decode" if shared else "ltx_video_decode_" + "x".join(map(str, shape[2:]))
+            name = (
+                ("ltx_video_decode" if len(temporal_gears) == 1 else f"ltx_video_decode_t{shape[2]}")
+                if shared else "ltx_video_decode_" + "x".join(map(str, shape[2:]))
+            )
             if name not in self.meta["graphs"]:
-                args = decoder_mask_inputs(sample, maximum, module.mask_scales) if shared else (sample,)
+                args = decoder_mask_inputs(sample, maxima[shape[2]], module.mask_scales) if shared else (sample,)
                 inputs = ["latent", *[f"spatial_mask_{j}" for j in range(len(args) - 1)]]
                 self.graph(
                     name,
-                    "vae_decode_ltx_video" if shared else "vae_decode_ltx_video_" + "x".join(map(str, shape[2:])),
+                    (
+                        ("vae_decode_ltx_video" if len(temporal_gears) == 1 else f"vae_decode_ltx_video_t{shape[2]}")
+                        if shared else "vae_decode_ltx_video_" + "x".join(map(str, shape[2:]))
+                    ),
                     module,
                     args,
                     inputs,

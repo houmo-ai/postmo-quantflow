@@ -91,7 +91,7 @@ class NativeBundleExporter(BundleExporter):
         self.sessions, self.branch, self.variant = {}, None, None
         self.root.mkdir(parents=True, exist_ok=False)
         self.meta = dict(
-            schema_version=2,
+            schema_version=3,
             kind="native_h3",
             complete=False,
             mode=config["mode"],

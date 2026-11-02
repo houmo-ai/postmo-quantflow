@@ -11,7 +11,8 @@
         "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_scaled_rms.py",
         "benchmark_test/ci_test_transformer5.16.0/test_sol_h3_static_graph.py",
         "configs_merak/workflows/xh2a/other_models/sol_h3/sol_h3_*.yaml",
-        "xhmodel_merak/xh_other_model/models/sol_h3/build.py"
+        "xhmodel_merak/xh_other_model/models/sol_h3/build.py",
+        "xhmodel_merak/xh_other_model/common/attention.py"
       ]
     }
   ]

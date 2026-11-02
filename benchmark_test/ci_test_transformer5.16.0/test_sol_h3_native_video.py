@@ -97,7 +97,7 @@ def test_decoder_only_loader_materializes_nonpersistent_rope(tmp_path):
     )
 
 
-def test_native_decoder_sdk_export_uses_noncausal_flash_attention(tmp_path):
+def test_native_decoder_sdk_export_uses_short_kv_matmul_attention(tmp_path):
     import onnx
 
     from xhmodel_merak.xh_other_model.models.sol_h3.export import export_graph
@@ -116,9 +116,9 @@ def test_native_decoder_sdk_export_uses_noncausal_flash_attention(tmp_path):
     )
     nodes = onnx.load(str(path), load_external_data=False).graph.node
     attention = [node for node in nodes if node.op_type == "FlashAttention"]
-    assert len(attention) == 1
-    attrs = {attr.name: onnx.helper.get_attribute_value(attr) for attr in attention[0].attribute}
-    assert attrs["is_causal"] == 0
+    assert not attention
+    assert sum(node.op_type == "MatMul" for node in nodes) == 2
+    assert sum(node.op_type == "Softmax" for node in nodes) == 1
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
 
     runner = HMONNXInferenceV2(str(path), session_config=HMONNXInferenceConfig(exec_devices=["cuda:0"]))

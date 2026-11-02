@@ -12,6 +12,7 @@ from .conditioning import IndexedModulation, validate_fp16_constants
 from .precision import ATTENTION_VALUE_DIVISOR, H3PrecisionPolicy, StableRMSNorm, scaled_linear, split_swiglu_projection
 from .role_layout import role_affine, role_spans
 
+
 DEFAULT_H3_POLICY = H3PrecisionPolicy()
 
 
@@ -30,7 +31,9 @@ class H3Attention(nn.Module):
         self.use_rotary = use_rotary
         self.attention_block_size = attention_block_size
         if sdk_ops:
-            from xhquant.nn import FlashAttention, Rope
+            from xhquant.nn import Rope
+
+            from ...common.attention import CompilerAttention as FlashAttention
 
             self.rotary = Rope()
             self.attention = FlashAttention(num_heads=self.heads, is_causal=False, scale=self.head_dim**-0.5)
@@ -54,8 +57,6 @@ class H3Attention(nn.Module):
         q, k, v = self.q_norm(heads(self.q(x))), self.k_norm(heads(self.k(x))), heads(self.v(x))
         q, k = self.rotate(q, cos, sin), self.rotate(k, cos, sin)
         if attention_metadata is not None:
-            if self.attention_block_size is None:
-                raise ValueError("fixed-role H3 attention requires an explicit block size")
             if self.sdk_ops:
                 attended = self.attention(q, k, v, key_mask=attention_metadata)
             else:
@@ -83,7 +84,7 @@ class H3SwiGLU(nn.Module):
 
 
 class H3TextGraph(nn.Module):
-    """Run the prompt-only token refiner once, with a compact valid text prefix."""
+    """Run the token refiner with a Host-provided broadcast key mask."""
 
     def __init__(self, source, policy=DEFAULT_H3_POLICY, *, sdk_ops=False, input_divisor=1.0):
         super().__init__()
@@ -120,12 +121,12 @@ class H3TextGraph(nn.Module):
             bounded_reciprocal=bounded,
         )
 
-    def forward(self, text_features, valid_text_length):
+    def forward(self, text_features, key_mask):
         x = self.projection(text_features)
         # Identity rotary factors retain the same static attention interface.
         cos, sin = x.new_ones((1, 1, x.shape[1], 0)), x.new_zeros((1, 1, x.shape[1], 0))
         for block in self.blocks:
-            x = x + block["attention"](block["norm1"](x), cos, sin, valid_text_length)
+            x = x + block["attention"](block["norm1"](x), cos, sin, None, attention_metadata=key_mask)
             x = x + block["ffn"](block["norm2"](x))
         return self.norm(x)
 

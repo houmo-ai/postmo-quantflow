@@ -11,24 +11,25 @@ from .conditioning import AUDIO_SIGMAS, REFINER_SIGMAS, VIDEO_SIGMAS
 from .precision import require_finite
 
 
-def initial_h3(seed, *, size=(384, 672)):
+def initial_h3(seed, *, size=(384, 672), video_frames=37, audio_frames=207):
     from diffusers.modular_pipelines.minimax_h3.before_denoise import patchify_video_latents
 
     generator = torch.Generator(device="cpu").manual_seed(seed)
     height, width = size
-    video = torch.randn((1, 24, 37, height // 16, width // 16), generator=generator, dtype=torch.float32)
+    video = torch.randn((1, 24, video_frames, height // 16, width // 16), generator=generator, dtype=torch.float32)
     video = patchify_video_latents(video, (1, 2, 2))[None]
-    audio = torch.randn((1, 414, 32), generator=generator, dtype=torch.float32)
+    audio = torch.randn((1, 2 * audio_frames, 32), generator=generator, dtype=torch.float32)
     return video, audio
 
 
-def h3_rope(text_length, *, text_capacity=512, size=(384, 672)):
+def h3_rope(text_length, *, text_capacity=512, size=(384, 672), video_frames=37, audio_frames=207):
     from diffusers.modular_pipelines.minimax_h3.before_denoise import MiniMaxH3PrepareLayoutStep
 
     if not 0 < text_length <= text_capacity:
         raise ValueError("prompt length exceeds the H3 text gear")
     positions, _, vi, ai, ti, _, _ = MiniMaxH3PrepareLayoutStep.build_packed_sequence(
-        torch.ones(text_length, dtype=torch.int64), 37, size[0] // 16, size[1] // 16, 207, (1, 2, 2), 2, 2, 0
+        torch.ones(text_length, dtype=torch.int64),
+        video_frames, size[0] // 16, size[1] // 16, audio_frames, (1, 2, 2), 2, 2, 0,
     )
     positions = positions[torch.cat((vi, ai, ti))].float()
     positions = F.pad(positions, (0, 0, 0, text_capacity - text_length))
@@ -55,12 +56,12 @@ def h3_updates(invoke, video, audio, text, cos, sin, text_length):
     return video, audio
 
 
-def unpatch_h3(video, *, size=(384, 672)):
+def unpatch_h3(video, *, size=(384, 672), frames=37):
     height, width = size[0] // 16, size[1] // 16
     return (
-        video.reshape(1, 37, height // 2, width // 2, 24, 1, 2, 2)
+        video.reshape(1, frames, height // 2, width // 2, 24, 1, 2, 2)
         .permute(0, 4, 1, 5, 2, 6, 3, 7)
-        .reshape(1, 24, 37, height, width)
+        .reshape(1, 24, frames, height, width)
     )
 
 
@@ -70,8 +71,8 @@ def upscale_h3(invoke, latent, plans, statistics):
     )
     normalized = (latent.float() - mean) / std
     padded = F.pad(normalized, (0, 0, 0, 0, 5, 5), mode="replicate")
-    output = torch.zeros(1, 24, 37, latent.shape[3] * 2, latent.shape[4] * 2)
-    weights = torch.zeros(1, 1, 37, 1, 1)
+    output = torch.zeros(1, 24, latent.shape[2], latent.shape[3] * 2, latent.shape[4] * 2)
+    weights = torch.zeros(1, 1, latent.shape[2], 1, 1)
     for plan in plans:
         segment = padded[:, :, plan["input_start"] : plan["input_end"]]
         value = invoke(f"h3_upscale_t{segment.shape[2]}", segment).float()
@@ -114,34 +115,46 @@ def audio_mel(pcm, *, source_rate, config):
     return result
 
 
-def initial_ltx(video_latent, audio_latent, seed, *, device="cuda:0"):
+def audio_for_video(pcm, *, frames, fps=24, sample_rate=32000):
+    """Fit output PCM to the presentation duration of the decoded video."""
+    if type(frames) is not int or frames <= 0 or fps <= 0 or sample_rate <= 0:
+        raise ValueError("video frames, fps and audio sample rate must be positive")
+    samples = round(frames * sample_rate / fps)
+    if pcm.shape[-1] < samples:
+        return F.pad(pcm, (0, samples - pcm.shape[-1]))
+    return pcm[..., :samples]
+
+
+def initial_ltx(video_latent, audio_latent, seed, *, device="cuda:0", freeze_audio=False):
     video = video_latent.float().permute(0, 2, 3, 4, 1).reshape(1, -1, 128)
-    audio = audio_latent.float().permute(0, 2, 1, 3).reshape(1, 126, 128)
+    audio = audio_latent.float().permute(0, 2, 1, 3).reshape(1, audio_latent.shape[2], 128)
     generator = torch.Generator(device=device).manual_seed(seed)
     sigma = REFINER_SIGMAS[0]
     # Match the reference's CUDA BF16 random draw while retaining FP32 solver state.
     vn = torch.randn(video.shape, device=device, dtype=torch.bfloat16, generator=generator).float().cpu()
     an = torch.randn(audio.shape, device=device, dtype=torch.bfloat16, generator=generator).float().cpu()
-    return (1 - sigma) * video + sigma * vn, (1 - sigma) * audio + sigma * an
+    return (1 - sigma) * video + sigma * vn, audio.cpu() if freeze_audio else (1 - sigma) * audio + sigma * an
 
 
-def ltx_updates(invoke, video, audio, rope=()):
+def ltx_updates(invoke, video, audio, rope=(), *, freeze_audio=False):
     for step, (sigma, next_sigma) in enumerate(zip(REFINER_SIGMAS[:-1], REFINER_SIGMAS[1:], strict=True)):
         v, a = invoke(video, audio, torch.tensor([step], dtype=torch.int32), *rope)
         require_finite((v, a), name=f"LTX velocity step {step}")
         # LTX predicts noise-ward velocity, opposite to H3's convention.
         video = video.float() + (next_sigma - sigma) * v.float()
-        audio = audio.float() + (next_sigma - sigma) * a.float()
+        if not freeze_audio:
+            audio = audio.float() + (next_sigma - sigma) * a.float()
         require_finite((video, audio), name=f"LTX solver step {step}")
     return video, audio
 
 
-def unpatch_ltx(video, *, size=(768, 1344)):
-    return video.reshape(1, 16, size[0] // 32, size[1] // 32, 128).permute(0, 4, 1, 2, 3).contiguous()
+def unpatch_ltx(video, *, size=(768, 1344), frames=16):
+    return video.reshape(1, frames, size[0] // 32, size[1] // 32, 128).permute(0, 4, 1, 2, 3).contiguous()
 
 
 def conditioned_h3_layout(
-    text_tags, *, size=(384, 672), anchors=(), references=(), visual_latents=(), audio_latents=()
+    text_tags, *, size=(384, 672), anchors=(), references=(), visual_latents=(), audio_latents=(),
+    video_frames=37, audio_frames=207,
 ):
     """Reuse native rotary positions, retaining the export's video/audio/text order."""
     from diffusers.modular_pipelines.minimax_h3.before_denoise import (
@@ -149,7 +162,7 @@ def conditioned_h3_layout(
         MiniMaxH3Ref2VAPrepareLayoutStep,
     )
 
-    geometry = (37, size[0] // 16, size[1] // 16, 207, (1, 2, 2), 2, 2, 0)
+    geometry = (video_frames, size[0] // 16, size[1] // 16, audio_frames, (1, 2, 2), 2, 2, 0)
     if references:
         if anchors:
             raise ValueError("reference and first/last frame inputs are mutually exclusive")
@@ -212,13 +225,13 @@ class ConditionedDraft:
         self._configure_slots(capacities, rope_config, roles, positions)
 
     @classmethod
-    def from_text(cls, *, seed, size, text_length, capacities, rope_config):
+    def from_text(cls, *, seed, size, text_length, capacities, rope_config, video_frames=37, audio_frames=207):
         """Use the same padded slots for T2VA without introducing media encoders."""
         result = cls.__new__(cls)
-        result.video, result.audio = initial_h3(seed, size=size)
+        result.video, result.audio = initial_h3(seed, size=size, video_frames=video_frames, audio_frames=audio_frames)
         result.text_length = text_length
         positions, roles, result.cv, result.ca = conditioned_h3_layout(
-            torch.ones(text_length, dtype=torch.int64), size=size
+            torch.ones(text_length, dtype=torch.int64), size=size, video_frames=video_frames, audio_frames=audio_frames
         )
         result._configure_slots(capacities, rope_config, roles, positions)
         return result
@@ -295,14 +308,16 @@ class RolePartitionedDraft(ConditionedDraft):
         role_capacities,
         attention_heads,
         attention_block_size=256,
+        video_frames=37,
+        audio_frames=207,
     ):
         result = cls.__new__(cls)
         result.role_capacities = tuple(role_capacities)
         result.attention_heads, result.attention_block_size = attention_heads, attention_block_size
-        result.video, result.audio = initial_h3(seed, size=size)
+        result.video, result.audio = initial_h3(seed, size=size, video_frames=video_frames, audio_frames=audio_frames)
         result.text_length = text_length
         positions, roles, result.cv, result.ca = conditioned_h3_layout(
-            torch.ones(text_length, dtype=torch.int64), size=size
+            torch.ones(text_length, dtype=torch.int64), size=size, video_frames=video_frames, audio_frames=audio_frames
         )
         result._configure_slots(capacities, rope_config, roles, positions)
         return result

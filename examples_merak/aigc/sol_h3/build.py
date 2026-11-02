@@ -10,7 +10,7 @@ from xhmodel_merak.model_build import build_model
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model-dir", default="/data01/datasets/Sol-H3-merak-source")
+    parser.add_argument("--model-dir", required=True, help="Source-index directory with model and calibration inputs")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--quant-checkpoint", help="Reuse a complete Qwen3-VL GPTQ/AutoRound W4 checkpoint")

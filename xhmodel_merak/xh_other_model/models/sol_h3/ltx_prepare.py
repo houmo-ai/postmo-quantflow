@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import torch
 
 from .conditioning import REFINER_SIGMAS
@@ -19,17 +21,17 @@ def cpu_lora_fuse_rule():
     return FuseRule(aggregation_dtype=bf16_fuse_rule.aggregation_dtype, fuse_fn=fuse)
 
 
-def native_tools(*, size=(768, 1344)):
+def native_tools(*, size=(768, 1344), frames=121, fps=24):
     from ltx_core.components.patchifiers import AudioPatchifier, VideoLatentPatchifier
     from ltx_core.tools import AudioLatentTools, VideoLatentTools
     from ltx_core.types import VIDEO_SCALE_FACTORS, AudioLatentShape, VideoLatentShape, VideoPixelShape
 
-    pixel = VideoPixelShape(batch=1, frames=121, height=size[0], width=size[1], fps=24)
+    pixel = VideoPixelShape(batch=1, frames=frames, height=size[0], width=size[1], fps=fps)
     return (
         VideoLatentTools(
             VideoLatentPatchifier(patch_size=1),
             VideoLatentShape.from_pixel_shape(pixel),
-            24.0,
+            float(fps),
             scale_factors=VIDEO_SCALE_FACTORS,
         ),
         AudioLatentTools(AudioPatchifier(patch_size=1), AudioLatentShape.from_video_pixel_shape(pixel)),
@@ -37,15 +39,22 @@ def native_tools(*, size=(768, 1344)):
 
 
 @torch.no_grad()
-def prepare_conditioning(source, cache, *, device="cpu", size=(768, 1344)):
+def prepare_conditioning(source, cache, *, device="cpu", size=(768, 1344), frames=121, fps=24, freeze_audio=False):
     from ltx_core.components.noisers import GaussianNoiser
     from ltx_pipelines.utils.helpers import create_noised_state
 
-    video_tools, audio_tools = native_tools(size=size)
+    video_tools, audio_tools = native_tools(size=size, frames=frames, fps=fps)
     noiser = GaussianNoiser(generator=torch.Generator(device=device).manual_seed(42))
     video_state = create_noised_state(video_tools, [], noiser, torch.float16, device, REFINER_SIGMAS[0])
     audio_state = create_noised_state(audio_tools, [], noiser, torch.float16, device, REFINER_SIGMAS[0])
+    if freeze_audio:
+        audio_state = freeze_audio_state(audio_state)
     return _prepare_state_conditioning(source, cache, video_state, audio_state, device=device)
+
+
+def freeze_audio_state(state):
+    """Match upstream: consume the original noise draws, then freeze clean audio."""
+    return replace(state, latent=state.clean_latent, denoise_mask=torch.zeros_like(state.denoise_mask), frozen=True)
 
 
 @torch.no_grad()
@@ -53,13 +62,15 @@ def prepare_keyframe_conditioning(source, cache, video_state, audio_state, *, de
     """Fold two video time roles while retaining native target/guide positions.
 
     The clean role covers frozen first-frame tokens and appended last-frame
-    guides. Prompt modulation and A/V gates use global sigma, as in LTX.
+    guides. Prompt modulation and A/V gates use each modality's global sigma;
+    frozen audio uses zero, including the audio-to-video gate conditioning.
     """
     mask = video_state.denoise_mask
     if not bool(((mask == 0) | (mask == 1)).all()):
         raise ValueError("the compact LTX keyframe wrapper requires binary video denoise masks")
-    if not bool((audio_state.denoise_mask == 1).all()):
-        raise ValueError("the LTX keyframe wrapper does not condition audio tokens")
+    audio_mask = 0 if getattr(audio_state, "frozen", False) else 1
+    if not bool((audio_state.denoise_mask == audio_mask).all()):
+        raise ValueError("LTX audio must be fully frozen or fully generated")
     if getattr(video_state, "attention_mask", None) is not None:
         raise ValueError("the LTX keyframe wrapper requires unrestricted native guide attention")
     return _prepare_state_conditioning(source, cache, video_state, audio_state, device=device, video_time_roles=True)
@@ -73,10 +84,13 @@ def _prepare_state_conditioning(source, cache, video_state, audio_state, *, devi
     for sigma in REFINER_SIGMAS[:-1]:
 
         def modality(state, context, *, time_roles=False, sigma=sigma):
+            modality_sigma = 0.0 if getattr(state, "frozen", False) else sigma
             return Modality(
                 latent=state.latent.to(device=device, dtype=torch.float16),
-                sigma=torch.tensor([sigma], device=device),
-                timesteps=torch.tensor([[sigma, 0.0]] if time_roles else [[sigma]], device=device),
+                sigma=torch.tensor([modality_sigma], device=device),
+                timesteps=torch.tensor(
+                    [[modality_sigma, 0.0]] if time_roles else [[modality_sigma]], device=device
+                ),
                 positions=state.positions.to(device=device),
                 context=context.to(device=device, dtype=torch.float16),
                 keyframes_mask=(

@@ -31,6 +31,29 @@ def _validate_latent(value, shape, name):
     require_finite(value, name=name)
 
 
+def validate_keyframe_resolution(image, size):
+    """Reject keyframes that require enlargement after native EXIF rotation."""
+    from pathlib import Path
+
+    from PIL import Image
+
+    _validate_size(size)
+    if isinstance(image, Image.Image):
+        width, height = image.size
+        orientation = image.getexif().get(274)
+    else:
+        with Image.open(Path(image).expanduser().resolve(strict=True)) as source:
+            width, height = source.size
+            orientation = source.getexif().get(274)
+    if orientation in (6, 8):
+        width, height = height, width
+    if height < size[0] or width < size[1]:
+        raise ValueError(
+            f"LTX keyframe is {width}x{height}; this artifact requires at least {size[1]}x{size[0]} "
+            "without enlargement. Supply a clear high-resolution image; resizing a blurred image is insufficient."
+        )
+
+
 def prepare_keyframe_pixels(image, size, crf) -> torch.Tensor:
     """Prepare an SDR PIL image or local image path for the LTX image encoder.
 
@@ -121,6 +144,8 @@ class StaticKeyframeState:
     first_role: torch.Tensor
     video_valid_length: torch.Tensor
     size: tuple[int, int]
+    target_frames: int
+    audio_frozen: bool = False
 
 
 @torch.no_grad()
@@ -131,21 +156,25 @@ def prepare_static_keyframe_state(
     keyframe_latents: Sequence[tuple[int, torch.Tensor]] = (),
     seed: int,
     size=(768, 1344),
+    refiner_frames=121,
     device="cpu",
     dtype=torch.float16,
     noise_dtype=torch.bfloat16,
     video_noise: torch.Tensor | None = None,
     audio_noise: torch.Tensor | None = None,
+    freeze_audio: bool = False,
 ) -> StaticKeyframeState:
     """Prepare native-strength endpoint conditions without author libraries.
 
-    The fixed package accepts pixel-frame indices 0 and 120. Target video
+    The fixed package accepts the first and last pixel-frame indices. Target video
     noise is drawn before audio noise at the requested device, using BF16 by
     default, and no noise is drawn for the appended guide. The two FP32 lerps
     preserve native GaussianNoiser arithmetic, including conditioned rows.
     Replay noise, when provided, uses packed target BNC shapes.
     """
     _validate_size(size)
+    if type(freeze_audio) is not bool:
+        raise ValueError("LTX freeze_audio must be a boolean")
     if type(seed) is not int or not 0 <= seed < 2**63:
         raise ValueError("LTX keyframe seed is outside the supported range")
     if dtype not in (torch.float16, torch.bfloat16, torch.float32):
@@ -154,8 +183,13 @@ def prepare_static_keyframe_state(
         raise ValueError("LTX noise dtype must be float16, bfloat16 or float32")
     height, width = size[0] // 32, size[1] // 32
     frame_tokens = height * width
-    video_shape = (1, 128, 16, height, width)
-    audio_shape = (1, 8, 126, 16)
+    if type(refiner_frames) is not int or refiner_frames < 9 or (refiner_frames - 1) % 8:
+        raise ValueError("LTX output frame count must be a positive 8n+1 temporal gear")
+    target_frames = (refiner_frames - 1) // 8 + 1
+    audio_frames = round(refiner_frames / 24 * 25)
+    last_frame = refiner_frames - 1
+    video_shape = (1, 128, target_frames, height, width)
+    audio_shape = (1, 8, audio_frames, 16)
     image_shape = (1, 128, 1, height, width)
     _validate_latent(video_latent, video_shape, "LTX target video latent")
     _validate_latent(audio_latent, audio_shape, "LTX target audio latent")
@@ -163,14 +197,14 @@ def prepare_static_keyframe_state(
         raise ValueError("LTX keyframe latents must be a sequence of (pixel index, latent) pairs")
     images = {}
     for frame_idx, latent in keyframe_latents:
-        if type(frame_idx) is not int or frame_idx not in (0, 120) or frame_idx in images:
-            raise ValueError("static LTX keyframes require unique endpoint indices 0 or 120")
+        if type(frame_idx) is not int or frame_idx not in (0, last_frame) or frame_idx in images:
+            raise ValueError("static LTX keyframes require unique endpoint first/last indices")
         _validate_latent(latent, image_shape, "LTX image latent")
         images[frame_idx] = latent
 
     device = torch.device(device)
     video = video_latent.to(device=device, dtype=torch.float32).permute(0, 2, 3, 4, 1).reshape(1, -1, 128)
-    audio = audio_latent.to(device=device, dtype=torch.float32).permute(0, 2, 1, 3).reshape(1, 126, 128)
+    audio = audio_latent.to(device=device, dtype=torch.float32).permute(0, 2, 1, 3).reshape(1, audio_frames, 128)
     generator = torch.Generator(device=device).manual_seed(seed)
     sampled = [
         torch.randn(value.shape, generator=generator, device=device, dtype=noise_dtype).float()
@@ -183,17 +217,18 @@ def prepare_static_keyframe_state(
 
     padded_video = torch.nn.functional.pad(video, (0, 0, 0, frame_tokens))
     clean = padded_video.clone()
-    mask = torch.ones((1, frame_tokens * 17, 1), device=device, dtype=torch.float32)
-    mask[:, frame_tokens * 16 :] = 0
+    mask = torch.ones((1, frame_tokens * (target_frames + 1), 1), device=device, dtype=torch.float32)
+    mask[:, frame_tokens * target_frames :] = 0
     for frame_idx, value in images.items():
         value = value.to(device=device, dtype=dtype).float().permute(0, 2, 3, 4, 1).reshape(1, frame_tokens, 128)
-        begin = 0 if frame_idx == 0 else frame_tokens * 16
+        begin = 0 if frame_idx == 0 else frame_tokens * target_frames
         clean[:, begin : begin + frame_tokens] = value
         mask[:, begin : begin + frame_tokens] = 0
     sigma = REFINER_SIGMAS[0]
     noised = torch.lerp(padded_video, torch.nn.functional.pad(sampled[0], (0, 0, 0, frame_tokens)), sigma)
     video = torch.lerp(clean, noised, mask)
-    audio = torch.lerp(audio, sampled[1], sigma)
+    if not freeze_audio:
+        audio = torch.lerp(audio, sampled[1], sigma)
     require_finite((video, audio), name="static LTX initial state")
     return StaticKeyframeState(
         video=video,
@@ -202,9 +237,11 @@ def prepare_static_keyframe_state(
         video_mask=mask,
         first_role=torch.tensor([int(0 in images)], dtype=torch.int32, device=device),
         video_valid_length=torch.tensor(
-            [frame_tokens * (17 if 120 in images else 16)], dtype=torch.int32, device=device
+            [frame_tokens * (target_frames + int(last_frame in images))], dtype=torch.int32, device=device
         ),
         size=tuple(size),
+        target_frames=target_frames,
+        audio_frozen=freeze_audio,
     )
 
 
@@ -224,8 +261,10 @@ def static_keyframe_step(state, video_velocity, audio_velocity, sigma: float, ne
     video_x0 = state.video - video_velocity.float() * (state.video_mask * sigma)
     video_x0 = video_x0 * state.video_mask + state.clean_video * (1 - state.video_mask)
     video = state.video + ((state.video - video_x0) / current) * delta
-    audio_x0 = state.audio - audio_velocity.float() * sigma
-    audio = state.audio + ((state.audio - audio_x0) / current) * delta
+    audio = state.audio
+    if not state.audio_frozen:
+        audio_x0 = state.audio - audio_velocity.float() * sigma
+        audio = state.audio + ((state.audio - audio_x0) / current) * delta
     require_finite((video, audio), name="static LTX solver step")
     return replace(state, video=video, audio=audio)
 
@@ -233,8 +272,11 @@ def static_keyframe_step(state, video_velocity, audio_velocity, sigma: float, ne
 def clear_static_keyframe_state(state: StaticKeyframeState) -> torch.Tensor:
     """Drop the guide and return normalized BCTHW target latents for decode."""
     height, width = state.size[0] // 32, state.size[1] // 32
-    target_tokens = 16 * height * width
-    return state.video[:, :target_tokens].reshape(1, 16, height, width, 128).permute(0, 4, 1, 2, 3).contiguous()
+    target_tokens = state.target_frames * height * width
+    return (
+        state.video[:, :target_tokens].reshape(1, state.target_frames, height, width, 128)
+        .permute(0, 4, 1, 2, 3).contiguous()
+    )
 
 
 @torch.no_grad()
@@ -245,16 +287,18 @@ def prepare_keyframe_states(
     keyframe_latents: Sequence[tuple[int, torch.Tensor]] = (),
     seed: int,
     size=(768, 1344),
+    refiner_frames=121,
     device="cpu",
     dtype=torch.float16,
     noise_dtype=torch.bfloat16,
     video_noise: torch.Tensor | None = None,
     audio_noise: torch.Tensor | None = None,
+    freeze_audio: bool = False,
 ):
     """Return ``(video_state, audio_state, video_tools, audio_tools)``.
 
     Input latents use the native LTX normalized convention. Image latents have
-    shape ``(1, 128, 1, H/32, W/32)`` and pixel indices in ``[0, 120]``. Reference
+    shape ``(1, 128, 1, H/32, W/32)`` and valid output pixel indices. Reference
     latents cross the requested model ``dtype`` boundary; solver tensors remain
     FP32. ``state_modality`` casts a state for the model without changing it.
 
@@ -271,8 +315,10 @@ def prepare_keyframe_states(
         raise ValueError("LTX keyframe dtype must be float16, bfloat16 or float32")
     if noise_dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise ValueError("LTX noise dtype must be float16, bfloat16 or float32")
-    video_shape = (1, 128, 16, size[0] // 32, size[1] // 32)
-    audio_shape = (1, 8, 126, 16)
+    if type(refiner_frames) is not int or refiner_frames < 9 or (refiner_frames - 1) % 8:
+        raise ValueError("LTX output frame count must be a positive 8n+1 temporal gear")
+    video_shape = (1, 128, (refiner_frames - 1) // 8 + 1, size[0] // 32, size[1] // 32)
+    audio_shape = (1, 8, round(refiner_frames / 24 * 25), 16)
     image_shape = (1, 128, 1, *video_shape[-2:])
     _validate_latent(video_latent, video_shape, "LTX target video latent")
     _validate_latent(audio_latent, audio_shape, "LTX target audio latent")
@@ -280,8 +326,8 @@ def prepare_keyframe_states(
         raise ValueError("LTX keyframe latents must be a sequence of (pixel index, latent) pairs")
     seen = set()
     for frame_idx, latent in keyframe_latents:
-        if type(frame_idx) is not int or not 0 <= frame_idx <= 120 or frame_idx in seen:
-            raise ValueError("LTX keyframe pixel indices must be unique integers in [0, 120]")
+        if type(frame_idx) is not int or not 0 <= frame_idx < refiner_frames or frame_idx in seen:
+            raise ValueError("LTX keyframe pixel indices must be unique and inside the output")
         seen.add(frame_idx)
         _validate_latent(latent, image_shape, "LTX image latent")
 
@@ -289,9 +335,9 @@ def prepare_keyframe_states(
     from ltx_core.conditioning import VideoConditionByKeyframeIndex, VideoConditionByLatentIndex
     from ltx_pipelines.utils.helpers import create_noised_state
 
-    from .ltx_prepare import native_tools
+    from .ltx_prepare import freeze_audio_state, native_tools
 
-    video_tools, audio_tools = native_tools(size=size)
+    video_tools, audio_tools = native_tools(size=size, frames=refiner_frames)
     device = torch.device(device)
     video = video_latent.to(device=device, dtype=torch.float32)
     audio = audio_latent.to(device=device, dtype=torch.float32)
@@ -332,6 +378,8 @@ def prepare_keyframe_states(
         video_tools, conditions, ReplayNoiser(sampled[0]), torch.float32, device, sigma, video
     )
     audio_state = create_noised_state(audio_tools, [], ReplayNoiser(sampled[1]), torch.float32, device, sigma, audio)
+    if freeze_audio:
+        audio_state = freeze_audio_state(audio_state)
     return video_state, audio_state, video_tools, audio_tools
 
 

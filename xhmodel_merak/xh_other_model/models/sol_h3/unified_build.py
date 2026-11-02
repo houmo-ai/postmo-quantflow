@@ -12,8 +12,8 @@ def _replay_conditioning(exporter, request, processor, vae, audio_vae):
     import torch
     from transformers import AutoTokenizer
 
-    from .conditioner import H3FeatureEncoder
     from .build import _example_latent, _example_vision_features
+    from .conditioner import H3FeatureEncoder
     from .prefill import prefill_feature_graphs
     from .request import encode_request
     from .vision import VisionFeatureAdapter
@@ -130,7 +130,6 @@ def build_unified_bundle(model_dir, output_dir, config, *, device, conditioner_c
     assets.activate_build_sources()
     exporter = BundleExporter(assets, output_dir, cfg, device, conditioner_checkpoint)
     exporter.meta.update(
-        schema_version=5,
         mode="all",
         capacity_plan=common_plan,
         prompt_max_tokens=common_plan["prompt_max_tokens"],

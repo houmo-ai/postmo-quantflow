@@ -179,7 +179,7 @@ def native_source(root):
     config = yaml.safe_load(
         (
             Path(__file__).resolve().parents[2]
-            / "configs_merak/workflows/xh2a/other_models/sol_h3/h3_native_768p_w4.yaml"
+            / "configs_merak/workflows/xh2a/other_models/h3/h3_native_768p_w4.yaml"
         ).read_text()
     )["export"]
     config.update(

@@ -29,7 +29,9 @@ class _SolH3Adapter:
         )
         precision = manifest.get("parameters", {}).get("precision", {})
         validate_precision(
-            meta, deployment=precision.get("deployment"), checkpoint_weight=precision.get("checkpoint", {}).get("weight")
+            meta,
+            deployment=precision.get("deployment"),
+            checkpoint_weight=precision.get("checkpoint", {}).get("weight"),
         )
         if manifest.get("parameters", {}).get("profile") != meta["profile"]:
             raise ValueError("Sol-H3 graph canvas disagrees with the Manifest")
@@ -58,8 +60,8 @@ class _SolH3Adapter:
             output_path=str(result["output_path"]),
             width=runtime.meta["refiner_size"][1],
             height=runtime.meta["refiner_size"][0],
-            frames=121,
-            fps=24,
+            frames=runtime.meta["refiner_frames"],
+            fps=runtime.meta["fps"],
             seed=values["seed"],
             stats=result["stats"],
         )

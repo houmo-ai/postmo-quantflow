@@ -43,16 +43,20 @@ def _validate_ltx_reference_policy(meta):
         return None
     if not isinstance(policy, dict) or type(policy.get("enabled")) is not bool:
         raise ValueError("LTX reference conditioning requires an explicit enabled boolean")
+    require_native = policy.get("require_native_resolution", False)
+    if type(require_native) is not bool or (require_native and not policy["enabled"]):
+        raise ValueError("require_native_resolution must be a boolean and requires enabled LTX image conditioning")
     size = meta["refiner_size"]
     frames = (size[0] // 32) * (size[1] // 32)
+    target_frames = (meta.get("refiner_frames", 121) - 1) // 8 + 1
     maximum = policy.get("graph_mode") == "static_maximum_guide"
     if (
         policy.get("graph_mode") not in ("static_maximum_guide", "target_only")
         or policy["enabled"] != maximum
         or policy.get("first_frame_tokens") != frames
-        or policy.get("target_tokens") != 16 * frames
-        or policy.get("video_tokens") != (17 if maximum else 16) * frames
-        or policy.get("end_pixel_frame") != 120
+        or policy.get("target_tokens") != target_frames * frames
+        or policy.get("video_tokens") != (target_frames + int(maximum)) * frames
+        or policy.get("end_pixel_frame") != meta.get("refiner_frames", 121) - 1
         or policy.get("encoder_residual_scale") != 32.0
     ):
         raise ValueError("LTX reference policy disagrees with the fixed target/guide geometry")
@@ -70,6 +74,7 @@ def _validate_ltx_reference_policy(meta):
 def _npz_shapes(path):
     """Read NPY headers without allocating the large per-head rotary grids."""
     import zipfile
+
     import numpy as np
 
     shapes = {}
@@ -127,17 +132,19 @@ def export_entries(meta):
 
 def read_metadata(root):
     meta = json.loads(artifact_path(root, "runtime_meta_info.json").read_text())
-    if meta.get("schema_version") == 5:
+    if meta.get("schema_version") == 5 or (meta.get("schema_version") in (8, 9) and meta.get("mode") == "all"):
         from .bundle import mode_metadata
         from .capacity import MODES
+        from .duration import duration_gear
 
         size = meta.get("draft_size", [])
+        gear = duration_gear(meta.get("draft_frames"), meta.get("refiner_frames"), meta.get("fps"))
         if (
             meta.get("mode") != "all"
             or len(size) != 2
-            or meta.get("profile") != f"all-dense-{size[0]}p-{size[0] * 2}p-5s"
+            or meta.get("profile") != f"all-dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s"
         ):
-            raise ValueError("schema-5 Sol-H3 requires a unified five-mode profile")
+            raise ValueError("unified Sol-H3 requires a five-mode profile")
         audits = {}
         views = [mode_metadata(meta, mode) for mode in MODES]
         for field in ("text_capacity", "video_capacity", "audio_capacity", "kv_capacity", "qwen_visual_max_patches"):
@@ -156,15 +163,71 @@ def read_metadata(root):
     return _validate_metadata(root, meta)
 
 
+def _validate_ltx_audio_policy(meta):
+    if meta.get("schema_version") == 9:
+        policy = meta.get("ltx_audio_policy")
+        if (
+            not isinstance(policy, dict)
+            or set(policy) != {"input_name", "dtype", "shape", "modes", "default"}
+            or policy.get("input_name") != "audio_mode"
+            or policy.get("dtype") != "int32"
+            or policy.get("shape") != [1]
+            or type(policy["shape"][0]) is not int
+            or not isinstance(policy.get("modes"), dict)
+            or set(policy["modes"]) != {"joint", "frozen"}
+            or type(policy["modes"]["joint"]) is not int
+            or type(policy["modes"]["frozen"]) is not int
+            or policy["modes"] != {"joint": 0, "frozen": 1}
+            or policy.get("default") != "frozen"
+            or "ltx_audio_frozen" in meta
+        ):
+            raise ValueError("schema-9 requires the dynamic INT32 LTX audio_mode contract; re-export this bundle")
+        return
+    if "ltx_audio_policy" in meta:
+        raise ValueError("dynamic LTX audio policy requires a matching schema-9 graph; re-export this bundle")
+    frozen = meta.get("ltx_audio_frozen", False)
+    if type(frozen) is not bool or frozen != (meta.get("schema_version") in (6, 7, 8)):
+        raise ValueError("frozen LTX audio requires matching schema-6/schema-7/schema-8 export and runtime semantics")
+    return frozen
+
+
+def resolve_ltx_audio_mode(meta, mode=None):
+    """Resolve a request against the graph's declared, or legacy fixed, audio policy."""
+    _validate_ltx_audio_policy(meta)
+    if mode is not None and (not isinstance(mode, str) or mode not in ("joint", "frozen")):
+        raise ValueError("ltx_audio_mode must be 'joint' or 'frozen'")
+    policy = meta.get("ltx_audio_policy")
+    if policy is not None:
+        return policy["default"] if mode is None else mode
+    fixed = "frozen" if meta.get("ltx_audio_frozen", False) else "joint"
+    if mode is not None and mode != fixed:
+        raise ValueError(f"this Sol-H3 bundle supports only LTX audio mode {fixed!r}; re-export for {mode!r}")
+    return fixed
+
+
 def _validate_metadata(root, meta, *, audits=None):
+    from .duration import duration_gear
     from .precision import ATTENTION_VALUE_DIVISOR, H3PrecisionPolicy
 
-    if meta.get("schema_version") not in (3, 4) or meta.get("kind") != "sol_h3" or meta.get("complete") is not True:
-        raise ValueError("Sol-H3 requires a completed schema-3 or schema-4 bundle")
-    if meta["schema_version"] == 4 and (
+    if (
+        meta.get("schema_version") not in (3, 4, 8, 9)
+        or meta.get("kind") != "sol_h3"
+        or meta.get("complete") is not True
+    ):
+        raise ValueError(
+            "Sol-H3 requires a completed compatible bundle; re-export incompatible bundles"
+        )
+    _validate_ltx_audio_policy(meta)
+    if meta["schema_version"] in (8, 9) and meta.get("attention_contract") != dict(
+        mask_input_index=4, min_flash_kv_length=512
+    ):
+        raise ValueError("schema-8/9 requires compiler mask-slot-4 and minimum KV 512; re-export this bundle")
+    if meta["schema_version"] in (4, 8, 9) and (
         meta.get("capacity_plan", {}).get("token_alignment") != 256 or meta.get("h3_packed_inputs") is not True
     ):
-        raise ValueError("schema-4 Sol-H3 requires aligned capacities and packed attention inputs")
+        raise ValueError(
+            f"schema-{meta['schema_version']} Sol-H3 requires aligned capacities and packed attention inputs"
+        )
     if meta.get("attention_value_divisor") != ATTENTION_VALUE_DIVISOR:
         raise ValueError("Sol-H3 requires compensated long-sequence PV accumulation")
     policy = H3PrecisionPolicy(**meta["h3_precision"])
@@ -181,6 +244,7 @@ def _validate_metadata(root, meta, *, audits=None):
         raise ValueError("Sol-H3 text feature and refiner input divisors must match")
     if meta.get("draft_attention", "dense") != "dense" or meta.get("refiner_attention", "dense") != "dense":
         raise ValueError("this release supports only Dense Sol-H3")
+    gear = duration_gear(meta.get("draft_frames"), meta.get("refiner_frames"), meta.get("fps"))
     size = meta.get("draft_size")
     if (
         not isinstance(size, list)
@@ -189,15 +253,15 @@ def _validate_metadata(root, meta, *, audits=None):
         or meta.get("refiner_size") != [n * 2 for n in size]
         or meta.get("profile")
         not in (
-            f"dense-{size[0]}p-{size[0] * 2}p-5s",
-            f"{meta.get('mode', 't2va')}-dense-{size[0]}p-{size[0] * 2}p-5s",
+            f"dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s",
+            f"{meta.get('mode', 't2va')}-dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s",
         )
     ):
         raise ValueError("unexpected Sol-H3 deployment canvas")
-    if meta.get("draft_frames") != 124 or meta.get("refiner_frames") != 121 or meta.get("fps") != 24:
-        raise ValueError("unexpected Sol-H3 temporal gear")
     role_layout = _validate_role_layout(meta)
     ltx_policy = _validate_ltx_reference_policy(meta)
+    if meta["schema_version"] == 9 and ltx_policy is None:
+        raise ValueError("schema-9 requires the LTX reference and audio graph contracts")
     from .conditioning import AUDIO_SIGMAS, REFINER_SIGMAS, VIDEO_SIGMAS
 
     for field, expected in (
@@ -290,8 +354,12 @@ def _validate_metadata(root, meta, *, audits=None):
         or not meta.get("video_decoder_graphs")
     ):
         raise ValueError("Sol-H3 bundle is missing learned pipeline components")
-    if rope_mode == "constant" and meta["graphs"]["ltx_denoiser"]["input_names"] != ["video", "audio", "step"]:
-        raise ValueError("constant LTX RoPE requires only video, audio and step inputs")
+    if rope_mode == "constant":
+        expected_ltx_names = ["video", "audio", "step"]
+        if meta["schema_version"] == 9:
+            expected_ltx_names.append("audio_mode")
+        if meta["graphs"]["ltx_denoiser"]["input_names"] != expected_ltx_names:
+            raise ValueError("constant LTX RoPE graph inputs disagree with its audio policy")
     gears = meta.get("visual_graphs", [])
     if not isinstance(gears, list) or any(
         not isinstance(gear, dict)
@@ -316,7 +384,7 @@ def _validate_metadata(root, meta, *, audits=None):
         or "h3_visual" in meta["graphs"]
         or set(visual_capacities) != {name for name in meta["graphs"] if name.startswith("h3_visual_")}
     ):
-        raise ValueError("Sol-H3 visual graph gears disagree with the capacity plan; re-export single-graph bundles")
+        raise ValueError("Sol-H3 visual graph gears disagree with the capacity plan; re-export")
     if gears and "qwen_vision_config" not in meta["resources"]:
         raise ValueError("Sol-H3 vision gears require their native vision configuration")
     vision_config = (
@@ -392,13 +460,15 @@ def _validate_metadata(root, meta, *, audits=None):
         key in meta
         for key in ("reference_vae_layout", "reference_vae_tiles", "reference_vae_base", "reference_vae_masks")
     ):
+        layout = meta.get("reference_vae_layout")
         if (
-            meta.get("reference_vae_layout") != "split_v1"
-            or not isinstance(reference_masks, dict)
+            layout not in ("split_v1", "fixed_v1")
+            or (layout == "split_v1" and not isinstance(reference_masks, dict))
+            or (layout == "fixed_v1" and "reference_vae_masks" in meta)
             or not isinstance(meta.get("reference_vae_tiles"), dict)
             or ("reference_vae_base" in meta and not isinstance(meta["reference_vae_base"], dict))
         ):
-            raise ValueError("Sol-H3 reference VAE requires split_v1 layout; re-export the bundle")
+            raise ValueError("Sol-H3 reference VAE requires a supported tile layout; re-export the bundle")
         if "reference_vae_config" not in meta["resources"] or not (
             meta.get("reference_vae_tiles") or meta.get("reference_vae_base")
         ):
@@ -417,7 +487,10 @@ def _validate_metadata(root, meta, *, audits=None):
             parts = shape.split("x")
             if len(parts) != 3 or any(not n.isdecimal() or int(n) <= 0 for n in parts) or name not in meta["graphs"]:
                 raise ValueError("Sol-H3 reference VAE tile mapping is invalid")
-            reference_shapes[name] = [1, 3, *map(int, parts)]
+            geometry = [1, 3, *map(int, parts)]
+            if layout == "fixed_v1" and name in reference_shapes and reference_shapes[name] != geometry:
+                raise ValueError("Sol-H3 fixed reference VAE graph cannot represent multiple geometries")
+            reference_shapes[name] = geometry
         if reference_masks is not None:
             if set(reference_masks) != set(reference_shapes):
                 raise ValueError("Sol-H3 reference VAE mask policies must cover the tile graphs exactly")
@@ -452,11 +525,15 @@ def _validate_metadata(root, meta, *, audits=None):
             or any(type(n) is not int or n <= 0 for n in shape)
             or shape[1:] != list(meta["draft_size"])
             or name not in meta["graphs"]
-            or name in reference_shapes
+            or (
+                name in reference_shapes
+                and (meta.get("reference_vae_layout") != "fixed_v1" or reference_shapes[name] != [1, 3, *shape])
+            )
             or base_reference.get("spatial_padding_mode") not in ("reflect", "constant")
         ):
             raise ValueError("Sol-H3 base reference VAE requires its exact full-frame geometry")
         reference_shapes[name] = [1, 3, *shape]
+    reference_masks = reference_masks or {}
     for name, graph in meta["graphs"].items():
         path = artifact_path(root, graph["path"])
         if "norm_fp16" in meta:
@@ -487,36 +564,39 @@ def _validate_metadata(root, meta, *, audits=None):
             if audits is not None:
                 audits[audit_key] = audit
         if name in visual_capacities:
-            from ..qwen_image21.vision_graph import VISION_INPUT_NAMES
+            from ..qwen_image21.vision_graph import KEY_MASK_VISION_INPUT_NAMES
+            from .graph_audit import validate_external_key_mask
 
             capacity = visual_capacities[name]
             head_dim = vision_config["hidden_size"] // vision_config["num_heads"]
             expected_inputs = dict(
                 zip(
-                    VISION_INPUT_NAMES,
+                    KEY_MASK_VISION_INPUT_NAMES,
                     (
                         [1, capacity, 1536],
                         [4, capacity],
                         [4, capacity],
                         [1, 1, capacity, head_dim],
                         [1, 1, capacity, head_dim],
-                        [1, capacity, 1],
-                        [1],
+                        [1, 1, 1, capacity],
                     ),
                     strict=True,
                 )
             )
             output_names = ["image_features", "deepstack_0", "deepstack_1", "deepstack_2"]
             if (
-                graph["input_names"] != VISION_INPUT_NAMES
+                graph["input_names"] != KEY_MASK_VISION_INPUT_NAMES
                 or graph["output_names"] != output_names
                 or audit["input_shapes"] != expected_inputs
                 or audit["output_shapes"]
                 != {output: [1, capacity // 4, vision_config["out_hidden_size"]] for output in output_names}
-                or audit["operators"].get("FlashAttention", 0) != vision_config["depth"]
-                or any(audit["operators"].get(op, 0) for op in ("MatMul", "Softmax", "MaskedSoftmax"))
+                or audit["operators"].get("FlashAttention", 0) != vision_config["depth"] * int(capacity >= 512)
+                or audit["operators"].get("MatMul", 0) != 2 * vision_config["depth"] * int(capacity < 512)
+                or audit["operators"].get("Softmax", 0) != vision_config["depth"] * int(capacity < 512)
+                or audit["operators"].get("MaskedSoftmax", 0)
             ):
                 raise ValueError("Sol-H3 vision gear graph disagrees with its capacity or FlashAttention contract")
+            validate_external_key_mask(path, audit, capacity)
             import onnx
 
             for node in onnx.load(path, load_external_data=False).graph.node:
@@ -524,13 +604,24 @@ def _validate_metadata(root, meta, *, audits=None):
                     attrs = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
                     if (
                         attrs.get("is_causal") != 0
-                        or len(node.input) < 10
-                        or node.input[5] != node.input[9]
-                        or node.input[5] != "input_length"
+                        or len(node.input) != 5
+                        or not node.input[4]
                     ):
                         raise ValueError(
-                            "Sol-H3 vision requires noncausal FlashAttention with effective prefix lengths"
+                            "Sol-H3 vision requires noncausal FlashAttention with a broadcast key mask at input 4"
                         )
+        if name == "h3_text_refiner" and meta["schema_version"] in (8, 9):
+            from .graph_audit import validate_external_key_mask
+
+            capacity = meta["text_capacity"]
+            if (
+                graph["input_names"] != ["text_features", "key_mask"]
+                or graph["output_names"] != ["refined_text"]
+                or audit["input_shapes"].get("text_features", [])[:2] != [1, capacity]
+                or audit["output_shapes"].get("refined_text", [])[:2] != [1, capacity]
+            ):
+                raise ValueError("H3 text refiner requires fixed features and an external key mask")
+            validate_external_key_mask(path, audit, capacity)
         if name in reference_shapes:
             inputs = ["pixels"]
             if name in reference_masks:
@@ -564,13 +655,24 @@ def _validate_metadata(root, meta, *, audits=None):
                 or audit["input_shapes"].get("pixels") != reference_shapes[name]
             ):
                 raise ValueError("Sol-H3 reference VAE graph disagrees with its tile mapping")
-        if name in meta["video_decoder_graphs"] and "video_decoder_mask" in meta:
-            policy = meta["video_decoder_mask"]
+        if name in meta["video_decoder_graphs"] and ("video_decoder_mask" in meta or "video_decoder_masks" in meta):
+            policies = meta.get("video_decoder_masks")
+            if policies is not None:
+                if (
+                    "video_decoder_mask" in meta
+                    or not isinstance(policies, dict)
+                    or set(policies) != set(meta["video_decoder_graphs"])
+                ):
+                    raise ValueError("Sol-H3 temporal decoder masks must cover each decoder graph")
+                policy = policies[name]
+            else:
+                if len(meta["video_decoder_graphs"]) != 1:
+                    raise ValueError("Sol-H3 single decoder mask requires exactly one decoder graph")
+                policy = meta["video_decoder_mask"]
             frames, height, width = policy["shape"]
             names = ["latent", *[f"spatial_mask_{i}" for i in range(len(policy["scales"]))]]
             if (
-                len(meta["video_decoder_graphs"]) != 1
-                or graph["input_names"] != names
+                graph["input_names"] != names
                 or audit["input_shapes"].get("latent") != [1, 128, frames, height, width]
                 or any(
                     audit["input_shapes"].get(f"spatial_mask_{i}") != [1, 1, 1, height * sy, width * sx]
@@ -643,9 +745,17 @@ def _validate_metadata(root, meta, *, audits=None):
                 if rope_mode != "inputs":
                     raise ValueError("static LTX guides require the published shared rotary inputs")
                 names += ["first_role", "video_valid_length"]
-            expected = {"video": [1, ltx_policy["video_tokens"], 128], "audio": [1, 126, 128], "step": [1]}
+            if meta["schema_version"] == 9:
+                names.append("audio_mode")
+            expected = {
+                "video": [1, ltx_policy["video_tokens"], 128],
+                "audio": [1, gear.ltx_audio_frames, 128],
+                "step": [1],
+            }
             if ltx_policy["enabled"]:
                 expected.update(first_role=[1], video_valid_length=[1])
+            if meta["schema_version"] == 9:
+                expected["audio_mode"] = [1]
             if (
                 graph["input_names"] != names
                 or graph["output_names"] != ["video_velocity", "audio_velocity"]
@@ -653,19 +763,28 @@ def _validate_metadata(root, meta, *, audits=None):
                 or audit["output_shapes"] != {"video_velocity": expected["video"], "audio_velocity": expected["audio"]}
             ):
                 raise ValueError("LTX DiT inputs/outputs disagree with its fixed guide policy")
-            if ltx_policy["enabled"]:
+            if ltx_policy["enabled"] or meta["schema_version"] == 9:
                 import onnx
 
                 model = onnx.load(path, load_external_data=False)
                 types = {v.name: v.type.tensor_type.elem_type for v in model.graph.input}
-                if any(types.get(k) != onnx.TensorProto.INT32 for k in ("step", "first_role", "video_valid_length")):
-                    raise ValueError("LTX step/role/effective-length controls must be INT32")
+                controls = ["step"]
+                if ltx_policy["enabled"]:
+                    controls += ["first_role", "video_valid_length"]
+                if meta["schema_version"] == 9:
+                    controls.append("audio_mode")
+                if any(types.get(k) != onnx.TensorProto.INT32 for k in controls):
+                    raise ValueError("LTX step, role, effective length and audio mode controls must be INT32")
+            if ltx_policy["enabled"]:
                 attentions = [n for n in model.graph.node if n.op_type == "FlashAttention"]
-                masked = [n for n in attentions if len(n.input) > 11 and n.input[11]]
+                masked = [n for n in attentions if len(n.input) == 5 and n.input[4]]
+                matmuls = audit["operators"].get("MatMul", 0)
+                cores = len(attentions) + matmuls // 2
                 if (
-                    not attentions
-                    or len(attentions) % 6
-                    or len(masked) != len(attentions) // 3
+                    not cores
+                    or matmuls % 2
+                    or cores % 6
+                    or len(masked) != 2 * (cores // 6) * int(expected["video"][1] >= 512)
                     or any((len(n.input) > 5 and n.input[5]) or (len(n.input) > 9 and n.input[9]) for n in attentions)
                 ):
                     raise ValueError(
@@ -685,7 +804,8 @@ def _validate_metadata(root, meta, *, audits=None):
                         audit["input_shapes"].get(name) != rope_shapes[f"rope_{i}"] for i, name in enumerate(rope_names)
                     )
                     or any(
-                        rope_shapes[f"rope_{i}"][2] != (ltx_policy["video_tokens"] if i in (0, 1, 4, 5) else 126)
+                        rope_shapes[f"rope_{i}"][2]
+                        != (ltx_policy["video_tokens"] if i in (0, 1, 4, 5) else gear.ltx_audio_frames)
                         for i in range(8)
                     )
                 ):

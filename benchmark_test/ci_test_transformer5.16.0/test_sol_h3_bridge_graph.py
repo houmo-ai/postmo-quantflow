@@ -5,7 +5,8 @@ import torch
 
 from xhmodel_merak.xh_other_model.models.sol_h3.bridge_graph import TemporalAlignment, upscaler_segments
 from xhmodel_merak.xh_other_model.models.sol_h3.conv_graph import prepare_static_shapes
-from xhmodel_merak.xh_other_model.models.sol_h3.host import initial_h3, unpatch_h3
+from xhmodel_merak.xh_other_model.models.sol_h3.duration import duration_gear
+from xhmodel_merak.xh_other_model.models.sol_h3.host import audio_for_video, initial_h3, unpatch_h3
 
 
 def test_fake_shape_discovery_handles_conv_after_a_norm_and_activation():
@@ -22,10 +23,14 @@ def test_fake_shape_discovery_handles_conv_after_a_norm_and_activation():
     torch.testing.assert_close(module(value), expected, atol=5e-7, rtol=2e-5)
 
 
-def test_upscaler_chunks_cover_every_frame_and_overlap_the_author_windows():
-    plans = upscaler_segments()
-    assert [(p["input_start"], p["input_end"]) for p in plans] == [(0, 42), (22, 42)]
-    total = torch.zeros(37)
+@pytest.mark.parametrize(
+    "frames,windows",
+    [(37, [(0, 42), (22, 42)]), (107, [(0, 42), (22, 74), (54, 106), (86, 112)])],
+)
+def test_upscaler_chunks_cover_every_frame_and_overlap_the_author_windows(frames, windows):
+    plans = upscaler_segments(frames)
+    assert [(p["input_start"], p["input_end"]) for p in plans] == windows
+    total = torch.zeros(frames)
     for plan in plans:
         total[plan["output_start"] : plan["output_end"]] += torch.tensor(plan["weights"])
     assert bool((total > 0).all())
@@ -69,7 +74,10 @@ def test_upscaler_lowering_choice_is_scoped_to_both_segment_exports(monkeypatch,
     monkeypatch.setattr(source_io, "adapter", lambda *_: adapter)
     runner = object.__new__(BundleExporter)
     runner.assets, runner.device = None, "cpu"
-    runner.cfg = dict(draft_size=[32, 32], refiner_size=[64, 64], calibration_seed=42)
+    runner.cfg = dict(
+        draft_size=[32, 32], refiner_size=[64, 64], draft_frames=124, refiner_frames=121, fps=24,
+        calibration_seed=42,
+    )
     runner.progress = lambda *_: None
     runner.resource = lambda *_: None
     calls = []
@@ -92,15 +100,29 @@ def test_upscaler_lowering_choice_is_scoped_to_both_segment_exports(monkeypatch,
         ]
 
 
-def test_alignment_preserves_nearest_slot_channel_order_and_empty_slots():
-    alignment = TemporalAlignment()
-    latent = torch.arange(24 * 37 * 4 * 6, dtype=torch.float32).reshape(1, 24, 37, 4, 6)
+@pytest.mark.parametrize(
+    "draft,output,h3_video,h3_audio,ltx_video,ltx_audio,samples",
+    [(124, 121, 37, 207, 16, 126, 161333), (362, 361, 107, 603, 46, 376, 481333)],
+)
+def test_alignment_preserves_nearest_slot_channel_order_and_empty_slots(
+    draft, output, h3_video, h3_audio, ltx_video, ltx_audio, samples
+):
+    gear = duration_gear(draft, output)
+    assert (gear.h3_video_frames, gear.h3_audio_frames, gear.ltx_video_frames, gear.ltx_audio_frames) == (
+        h3_video, h3_audio, ltx_video, ltx_audio
+    )
+    alignment = TemporalAlignment(pixel_frames=draft)
+    latent = torch.arange(24 * h3_video * 4 * 6, dtype=torch.float32).reshape(1, 24, h3_video, 4, 6)
     actual = alignment(latent)
-    assert actual.shape == (1, 384, 17, 2, 3)
+    assert actual.shape == (1, 384, ltx_video + 1, 2, 3)
     # First target time's first nearest slot must contain the original frame zero.
     expected = torch.nn.functional.pixel_unshuffle(latent[:, :, 0], 2)
     torch.testing.assert_close(actual[:, 96:192, 0], expected)
     assert not bool(actual[:, 288:384, -1].any())
+    pcm = torch.arange(samples + 2, dtype=torch.float32).view(1, -1)
+    assert torch.equal(audio_for_video(pcm, frames=output), pcm[..., :samples])
+    padded = audio_for_video(pcm[..., : samples - 2], frames=output)
+    assert torch.equal(padded[..., : samples - 2], pcm[..., : samples - 2]) and not bool(padded[..., -2:].any())
 
 
 def test_h3_seed_draw_order_and_patch_roundtrip():

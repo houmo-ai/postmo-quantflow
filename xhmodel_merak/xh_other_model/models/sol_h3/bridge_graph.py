@@ -1,6 +1,6 @@
 # Copyright 2026 HOUMO AI
 # SPDX-License-Identifier: Apache-2.0
-"""Static x2 upscaler segments and frozen 37-to-17-frame latent alignment."""
+"""Static x2 upscaler segments and frozen H3-to-LTX temporal alignment."""
 
 from __future__ import annotations
 
@@ -164,18 +164,21 @@ class AdapterResidual(nn.Module):
 
 
 class AdapterGraph(nn.Module):
-    def __init__(self, source, *, sdk_ops=False):
+    def __init__(self, source, *, pixel_frames=124, target_frames=16, sdk_ops=False):
         super().__init__()
-        self.alignment = TemporalAlignment(sdk_ops=sdk_ops)
+        self.alignment = TemporalAlignment(pixel_frames=pixel_frames, sdk_ops=sdk_ops)
+        if type(target_frames) is not int or target_frames <= 0 or target_frames > self.alignment.frames:
+            raise ValueError("adapter target length must fit the temporally aligned sequence")
+        self.target_frames = target_frames
         self.skip, self.stem = source.skip, source.stem
         self.blocks = nn.ModuleList([AdapterResidual(block) for block in source.blocks])
         self.norm, self.head = source.final_norm, source.head
 
     def forward(self, upscaled_h3):
-        # Preserve the seventeenth adapter output's convolution context before cropping.
+        # Preserve all alignment outputs as convolution context before cropping.
         aligned = self.alignment(upscaled_h3)
         residual = self.stem(aligned)
         for block in self.blocks:
             residual = block(residual)
         result = self.skip(aligned) + self.head(F.silu(self.norm(residual)))
-        return result[:, :, :16].contiguous()
+        return result[:, :, : self.target_frames].contiguous()

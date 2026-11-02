@@ -12,6 +12,12 @@ H3 图和 Host 调度，直接使用 H3 视频/音频 VAE 输出，不经过 LTX
 `native_sampling.steps` 表示实际 DiT 调用数；传给原生 scheduler 的 sigma 点数是 steps+1。
 Qwen 语言部分默认 W4A8，视觉部分 W8A8，沿用官方 processor 预算及 256 对齐。
 
+当前运行 metadata 使用 schema 3。共用的 Qwen Vision 仅接收一个外部 FP16
+`key_mask`（`[1,1,1,patch_capacity]`），取代原来的 `patch_mask` 和 `input_length`。
+标准与 LoRA 的全部文本 refiner 均输入 `text_features, key_mask`，mask 末维为对应分支
+的文本容量；有效 key 为 `0`，padding 为 `-65504`，Host 负责生成 mask 和裁取有效视觉特征。
+schema 2 旧包需重导这两个编码接口。1280 以内的视觉档位合并，较大原生参考预算保留独立档位。
+
 ## 验证状态（2026-10-25）
 
 七个 384×672 静态档位已完成完整权重构建、包搬迁和标准/LoRA 推理验收。
@@ -74,7 +80,7 @@ python -m examples_merak.aigc.h3.build \
 ### 按 workflow YAML 导出其他档位
 
 以下是 YAML 的 `export.profile`，不是统一 API 的可选 profile。
-文件位于 `configs_merak/workflows/xh2a/other_models/sol_h3/h3_native*.yaml`；
+文件位于 `configs_merak/workflows/xh2a/other_models/h3/h3_native*.yaml`；
 `{384,768}` 分别对应输出 H×W 为 384×672、768×1344，均输出 124 帧。
 
 | YAML 中的 profile | 支持的输入 |
@@ -100,20 +106,23 @@ python -m examples_merak.aigc.h3.build \
 例如导出 384p 的 I2VA，使用已有 `AutoWorkflow` 接口并复用匹配的 Qwen checkpoint：
 
 ```python
+from pathlib import Path
+
 from xhmodel_merak.workflows import AutoWorkflow
 from xhmodel_merak.xh_other_model.workflows.result import QuantResult
 from xhmodel_merak.xh_other_model.models.sol_h3.native_runtime import NativeH3Runtime
 
 workflow = AutoWorkflow.from_config(
     model_dir="/inputs/h3",
-    config_path="configs_merak/workflows/xh2a/other_models/sol_h3/h3_native_i2va_384p_w4.yaml",
+    config_path="configs_merak/workflows/xh2a/other_models/h3/h3_native_i2va_384p_w4.yaml",
 )
 quant = QuantResult(raw_model_dir="/inputs/h3", quanted_model_dir="/inputs/qwen3vl_w4")
 result = workflow.export(quant, output_dir="/outputs/h3_i2va", device="cuda:0")
 
 runtime = NativeH3Runtime(result.work_dir, device="cuda:0")
 try:
-    runtime.generate("A woman speaks clearly.", image="/inputs/person.png", output_path="/outputs/i2va.mp4")
+    prompt = Path("examples_merak/aigc/sol_h3/prompts/cafe_i2va_5s.txt").read_text(encoding="utf-8")
+    runtime.generate(prompt, image="data/sol_h3/cafe_first_hd.png", seed=43, output_path="/outputs/i2va.mp4")
 finally:
     runtime.close()
 ```
@@ -153,10 +162,13 @@ A/B 保持独立，基权重不融合；AdaLN、额外替换权重及未知目�
 ```bash
 python -m examples_merak.aigc.h3.generate \
   --artifact-dir /outputs/h3 --lora-adapter turbo8 \
-  --prompt 'A woman says in Mandarin: 后摩智能，我的最爱。' \
+  --prompt "$(cat examples_merak/aigc/sol_h3/prompts/cafe_i2va_5s.txt)" \
+  --image data/sol_h3/cafe_first_hd.png --seed 43 \
   --output /outputs/turbo8.mp4
 ```
 
+这两条命令从仓库根目录运行，复用 [Sol-H3 咖啡馆素材](../../../data/sol_h3/README.md)；
+Sol-H3 的生成验收不等于原生 H3／LoRA 对该提示词的质量验收。
 不传 `--lora-adapter` 即标准 H3。`--image`、`--last-image`、`--references` 分别选择
 首帧、尾帧/首尾帧、Ref2VA，参数与 Sol-H3 示例一致。
 统一 API 使用 `inference_model(..., inputs={..., "lora_adapter": "turbo8"})`。

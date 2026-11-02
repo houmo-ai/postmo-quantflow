@@ -77,12 +77,12 @@ def export_entries(meta):
 
 
 def read_metadata(root):
-    from .graph_audit import audit_graph
+    from .graph_audit import audit_graph, validate_external_key_mask
     from .native_schedule import native_schedule
 
     meta = json.loads(artifact_path(root, "runtime_meta_info.json").read_text())
-    if (meta.get("kind"), meta.get("schema_version"), meta.get("complete")) != ("native_h3", 2, True):
-        raise ValueError("Native H3 requires a complete schema-2 package")
+    if (meta.get("kind"), meta.get("schema_version"), meta.get("complete")) != ("native_h3", 3, True):
+        raise ValueError("Native H3 requires a complete schema-3 package with external encoder masks; re-export")
     mode = meta.get("mode")
     if mode not in (*MODES, "all"):
         raise ValueError("Native H3 declares an invalid package mode")
@@ -148,14 +148,33 @@ def read_metadata(root):
     paths = [graph["path"] for graph in meta["graphs"].values()]
     if len(set(paths)) != len(paths):
         raise ValueError("Native H3 physical graphs must not alias another graph path")
-    for graph in meta["graphs"].values():
-        audit_graph(
-            artifact_path(root, graph["path"]),
+    text_capacities = {
+        branch["graphs"]["h3_text_refiner"]: next(
+            profile["capacity_plan"]["text_capacity"]
+            for profile in meta["mode_profiles"].values() if profile["branch"] == branch_name
+        )
+        for variant in variants.values() for branch_name, branch in variant["branches"].items()
+    }
+    visual_capacities = {gear["graph"]: gear["capacity"] for gear in meta.get("visual_graphs", [])}
+    for name, graph in meta["graphs"].items():
+        path = artifact_path(root, graph["path"])
+        audit = audit_graph(
+            path,
             quant_type=graph.get("quant_type", meta["quant_type"]),
             inputs=graph["input_names"],
             outputs=graph["output_names"],
             norm_fp16=graph.get("norm_fp16", False),
         )
+        if name in text_capacities:
+            if graph["input_names"] != ["text_features", "key_mask"]:
+                raise ValueError("Native H3 text refiner requires an external key mask")
+            validate_external_key_mask(path, audit, text_capacities[name])
+        if name in visual_capacities:
+            from ..qwen_image21.vision_graph import KEY_MASK_VISION_INPUT_NAMES
+
+            if graph["input_names"] != KEY_MASK_VISION_INPUT_NAMES:
+                raise ValueError("Native H3 vision requires an external key mask")
+            validate_external_key_mask(path, audit, visual_capacities[name])
     return meta
 
 
