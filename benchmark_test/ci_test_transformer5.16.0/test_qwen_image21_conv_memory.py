@@ -1,5 +1,7 @@
 """Large VAE canvases use bounded unfold with unchanged SEFP convolution results."""
 
+import inspect
+
 import pytest
 import torch
 
@@ -70,4 +72,9 @@ def test_bounded_vae_convolution_matches_full_unfold(weight_bits, activation_bit
     actual = bounded(**arguments)
     assert len(observed_shapes) > 1 and max(shape[-2] for shape in observed_shapes) < value.shape[-2]
     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
-    assert conv.conv2d_xh2a_default is conv.conv2d_xh2a_default_bounded_unfold_opt
+    # SDK may wrap bounded unfold with another dispatch, such as single-input
+    # VP convolution. Bounded unfold must remain in the default wrapper chain.
+    assert inspect.unwrap(
+        conv.conv2d_xh2a_default,
+        stop=lambda function: function is conv.conv2d_xh2a_default_bounded_unfold_opt,
+    ) is conv.conv2d_xh2a_default_bounded_unfold_opt
