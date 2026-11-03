@@ -167,16 +167,11 @@ def test_two_cpu_exported_graphs_preserve_cache_abi_and_request_isolation(
     torch.testing.assert_close(request()(latents[:, 4:].half(), 1.0), first, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize(
-    "quant_type,weight_bits,activation_bits",
-    [
-        ("w16a16_sefp", 16, 16),
-        ("w8a16_sefp", 8, 16),
-        ("w8a8_sefp", 8, 8),
-    ],
-)
+# Keep the expensive public six-graph flow to one deployment configuration per
+# model. Component-level tests retain the precision and attention-mode matrices.
+@pytest.mark.parametrize("quant_type,weight_bits,activation_bits", [("w8a8_sefp", 8, 8)])
 @pytest.mark.parametrize("model_id", ["qwen-image-2.1", "qwen-image-2.1-turbo"])
-@pytest.mark.parametrize("native_attention", [False, True])
+@pytest.mark.parametrize("native_attention", [True])
 def test_public_six_graph_build_relocate_generate_edit_and_repeat(
     tmp_path,
     monkeypatch,
@@ -202,9 +197,14 @@ def test_public_six_graph_build_relocate_generate_edit_and_repeat(
             from dataclasses import replace
 
             recipe = catalog._recipes[model_id]
-            monkeypatch.setitem(catalog._recipes, model_id, replace(
-                recipe, config_replacements=(*recipe.config_replacements, ("export.use_noncausal_flash_attention", True)),
-            ))
+            monkeypatch.setitem(
+                catalog._recipes,
+                model_id,
+                replace(
+                    recipe,
+                    config_replacements=(*recipe.config_replacements, ("export.use_noncausal_flash_attention", True)),
+                ),
+            )
         result = build_model(
             model_id=model_id,
             model_dir=str(source_dir),

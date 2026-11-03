@@ -1,7 +1,7 @@
 """Image CLI forwarding and dependency publication use the real public contracts.
 
 Only expensive build/inference execution is replaced in forwarding checks.
-Real three-precision graph export and CLI inference run in test_qwen_image21_cpu_export.
+Real W8A8/native-attention six-graph export and CLI inference run in test_qwen_image21_cpu_export.
 """
 
 import hashlib

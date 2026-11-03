@@ -55,9 +55,11 @@ interpreter; it does not require a developer's conda environment name or a
 prints the selected requirements and command. It supplements the configured CI
 environment and does not certify a complete clean installation of a blocked
 dependency profile. Tests never install packages themselves. The image CLI and
-dependency export checks have their own impact declaration; real three-precision
-six-graph tests also run the CLI after relocating the package and deleting source
-weights. Shared environment changes must be checked against the public variant
+dependency export checks have their own impact declaration. The expensive public
+six-graph test runs W8A8 with `native_attention=True` for both Qwen-Image-2.1 and
+Turbo, including CLI inference after package relocation and source-weight deletion.
+Component-level tests retain the precision and attention-mode matrices.
+Shared environment changes must be checked against the public variant
 matrix, not only Qwen-Image-2.1 imports.
 
 ## Initialization state isolation
