@@ -1,3 +1,4 @@
+# DSpark assistant with explicit masked draft attention.
 quant: null
 
 export:
@@ -15,7 +16,7 @@ export:
     linear_attention_mode: auto
     linear_chunk_size: 64
     flash_attention:
-      enable: false
+      enable: true
       q_bits: 8
       k_bits: 8
       v_bits: 8
@@ -26,13 +27,14 @@ export:
     fuse_gdr_ops: true
     fuse_gdr_block_recurrent_ops: true
     only_first_block: false
-    spec_decode_mode: dflash
+    spec_decode_mode: dspark
     # The assistant retains all 15 queries; verify 3 proposals by default.
     num_draft_tokens: 3
-    dflash_config:
-      hf_model: null  # supply --dflash-model-dir, or unified sources.dflash
+    dspark_config:
+      flash_attention:
+        enable: false
+      hf_model: null  # supply --dspark-model-dir, or unified sources.dspark
       enable_confidence_truncation: false
-      confidence_threshold: 0.3
     visual_config: null
     quant_scheme:
       quant_type: w8a8h1_sefp

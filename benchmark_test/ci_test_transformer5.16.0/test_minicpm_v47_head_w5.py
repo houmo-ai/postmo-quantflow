@@ -123,11 +123,12 @@ def test_target_and_draft_hmonnx_share_calibrated_w5_payload(checkpoint, tmp_pat
 @pytest.mark.parametrize("dspark", (False, True))
 def test_w5_export_configs_reuse_checkpoint_and_keep_dynamic_vision(dspark):
     root = Path(__file__).resolve().parents[2]
-    suffix = "_dflash" if dspark else ""
+    suffix = "_dspark" if dspark else ""
     path = root / ("configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/"
                    f"minicpm_v_4_7_moe_xh2a_w4a8_autoround_head_w5{suffix}.yaml")
     config = yaml.safe_load(path.read_text())
-    assert config["quant"] is None
+    assert config["quant"]["method"] == "autoround"
+    assert config["quant"]["head"] == {"bits": 5, "group_size": 64, "algorithm": "inherit"}
     assert config["export"]["model"]["quant_scheme"]["nodes"]["lm_head"]["quant_type"] == "w5a8h1_sefp"
     assert config["export"]["vision"]["patch_token_gears"] == [384, 784, 1536, 2816, 6144]
     model = config["export"]["model"]
@@ -136,7 +137,66 @@ def test_w5_export_configs_reuse_checkpoint_and_keep_dynamic_vision(dspark):
     assert set(precision) == {"enable", "q_bits", "k_bits", "v_bits", "p_bits"}
     assert all(precision[name] == 8 for name in ("q_bits", "k_bits", "v_bits", "p_bits"))
     if dspark:
-        assert model["dflash_config"]["flash_attention"]["enable"] is False
+        assert model["dspark_config"]["flash_attention"]["enable"] is False
         assert model["les_prediction_k"] == 0
     matmul = model["quant_scheme"]["ops"]["MatMul"]
     assert matmul["act_scheme"]["bits"] == matmul["act_schema_2"]["bits"] == 8
+
+
+@pytest.mark.parametrize("bits,head", [(5, None), (5, {"bits": 4}), (8, {"bits": 5})])
+def test_quant_head_mismatch_fails_before_loading_weights(bits, head):
+    from xhmodel_merak.xh_llm.models.minicpm_v_4_7.quant_llm import validate_head_quant_config
+
+    model = {"quant_scheme": {"quant_type": "w8a8h1_sefp", "nodes": {
+        "lm_head": {"quant_type": f"w{bits}a8h1_sefp"}}}}
+    with pytest.raises(ValueError, match="head"):
+        validate_head_quant_config({"head": head} if head else {}, model)
+
+
+def test_missing_calibrated_checkpoint_reports_resolved_path(tmp_path):
+    from xhmodel_merak.xh_llm.models.minicpm_v_4_7.quant_llm import prepare_causal_head_checkpoint
+
+    with pytest.raises(FileNotFoundError, match="saved checkpoint") as error:
+        prepare_causal_head_checkpoint(tmp_path / "missing", bits=5,
+                                       raw_model_dir="unused", quant_cfg={}, device="cpu")
+    assert str(tmp_path / "missing" / "config.json") in str(error.value)
+
+
+@pytest.mark.parametrize("algorithm", ["gptq", "autoround"])
+def test_existing_qdq_completes_head_through_producer_and_loads_into_minicpm(tmp_path, algorithm):
+    from transformers import Qwen2Tokenizer
+    from transformers.models.minicpmv4_7 import modeling_minicpmv4_7
+    from test_minicpm_v_4_7_auto_classes import _tiny_model
+    from xhmodel_merak.xh_llm.models.minicpm_v_4_7.quant_llm import (
+        apply_causal_dequant_to_minicpm_host, prepare_causal_head_checkpoint,
+    )
+
+    torch.manual_seed(47)
+    torch.set_num_threads(2)
+    host = _tiny_model(modeling_minicpmv4_7, moe=True).half()
+    with torch.no_grad():
+        for name, value in host.named_parameters():
+            value.copy_(torch.ones_like(value) if 'norm' in name else torch.randn_like(value) * .02)
+    body = {name: value.clone() for name, value in host.model.language_model.state_dict().items()}
+    source = tmp_path / 'qdq'
+    source.mkdir()
+    state = {'model.' + name: value for name, value in body.items()}
+    state['lm_head.weight'] = host.lm_head.weight.detach().clone()
+    torch.save(state, source / 'pytorch_model.bin')
+    (source / 'config.json').write_text(json.dumps(host.config.text_config.to_dict()))
+    Qwen2Tokenizer(vocab={'<|endoftext|>': 0, 't': 1, 'Ġ': 2}, merges=[]).save_pretrained(source)
+    data = tmp_path / 'calibration.jsonl'
+    data.write_text('\n'.join(json.dumps({'text': 't ' * 32}) for _ in range(2)))
+    with pytest.warns(UserWarning, match='saving new checkpoint'):
+        target = prepare_causal_head_checkpoint(source, bits=5, raw_model_dir=str(source), device='cpu',
+            quant_cfg={'head': {'bits': 5, 'algorithm': algorithm, 'iters': 2},
+                       'calibration': {'jsonl': str(data), 'nsamples': 2, 'seqlen': 16}})
+    assert Path(target) == tmp_path / 'qdq_head_w5'
+    data.unlink()
+    assert prepare_causal_head_checkpoint(target, bits=5, raw_model_dir=str(source),
+                                          device='cpu', quant_cfg={}) == target
+    apply_causal_dequant_to_minicpm_host(host, target)
+    for name, value in host.model.language_model.state_dict().items():
+        torch.testing.assert_close(value, body[name], rtol=0, atol=0)
+    assert host.lm_head.quant_weight.min() >= -16
+    assert host.lm_head.quant_weight.max() <= 15

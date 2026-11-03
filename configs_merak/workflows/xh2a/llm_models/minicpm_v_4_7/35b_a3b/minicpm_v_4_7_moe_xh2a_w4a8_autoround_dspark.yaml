@@ -1,14 +1,33 @@
-# Export an existing calibrated W5 head checkpoint with --quanted-model-dir.
-# Backbone: AutoRound W4 experts / W8 projections; target and DSpark share W5 head.
-# Target uses FA8; the non-causal draft uses explicit masked attention.
-quant: null
+# DSpark assistant with explicit masked draft attention.
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  bits: 4
+  group_size: 64
+  sym: true
+  data_type: int_sym_xh
+  iters: 400
+  format: auto_round:gptqmodel
+  save_quantized: false
+  calibration:
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    nsamples: 256
+    seqlen: 2048
+  runtime:
+    batch_size: 8
+    gradient_accumulate_steps: 1
+    device_map: '0'
+    low_gpu_mem_usage: true
+    seed: 42
+  moe:
+    attn_bits: 8
+    shared_expert_bits: 8
 export:
   model:
     chip_arch: XH2a
     model_type: MiniCPMV47MoeForConditionalGeneration
-    les_prediction_k: 0
     hf_model: null
-    model_name: minicpm_v_4_7_qwen3_5_moe_35b_a3b_head_w5_fa8
+    model_name: minicpm_v_4_7_qwen3_5_moe_35b_a3b
     context_max_length: 8192
     prefill_chunk_length: 256
     max_pe_length: 262144
@@ -34,28 +53,27 @@ export:
       quant_type: w4a8h0_ssfp
       nodes:
         lm_head:
-          quant_type: w5a8h1_sefp
+          quant_type: w8a8h1_sefp
       ops:
+        # Match AutoRound's mixed precision after float QDQ weight loading.
         Linear:
           quant_type: w8a8h1_sefp
         Conv2d:
           quant_type: w8a8h1_sefp
         MatMul:
           act_scheme:
-            bits: 8
+            bits: 16
             fp_mode: sefp
           act_schema_2:
-            bits: 8
+            bits: 16
             fp_mode: sefp
-    spec_decode_mode: dflash
+    spec_decode_mode: dspark
     num_draft_tokens: 3
-    dflash_config:
-      hf_model: null
-      # Mask padded KV slots explicitly in the non-causal draft.
+    dspark_config:
       flash_attention:
         enable: false
+      hf_model: null
       enable_confidence_truncation: false
-      confidence_threshold: 0.3
   vision:
     patch_token_gears:
     - 384

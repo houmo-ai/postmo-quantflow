@@ -61,7 +61,7 @@ features; `keep_onnx: true` additionally exports and validates float ONNX.
 | Dense 1B W4A8 GPTQ | `/path/to/minicpm_4_7/MiniCPM-V-4.7-1B` | `MiniCPMV47ForConditionalGeneration` | `configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/1b/minicpm_v_4_7_xh2a_w4a8_gptq.yaml` |
 | MoE 35B-A3B W8A8 | `/path/to/minicpm_4_7/MiniCPM-V-4.7-35B-A3B` | `MiniCPMV47MoeForConditionalGeneration` | `configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w8a8.yaml` |
 | MoE 35B-A3B W4A8 AutoRound | `/path/to/minicpm_4_7/MiniCPM-V-4.7-35B-A3B` | `MiniCPMV47MoeForConditionalGeneration` | `configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround.yaml` |
-| MoE 35B-A3B W4A8 AutoRound + DSpark | Same target, paired `MiniCPM-V-4.7-35B-A3B-DSpark` | `MiniCPMV47MoeForConditionalGeneration` | `configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround_dflash.yaml` |
+| MoE 35B-A3B W4A8 AutoRound + DSpark | Same target, paired `MiniCPM-V-4.7-35B-A3B-DSpark` | `MiniCPMV47MoeForConditionalGeneration` | `configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround_dspark.yaml` |
 
 ## Optional lookahead expert scheduling (LES)
 
@@ -119,23 +119,27 @@ python examples_merak/llm/minicpm_v_4_7/evaluate_les.py \
   --output-dir work_dirs/minicpm35b_les_eval --device cuda:0
 ```
 
-## Calibrate a W5 head for an existing 35B AutoRound backbone
+## Build a 35B W5 head in one workflow
 
-The W5 export configs consume a completed head checkpoint through
-`--quanted-model-dir`. They set `quant: null` because the backbone and head
-have already been calibrated. Both retain dynamic `4x` / `16x` vision gears.
+The W5 configs run backbone AutoRound and W5 head calibration in one workflow.
+GPTQModel owns the two internal calibration stages and publishes one final
+checkpoint at `--quant-output-dir`; the workflow then exports its HMONNX.
+Update both ModelZoo and GPTQModel: the producer must provide
+`gptqmodel.recipes.minicpm_v47_qdq_head` and the MiniCPM recipes' `head` argument.
+Both presets retain dynamic `4x` / `16x` vision gears.
 The ordinary and DSpark exports use the same calibrated target head.
 The W5 presets enable causal `xhquant.nn.FlashAttention` in the target with
-Q/K/V/score/probability precision explicitly set to 8 bits; the target MatMul
+Q/K/V/P input precision explicitly set to 8 bits; score/exp stay FP16. The target MatMul
 operator override is also 8/8. The DSpark draft disables fused FlashAttention
 and uses Q×K → explicit mask → Softmax → P×V. Its mask exposes the valid
 target prefix and complete 15-query block non-causally, excluding unused cache
 slots. This avoids requiring valid-length support in a non-causal fused
-operator. An explicit draft attention setting overrides target inheritance.
+operator. DSpark defaults to explicit masking even in older presets without a
+draft attention setting; its setting is kept separate from the target's FA.
 Dynamic vision profiles retain their own precision.
 
-Use GPTQModel with `gptqmodel.recipes.minicpm_v47_qdq_head` and
-`gptqmodel.recipes.qwen35_head` available. The QDQ adapter converts the existing
+The recipe accepts `quant.head: {bits: 5, group_size: 64, algorithm: inherit}`.
+`quant.head.bits` must match the export head precision. The QDQ adapter converts the existing
 `float_causal_bin` representation to safetensors without rounding or casting
 the backbone. Its metadata excludes every backbone module from quantization.
 The existing head-only recipe replays that backbone with its normal MoE routing
@@ -143,25 +147,24 @@ and final norm, calibrates the floating head, and saves a new checkpoint.
 `algorithm=inherit` uses AutoRound for the existing AutoRound backbone.
 
 ```bash
-python -m gptqmodel.recipes.minicpm_v47_qdq_head \
-  --model-dir /path/to/autoround_llm_dequant \
-  --tokenizer-dir /path/to/MiniCPM-V-4.7-35B-A3B \
-  --output-dir work_dirs/minicpm35b_head_w5 \
-  --calibration-jsonl data/calib_data/NeelNanda-pile-10k.jsonl \
-  --head '{"bits":5,"algorithm":"inherit","iters":400}' \
-  --nsamples 256 --seqlen 2048 --device cuda:0
-
 python examples_merak/llm/minicpm_v_4_7/minicpm_v_4_7_workflow.py \
   --model-dir /path/to/MiniCPM-V-4.7-35B-A3B \
-  --quanted-model-dir work_dirs/minicpm35b_head_w5 \
   --config-path configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround_head_w5.yaml \
+  --quant-output-dir work_dirs/minicpm35b_head_w5 \
   --export-output-dir work_dirs/minicpm35b_head_w5_export
 ```
 
-For DSpark, select `minicpm_v_4_7_moe_xh2a_w4a8_autoround_head_w5_dflash.yaml`
-and add `--dflash-model-dir /path/to/MiniCPM-V-4.7-35B-A3B-DSpark`.
-The export validates the calibrated head's actual packed layout and precision;
-a floating head or mismatched precision is rejected before export.
+To reuse an existing float-QDQ backbone, add
+`--quanted-model-dir /absolute/path/to/autoround_llm_dequant`. Only its head is
+calibrated; a warning identifies the new sibling `*_head_w5` checkpoint.
+Pass that completed checkpoint on subsequent exports to reuse its packed head.
+The path must contain `config.json` and checkpoint weights, and is resolved
+from the current working directory. An HMONNX directory is not a calibration input.
+
+For DSpark, select `minicpm_v_4_7_moe_xh2a_w4a8_autoround_head_w5_dspark.yaml`
+and add `--dspark-model-dir /path/to/MiniCPM-V-4.7-35B-A3B-DSpark`.
+After completing head calibration when needed, the export validates the head's
+actual packed layout and precision; incompatible checkpoints are rejected.
 The target head is quantized once for deployment and its fixed integer codes
 and scale/exponent tensors are bound into the DSpark draft graph.
 W5 uses a 5-bit numerical range in 8-bit storage slots, packed into int32 words;
@@ -169,7 +172,15 @@ the checkpoint records both logical and storage precision. The producer is
 GPTQModel, the inherited solver is AutoRound, and the saved layout is GPTQ V2.
 These are separate properties.
 
-## Latest checkpoints and DFlash / DSpark
+All 1B and 35B presets enable causal target FA8. This avoids the unsupported
+`V cache -> Where -> P×V` path in the compiler cache-precision pass. DSpark
+draft attention stays non-causal with an explicit mask and fused FA disabled.
+MiniCPM uses `dspark` for its recipe variant, speculative mode, source key,
+CLI argument and YAML filenames. Existing `dflash` config keys and
+`--dflash-model-dir` remain read aliases. Shared Qwen DFlash classes and their
+internal field names are reused by the MiniCPM adapter.
+
+## Latest checkpoints and DSpark
 
 Use Python >=3.11 and Transformers >=5.18.0 with native `minicpmv4_7`
 support. If using an unreleased Transformers checkout, put its `src/` directory
@@ -188,15 +199,15 @@ complete prompt with the native MiniCPM position utilities, then slices them
 for Prefill and uses the same RoPE delta during Decode/Verify. Both `4x` and
 `16x` vision profiles use the selected mode's crop geometry.
 
-DSpark is exposed through the `dflash` workflow/recipe variant. Its five target
+DSpark is exposed through the `dspark` workflow/recipe variant. Its five target
 hidden-state layers come from the assistant config. DSpark predicts at query
 position zero and applies its vanilla Markov transition to each proposal.
 The draft keeps its complete 15-query backbone, then applies the logits and
 Markov heads only to the first `num_draft_tokens` positions. The default is
 3 proposals and a 4-token verify graph; unused confidence outputs are omitted.
-The existing `dflash` model, recipe, source and runtime interfaces are retained.
+The shared speculative runtime is reused through the MiniCPM DSpark adapter.
 
-Optional `export.model.dflash_config.enable_confidence_truncation: true` enables
+Optional `export.model.dspark_config.enable_confidence_truncation: true` enables
 the confidence head; `confidence_threshold` defaults to `0.3`. The graph exports
 raw confidence logits. The host applies sigmoid and a cumulative prefix product,
 then verifies only the retained proposals plus the anchor. Export includes exact
@@ -216,14 +227,14 @@ prefix. Only P×V is split by query; projections, experts and Q×K remain batche
 MODEL_ROOT=/path/to/minicpm_4_7
 PYTHONPATH=. python examples_merak/llm/minicpm_v_4_7/minicpm_v_4_7_workflow.py \
   --model-dir "$MODEL_ROOT/MiniCPM-V-4.7-1B" \
-  --dflash-model-dir "$MODEL_ROOT/MiniCPM-V-4.7-1B-DSpark" \
-  --config-path configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/1b/minicpm_v_4_7_xh2a_w8a8_dflash.yaml \
+  --dspark-model-dir "$MODEL_ROOT/MiniCPM-V-4.7-1B-DSpark" \
+  --config-path configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/1b/minicpm_v_4_7_xh2a_w8a8_dspark.yaml \
   --num-draft-tokens 3 \
-  --export-output-dir work_dirs/minicpm_v_4_7_1b_dflash
+  --export-output-dir work_dirs/minicpm_v_4_7_1b_dspark
 ```
 
 For MoE, use `MiniCPM-V-4.7-35B-A3B`, its `-DSpark` directory, and
-`configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w8a8_dflash.yaml`.
+`configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/minicpm_v_4_7_moe_xh2a_w8a8_dspark.yaml`.
 The existing `hmonnx_demo.py` loads either variant from its root metadata.
 DSpark export defaults to the SDK's non-strict tracing path to avoid excessive
 Torch 2.8 guard construction. Standard Torch ONNX optimization stays enabled:
@@ -245,9 +256,9 @@ root = "/path/to/minicpm_4_7"
 result = build_model(
     model_id="minicpm-v-4.7-1b",
     model_dir=f"{root}/MiniCPM-V-4.7-1B",
-    sources={"dflash": f"{root}/MiniCPM-V-4.7-1B-DSpark"},
-    speculative={"mode": "dflash", "num_draft_tokens": 3},
-    output_dir="work_dirs/minicpm_v_4_7_1b_dflash_api",
+    sources={"dspark": f"{root}/MiniCPM-V-4.7-1B-DSpark"},
+    speculative={"mode": "dspark", "num_draft_tokens": 3},
+    output_dir="work_dirs/minicpm_v_4_7_1b_dspark_api",
     device="cuda:0",
 )
 ```
@@ -331,14 +342,14 @@ PYTHONPATH=. python examples_merak/llm/minicpm_v_4_7/hmonnx_demo.py \
 
 ## Unified recipes
 
-Registered unified capability is **W8A8 / full and dflash**. The W4A8 GPTQ/AutoRound
+Registered unified capability is **W8A8 / full and dspark**. The W4A8 GPTQ/AutoRound
 YAMLs above remain workflow examples and are **not** registered as unified
 recipes.
 
 | Recipe ID | Variant | Artifact format | Unified scope |
 | --- | --- | --- | --- |
-| `minicpm-v-4.7-1b` | Dense 1B | `minicpm_v_4_7` | W8A8 / full, dflash |
-| `minicpm-v-4.7-35b-a3b` | MoE 35B-A3B | `minicpm_v_4_7` | W8A8 / full, dflash |
+| `minicpm-v-4.7-1b` | Dense 1B | `minicpm_v_4_7` | W8A8 / full, dspark |
+| `minicpm-v-4.7-35b-a3b` | MoE 35B-A3B | `minicpm_v_4_7` | W8A8 / full, dspark |
 
 ### Unified `build_model` → `inference_model`
 

@@ -73,28 +73,42 @@ def _checkpoint(tmp_path, *, moe=False):
 
 @pytest.mark.parametrize("as_object", (False, True))
 @pytest.mark.parametrize("draft_flash", (None, False, True))
-def test_draft_attention_override_survives_target_binding_and_metadata(tmp_path, as_object, draft_flash):
+@pytest.mark.parametrize("moe", (False, True))
+@pytest.mark.parametrize("legacy", (False, True))
+def test_draft_attention_override_survives_target_binding_and_metadata(tmp_path, as_object, draft_flash, moe, legacy):
     from xhmodel_merak.xh_llm.models.minicpm_v_4_7.dspark_config import (
         MiniCPMV47DFlashConfig as XHQwen3_5_DFlashConfig,
-        MiniCPMV47ModelConfig as XHQwen3_5ModelConfig,
+        MiniCPMV47ModelConfig,
+        MiniCPMV47MoeModelConfig,
     )
+    from xhmodel_merak.xh_llm.models.minicpm_v_4_7.model import XHMiniCPMV47Model, XHMiniCPMV47MoeModel
 
-    target, draft, _ = _checkpoint(tmp_path, moe=True)
+    config_cls = MiniCPMV47MoeModelConfig if moe else MiniCPMV47ModelConfig
+    model_cls = XHMiniCPMV47MoeModel if moe else XHMiniCPMV47Model
+    assert model_cls.config_class() is config_cls
+    target, draft, _ = _checkpoint(tmp_path, moe=moe)
     settings = {"hf_model": str(draft)}
     if draft_flash is not None:
         settings["flash_attention"] = {"enable": draft_flash}
-    config = XHQwen3_5ModelConfig(
+    config = config_cls(
         model_name="minicpm", hf_model=str(target), visual_config=None,
-        spec_decode_mode="dflash", num_draft_tokens=3,
+        spec_decode_mode="dflash" if legacy else "dspark", num_draft_tokens=3,
         flash_attention={"enable": True},
-        dflash_config=XHQwen3_5_DFlashConfig(model_name="draft", **settings) if as_object else settings,
+        **{"dflash_config" if legacy else "dspark_config":
+           XHQwen3_5_DFlashConfig(model_name="draft", **settings) if as_object else settings},
     )
-    expected = True if draft_flash is None else draft_flash
+    expected = False if draft_flash is None else draft_flash
     assert config.flash_attention["enable"] is True
     assert config.dflash_config.flash_attention["enable"] is expected
-    restored = XHQwen3_5ModelConfig.from_dict(config.to_dict())
+    saved = config.to_dict()
+    assert saved["spec_decode_mode"] == "dspark"
+    assert "dspark_config" in saved and "dflash_config" not in saved
+    restored = config_cls.from_dict(saved)
     assert restored.flash_attention["enable"] is True
     assert restored.dflash_config.flash_attention["enable"] is expected
+    assert restored.dflash_config.is_dspark
+    if moe:
+        assert restored.dynamic_prune["mode"] == "off"
 
 
 @pytest.mark.parametrize("moe", (False, True))
@@ -127,18 +141,18 @@ def test_dspark_pairing_and_public_recipe(tmp_path, moe):
             dflash_config={"hf_model": str(draft)},
         )
     recipe = get_recipe("minicpm-v-4.7-35b-a3b" if moe else "minicpm-v-4.7-1b")
-    variant = next(v for v in recipe.variants if v.name == "dflash")
-    assert variant.required_sources == ("dflash",)
-    assert variant.extra_components == ("dflash",)
+    variant = next(v for v in recipe.variants if v.name == "dspark")
+    assert variant.required_sources == ("dspark",)
+    assert variant.extra_components == ("dspark",)
     replacements = resolve_config(
         recipe=recipe,
         variant=variant,
         model_dir=target,
-        sources={"dflash": SimpleNamespace(path=str(draft))},
+        sources={"dspark": SimpleNamespace(path=str(draft))},
         workflow={},
     )
-    assert replacements["export.model.dflash_config.hf_model"] == str(draft)
-    assert replacements["export.model.dflash_config.noise_token_id"] == 248076
+    assert replacements["export.model.dspark_config.hf_model"] == str(draft)
+    assert replacements["export.model.dspark_config.noise_token_id"] == 248076
     saved = config.to_dict()
     # Published metadata cannot depend on an assistant config remaining on disk.
     (draft / "config.json").unlink()
@@ -324,12 +338,12 @@ def test_dspark_small_decode_exports_and_runs_hmonnx(
     )
     from xhquant.core import CacheTensor
     from xhmodel_merak.exec_backends import HMONNXInferenceConfig, HMONNXInferenceV2, MultiHMONNXLoader
-    from xhmodel_merak.xh_llm.models.minicpm_v_4_7.dspark_export import _build_dflash_export_adapter
+    from xhmodel_merak.xh_llm.models.minicpm_v_4_7.dspark_export import _build_dspark_export_adapter
 
     torch.set_num_threads(2)
     torch.manual_seed(47)
     core = _alignment_core(proposals, confidence, raw_scores, block_size=block_size)
-    adapter = _build_dflash_export_adapter(core, mode="decode", num_hidden_layers=1, is_dspark=True)
+    adapter = _build_dspark_export_adapter(core, mode="decode", num_hidden_layers=1, is_dspark=True)
     args = _alignment_args(block_size)
     graph = to_quant_graph(to_frontend_graph(adapter, "TorchFX", args), "XH2a", {"quant_type": "w8a8h1_sefp"})
     ptq_quantize(graph, [args], PrecisionMode.ALIGNED, ["cpu"], infer_shape=False)
@@ -431,8 +445,8 @@ def test_confidence_config_round_trip_retains_existing_interface(tmp_path):
     raw.update(enable_confidence_head=True, confidence_head_with_markov=True)
     (draft / 'config.json').write_text(json.dumps(raw))
     config = XHQwen3_5ModelConfig(model_name='mini', hf_model=str(target), visual_config=None,
-        spec_decode_mode='dflash', num_draft_tokens=3,
-        dflash_config={'hf_model': str(draft), 'enable_confidence_truncation': True, 'confidence_threshold': .3})
+        spec_decode_mode='dspark', num_draft_tokens=3,
+        dspark_config={'hf_model': str(draft), 'enable_confidence_truncation': True, 'confidence_threshold': .3})
     saved = config.to_dict()
     (draft / 'config.json').unlink()
     restored = XHQwen3_5ModelConfig.from_dict(saved)
@@ -440,7 +454,9 @@ def test_confidence_config_round_trip_retains_existing_interface(tmp_path):
     assert restored.dflash_config.block_size == 15
     assert restored.dflash_config.enable_confidence_truncation
     assert restored.dflash_config.confidence_threshold == .3
-    assert not hasattr(restored, 'dspark_config')
+    assert restored.dspark_config is restored.dflash_config
+    assert saved['spec_decode_mode'] == 'dspark'
+    assert 'dspark_config' in saved and 'dflash_config' not in saved
 
 
 def test_real_hybrid_target_exports_and_runs_all_confidence_verify_lengths(tmp_path, monkeypatch):
@@ -482,15 +498,15 @@ def test_real_hybrid_target_exports_and_runs_all_confidence_verify_lengths(tmp_p
      vocab_size=128,input_sequence_length=15,max_pe_length=128,max_sequence_length=128,architecture='Qwen3DSparkModel',block_size=15,dspark_config=draft_cfg).half()
     save_file({k:v.contiguous() for k,v in core.state_dict().items() if k!='lm_head.weight'},draft/'model.safetensors')
     config=XHQwen3_5ModelConfig(model_name='tiny_minicpm',hf_model=str(target),visual_config=None,
-     context_max_length=128,prefill_chunk_length=64,max_pe_length=128,spec_decode_mode='dflash',num_draft_tokens=3,
+     context_max_length=128,prefill_chunk_length=64,max_pe_length=128,spec_decode_mode='dspark',num_draft_tokens=3,
      flash_attention={'enable':False},fuse_gdr_ops=True,fuse_gdr_block_recurrent_ops=True,
-     dflash_config={'hf_model':str(draft),'enable_confidence_truncation':True,'confidence_threshold':.3})
+     dspark_config={'hf_model':str(draft),'enable_confidence_truncation':True,'confidence_threshold':.3})
     embedding = torch.nn.Embedding.from_pretrained(hf.model.language_model.embed_tokens.weight.detach().clone())
     model=MiniCPMV47TextModel(config);model.to_wrap(hf);model.to('cpu')
     meta=model.export_hmonnx(str(root/'out'))
     data = meta.to_dict()
     contract = data['spec_decode']
-    assert contract['mode'] == 'dflash'
+    assert contract['mode'] == 'dspark'
     assert contract['draft']['block_size'] == 15
     assert contract['draft']['num_output_draft_tokens'] == 3
     assert contract['draft']['decode_outputs'] == ['draft_token_ids', 'confidence_logits']
@@ -509,7 +525,7 @@ def test_real_hybrid_target_exports_and_runs_all_confidence_verify_lengths(tmp_p
             prefill={'onnx':str(artifact/data['prefill_hmonnx'])},
             decode={'onnx':str(artifact/data['decode_hmonnx'])},
             draft={name:{'onnx':str(artifact/contract['draft'][name+'_hmonnx'])} for name in ('context','context_decode','decode')},
-            session_device='cpu', enable_golden=(threshold == .99), auto_offload=False, spec_decode_mode='dflash', block_size=4,
+            session_device='cpu', enable_golden=(threshold == .99), auto_offload=False, spec_decode_mode='dspark', block_size=4,
             hidden_output_name='target_hidden', dflash_noise_token_id=126, max_context_tokens=128,
             enable_confidence_truncation=True, confidence_threshold=threshold,
             verify_graphs={length:{'onnx':str(artifact/path)} for length,path in contract['verify_graphs'].items()})
@@ -564,7 +580,7 @@ def test_invalid_confidence_options_fail_before_export(tmp_path, options, match)
     target, draft, _ = _checkpoint(tmp_path)
     with pytest.raises(ValueError, match=match):
         XHQwen3_5ModelConfig(model_name='mini', hf_model=str(target), visual_config=None,
-            spec_decode_mode='dflash', num_draft_tokens=3, dflash_config={'hf_model': str(draft), **options})
+            spec_decode_mode='dspark', num_draft_tokens=3, dspark_config={'hf_model': str(draft), **options})
 
 
 def test_verify_recovery_eos_is_emitted_and_only_anchor_state_is_committed():

@@ -45,6 +45,9 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
                 "MiniCPMV47Workflow currently supports quant.algorithm=gptqmodel; "
                 f"got algorithm={algorithm!r}"
             )
+        from .quant_llm import validate_head_quant_config
+
+        validate_head_quant_config(quant_cfg, workflow_config.export["model"])
         register_minicpmv47_auto_classes()
         if method in {"gptq", "gptqmodel"}:
             from .quant_llm import quantize_minicpm_v47_llm_gptq
@@ -81,10 +84,7 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
     ) -> ExportResult:
         import torch
 
-        from .dspark_config import MiniCPMV47ModelConfig as XHQwen3_5ModelConfig
-        from xhmodel_merak.xh_llm.models.qwen3_5_moe.xh_qwen3_5_moe_config import (
-            XHQwen3_5MoeModelConfig,
-        )
+        from .dspark_config import MiniCPMV47ModelConfig, MiniCPMV47MoeModelConfig
         from xhquant.api import xhquant_init
 
         from .auto_classes import register_minicpmv47_auto_classes
@@ -109,11 +109,11 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
         model_type = str(model_cfg.get("model_type", _DENSE_MODEL_TYPE))
         if model_type == _DENSE_MODEL_TYPE:
             model_cls = XHMiniCPMV47Model
-            config_cls = XHQwen3_5ModelConfig
+            config_cls = MiniCPMV47ModelConfig
             default_model_name = "minicpm_v_4_7_qwen3_5_1b"
         elif model_type == _MOE_MODEL_TYPE:
             model_cls = XHMiniCPMV47MoeModel
-            config_cls = XHQwen3_5MoeModelConfig
+            config_cls = MiniCPMV47MoeModelConfig
             default_model_name = "minicpm_v_4_7_qwen3_5_moe_35b_a3b"
         else:
             raise ValueError(
@@ -122,6 +122,8 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
             )
 
         spec_mode = model_cfg.get("spec_decode_mode")
+        if spec_mode == "dflash":
+            spec_mode = "dspark"
         prediction_k = model_cfg.get("les_prediction_k", 0)
         if type(prediction_k) is not int or prediction_k < 0:
             raise ValueError("les_prediction_k must be a nonnegative integer")
@@ -134,14 +136,14 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
 
             native_cfg = json.loads((Path(model_dir) / "config.json").read_text())
             validate_prediction_k(prediction_k, native_cfg["text_config"]["num_experts"])
-        if spec_mode not in (None, "dflash"):
-            raise ValueError("MiniCPM-V-4.7 supports spec_decode_mode=dflash")
+        if spec_mode not in (None, "dspark"):
+            raise ValueError("MiniCPM-V-4.7 supports spec_decode_mode=dspark")
         if spec_mode:
             from xhmodel_merak.xh_llm.models.minicpm_v_4_7.draft_checkpoint import validate_draft_target
 
-            draft_dir = (model_cfg.get("dflash_config") or {}).get("hf_model")
+            draft_dir = (model_cfg.get("dspark_config") or model_cfg.get("dflash_config") or {}).get("hf_model")
             if not draft_dir:
-                raise ValueError("MiniCPM DFlash requires export.model.dflash_config.hf_model")
+                raise ValueError("MiniCPM DSpark requires export.model.dspark_config.hf_model")
             draft = validate_draft_target(draft_dir, model_dir)
             capacity = int(draft["dflash_config"]["block_size"])
             if draft.get("architectures") != ["Qwen3DSparkModel"]:
@@ -161,21 +163,30 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
 
         from xhmodel_merak.xh_llm.shared_head import target_head_bits
 
-        head_bits = target_head_bits(model_quant_scheme)
-        if head_bits < 8:
-            from .quant_llm import validate_causal_head_checkpoint
-
-            if quant_result.skipped or not quant_result.quanted_model_dir:
-                raise ValueError("MiniCPM low-bit head export requires a calibrated quanted_model_dir")
-            validate_causal_head_checkpoint(quant_result.quanted_model_dir, head_bits)
-
-        register_minicpmv47_auto_classes()
         work_dir = Path(output_dir).resolve()
         if work_dir.exists() and any(work_dir.iterdir()):
             raise FileExistsError(
                 f"MiniCPM export directory is not empty: {work_dir}. "
                 "Remove it explicitly or use the example's --overwrite option."
             )
+        head_bits = target_head_bits(model_quant_scheme)
+        if head_bits < 8:
+            from .quant_llm import prepare_causal_head_checkpoint, validate_head_quant_config
+
+            if quant_result.skipped or not quant_result.quanted_model_dir:
+                raise ValueError("MiniCPM low-bit head export requires a calibrated quanted_model_dir")
+            if workflow_config.quant and workflow_config.quant.get("head") is not None:
+                validate_head_quant_config(workflow_config.quant, model_cfg)
+            quant_result = QuantResult(
+                raw_model_dir=quant_result.raw_model_dir,
+                quanted_model_dir=prepare_causal_head_checkpoint(
+                    quant_result.quanted_model_dir, bits=head_bits,
+                    raw_model_dir=model_dir, quant_cfg=workflow_config.quant, device=device,
+                ),
+                meta=quant_result.meta,
+            )
+
+        register_minicpmv47_auto_classes()
         work_dir.mkdir(parents=True, exist_ok=True)
         xhquant_init(work_dir / "convert.log", debug=self.debug)
         torch.manual_seed(self.seed)
@@ -326,10 +337,10 @@ class MiniCPMV47Workflow(BaseLLMWorkflow):
                 if spec.get("verify_graphs"):
                     spec["verify_graphs"] = {length: child_path(path) for length, path in spec["verify_graphs"].items()}
                 meta["llm"]["spec_decode"] = spec
-                meta["components"].append("dflash")
+                meta["components"].append("dspark")
 
         if spec_mode and "llm" not in meta:
-            raise ValueError("MiniCPM DFlash requires the llm component")
+            raise ValueError("MiniCPM DSpark requires the llm component")
 
         if not meta["components"]:
             raise ValueError("MiniCPM export must enable at least one component")

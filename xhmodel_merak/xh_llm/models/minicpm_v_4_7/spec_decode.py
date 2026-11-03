@@ -21,6 +21,8 @@ class MiniCPMV47SpecDecodeModel(Qwen3_5SpecDecodeV2Model):
     image_token_id = -1
 
     def __init__(self, *, enable_golden=False, enable_confidence_truncation=False, confidence_threshold=None, verify_graphs=None, **kwargs):
+        if kwargs.get("spec_decode_mode") == "dspark":
+            kwargs["spec_decode_mode"] = "dflash"
         self.enable_golden = bool(enable_golden)
         self.enable_confidence_truncation = bool(enable_confidence_truncation)
         self.confidence_threshold = confidence_threshold
@@ -196,6 +198,7 @@ class MiniCPMV47SpecDecodeModel(Qwen3_5SpecDecodeV2Model):
         )
         stats["verify_lengths_per_round"] = self._verify_lengths
         stats["confidence_truncated_total"] = truncated
+        stats["mode"] = "dspark"
         self.last_spec_decode_stats = stats
         text = tokenizer.decode(generated)
         return (text, stats) if return_stats else text
@@ -210,7 +213,7 @@ def load_speculative_runtime(root: Path, llm: dict, meta, device, enable_golden:
         draft={name: {"onnx": str(root / draft[f"{name}_hmonnx"])} for name in ("context", "context_decode", "decode")},
         session_device=device,
         enable_golden=enable_golden,
-        spec_decode_mode="dflash",
+        spec_decode_mode="dspark",
         block_size=int(contract["num_draft_tokens"]) + 1,
         hidden_output_name="target_hidden",
         dflash_noise_token_id=int(draft["noise_token_id"]),

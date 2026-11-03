@@ -6,7 +6,8 @@
       "xhmodel_merak/xh_llm/models/qwen3_5/_hybrid_gated_delta_net.py",
       "xhmodel_merak/xh_llm/models/qwen3_5/_dflash_model_impl.py",
       "xhmodel_merak/xh_llm/models/minicpm_v_4_7/causal_values.py",
-      "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/*head_w5*.yaml"
+      "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/1b/*.yaml",
+      "configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7/35b_a3b/*.yaml"
     ]
   }]
 }

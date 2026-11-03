@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ..qwen3_5.xh_qwen3_5_config import XHQwen3_5_DFlashConfig, XHQwen3_5ModelConfig
+from ..qwen3_5_moe.xh_qwen3_5_moe_config import XHQwen3_5MoeModelConfig
 
 
 def _mapping(value):
@@ -18,7 +19,7 @@ def _mapping(value):
     return dict(vars(value))
 
 
-class MiniCPMV47DFlashConfig(XHQwen3_5_DFlashConfig):
+class MiniCPMV47DSparkConfig(XHQwen3_5_DFlashConfig):
     """Keep DSpark fields that the restored Qwen DFlash config no longer stores."""
 
     def __init__(self, **kwargs):
@@ -74,6 +75,15 @@ class MiniCPMV47ModelConfig(XHQwen3_5ModelConfig):
     """Apply DSpark capacity and flash-attention rules after the Qwen parent."""
 
     def __init__(self, **kwargs):
+        # Public MiniCPM settings use DSpark; the reused Qwen exporter
+        # consumes its existing DFlash configuration and dispatch fields.
+        dspark = kwargs.pop("dspark_config", None)
+        if dspark is not None:
+            if kwargs.get("dflash_config") is not None:
+                raise ValueError("Configure only dspark_config, not both draft aliases")
+            kwargs["dflash_config"] = dspark
+        if kwargs.get("spec_decode_mode") == "dspark":
+            kwargs["spec_decode_mode"] = "dflash"
         raw_dflash = kwargs.get("dflash_config")
         raw = _mapping(raw_dflash)
         if isinstance(raw_dflash, Mapping):
@@ -105,7 +115,7 @@ class MiniCPMV47ModelConfig(XHQwen3_5ModelConfig):
                 adjusted = dict(raw_dflash)
                 adjusted["flash_attention"] = raw.get("flash_attention")
                 kwargs["dflash_config"] = adjusted
-        with MiniCPMV47DFlashConfig._prepared_flat_checkpoint(raw.get("hf_model")):
+        with MiniCPMV47DSparkConfig._prepared_flat_checkpoint(raw.get("hf_model")):
             super().__init__(**kwargs)
         if self.dflash_config is None:
             return
@@ -122,9 +132,21 @@ class MiniCPMV47ModelConfig(XHQwen3_5ModelConfig):
             enable_confidence_truncation=bool(raw.get("enable_confidence_truncation", False)),
             confidence_threshold=raw.get("confidence_threshold"),
         )
-        if explicit_flash is not None:
-            values["flash_attention"] = explicit_flash
-        self.dflash_config = MiniCPMV47DFlashConfig(**values)
+        # A non-causal draft must mask padding explicitly. Do not inherit
+        # the target's causal FA when loading older presets without this field.
+        values["flash_attention"] = explicit_flash if explicit_flash is not None else {"enable": False}
+        self.dflash_config = MiniCPMV47DSparkConfig(**values)
+
+    @property
+    def dspark_config(self):
+        return self.dflash_config
+
+    def to_dict(self):
+        saved = super().to_dict()
+        if getattr(self.dflash_config, "is_dspark", False):
+            saved["spec_decode_mode"] = "dspark" if self.spec_decode_mode else None
+            saved["dspark_config"] = saved.pop("dflash_config")
+        return saved
 
     @classmethod
     def from_dict(cls, config_dict: dict):
@@ -133,3 +155,11 @@ class MiniCPMV47ModelConfig(XHQwen3_5ModelConfig):
         if isinstance(dflash, Mapping):
             raw["dflash_config"] = dict(dflash)
         return cls(**raw)
+
+
+class MiniCPMV47MoeModelConfig(MiniCPMV47ModelConfig, XHQwen3_5MoeModelConfig):
+    """Preserve both MiniCPM DSpark overrides and Qwen MoE pruning validation."""
+
+
+# Read compatibility for code importing the old MiniCPM class name.
+MiniCPMV47DFlashConfig = MiniCPMV47DSparkConfig

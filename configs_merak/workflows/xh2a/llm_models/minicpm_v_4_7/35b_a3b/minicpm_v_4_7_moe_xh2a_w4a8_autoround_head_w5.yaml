@@ -1,7 +1,37 @@
-# Export an existing calibrated W5 head checkpoint with --quanted-model-dir.
+# Quantize the backbone and W5 head together, or reuse --quanted-model-dir.
 # Backbone: AutoRound W4 experts / W8 projections; target and DSpark share W5 head.
 # Text attention uses xhquant FlashAttention with Q/K/V/S/P all 8-bit.
-quant: null
+quant:
+  algorithm: gptqmodel
+  method: autoround
+  bits: 4
+  group_size: 64
+  sym: true
+  data_type: int_sym_xh
+  iters: 400
+  format: auto_round:gptqmodel
+  # Keep the QDQ backbone floating; pack only the calibrated head.
+  save_quantized: false
+  calibration:
+    jsonl: xh2modelzoo://data/calib_data/NeelNanda-pile-10k.jsonl
+    nsamples: 256
+    seqlen: 2048
+  runtime:
+    batch_size: 8
+    gradient_accumulate_steps: 1
+    device_map: "0"
+    low_gpu_mem_usage: true
+    seed: 42
+  moe:
+    attn_bits: 8
+    shared_expert_bits: 8
+    # expert_bits defaults to quant.bits (4)
+  head:
+    bits: 5
+    group_size: 64
+    algorithm: inherit
+  # autoround_source: /path/to/auto-round   # optional; or GPTQMODEL_SOURCE/third_party/auto-round
+
 export:
   model:
     les_prediction_k: 0

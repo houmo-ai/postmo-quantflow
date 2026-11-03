@@ -12,7 +12,7 @@ from typing import Any
 import torch.nn as nn
 
 
-def _build_dflash_export_adapter(
+def _build_dspark_export_adapter(
     core_model: nn.Module,
     *,
     mode: str,
@@ -78,7 +78,7 @@ def _build_dflash_export_adapter(
         ]
         core_call = "self.core.forward_decode"
     else:
-        raise ValueError(f"Unsupported DFlash mode: {mode}")
+        raise ValueError(f"Unsupported draft export mode: {mode}")
 
     forward_src = f"def forward(self, {', '.join(arg_names)}):\n    return {core_call}({', '.join(call_args)})\n"
     namespace: dict[str, Any] = {}

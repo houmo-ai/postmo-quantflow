@@ -24,7 +24,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quanted-model-dir", default=None,
                         help="Reuse an existing MiniCPM causal QDQ or calibrated-head checkpoint")
     parser.add_argument("--export-output-dir", default="work_dirs/minicpm_v_4_7_merak_export")
-    parser.add_argument("--dflash-model-dir", default=None, help="Paired DFlash/DSpark checkpoint directory.")
+    parser.add_argument("--dspark-model-dir", "--dflash-model-dir", dest="dspark_model_dir",
+                        default=None, help="Paired DSpark checkpoint directory.")
     parser.add_argument("--confidence-threshold", type=float, default=None,
                         help="Enable DSpark cumulative-confidence truncation with this threshold.")
     parser.add_argument("--num-draft-tokens", type=int, default=None)
@@ -67,12 +68,12 @@ def _overrides(args: argparse.Namespace) -> dict[str, object]:
     if args.quant_type is not None:
         for component in ("vision_4x", "vision_16x", "llm"):
             result[f"export.components.{component}.quant_type"] = args.quant_type
-    if getattr(args, "dflash_model_dir", None):
-        result["export.model.spec_decode_mode"] = "dflash"
-        result["export.model.dflash_config.hf_model"] = args.dflash_model_dir
+    if getattr(args, "dspark_model_dir", None):
+        result["export.model.spec_decode_mode"] = "dspark"
+        result["export.model.dspark_config.hf_model"] = args.dspark_model_dir
     if getattr(args, "confidence_threshold", None) is not None:
-        result["export.model.dflash_config.enable_confidence_truncation"] = True
-        result["export.model.dflash_config.confidence_threshold"] = args.confidence_threshold
+        result["export.model.dspark_config.enable_confidence_truncation"] = True
+        result["export.model.dspark_config.confidence_threshold"] = args.confidence_threshold
     if getattr(args, "num_draft_tokens", None) is not None:
         result["export.model.num_draft_tokens"] = args.num_draft_tokens
     if getattr(args, "les_prediction_k", None) is not None:

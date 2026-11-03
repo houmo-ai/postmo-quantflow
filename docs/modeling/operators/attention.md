@@ -28,6 +28,11 @@
 
 ## MiniCPM-V-4.7：Decode/Verify 的因果 V 量化
 
+1B 与 35B 默认配置使用因果 FA8，DSpark 草稿显式关闭融合 FA、保留 mask。
+这样主模型不再产生 `V cache → Where → P×V` 路径；部分编译器的 V-cache
+HMFP 精度改写不接受其中的 Where。已有 SDK 回归验证导出图与运行语义，
+芯片编译仍须在对应编译器上验证。
+
 MiniCPM 的非 FA 文本 Decode/Verify 图在每个 query 的 P×V 之前，用
 `LessOrEqual → Where` 把该 query 不可见的 V-cache 置零。
 HMFP 沿 P×V 的 token reduction 轴共享指数；仅将未来 token 的概率设为零，

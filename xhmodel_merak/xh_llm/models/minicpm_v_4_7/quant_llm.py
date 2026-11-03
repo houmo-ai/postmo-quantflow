@@ -61,6 +61,7 @@ def quantize_minicpm_v47_llm_gptq(
         device=device,
         trust_remote_code=_as_bool(quant_cfg.get("trust_remote_code", True)),
         dry_run=_as_bool(quant_cfg.get("dry_run", False)),
+        **({"head": dict(quant_cfg["head"])} if quant_cfg.get("head") is not None else {}),
     )
     return str(result.output_dir)
 
@@ -130,6 +131,7 @@ def quantize_minicpm_v47_llm_autoround(
         expert_up_gate_bits=_optional_int(moe_cfg.get("expert_up_gate_bits")),
         expert_down_bits=_optional_int(moe_cfg.get("expert_down_bits")),
         dry_run=_as_bool(quant_cfg.get("dry_run", False)),
+        **({"head": dict(quant_cfg["head"])} if quant_cfg.get("head") is not None else {}),
     )
     return str(result.output_dir)
 
@@ -173,6 +175,59 @@ def apply_causal_dequant_to_minicpm_host(full_model: Any, quant_weight: str) -> 
         full_model.lm_head.weight.copy_(lm_head_weight)
 
 
+def validate_head_quant_config(quant_cfg, model_cfg) -> None:
+    """Reject mismatched head requests before starting backbone calibration."""
+    from xhmodel_merak.xh_llm.shared_head import target_head_bits
+
+    bits = target_head_bits(model_cfg.get("quant_scheme"))
+    head = quant_cfg.get("head")
+    if head is None:
+        if bits is not None and bits < 8:
+            raise ValueError(f"MiniCPM export head W{bits} requires matching quant.head.bits={bits}")
+        return
+    if not isinstance(head, Mapping) or type(head.get("bits")) is not int or head["bits"] not in (4, 5, 8):
+        raise ValueError("quant.head.bits must be 4, 5 or 8")
+    if head["bits"] != bits:
+        raise ValueError(f"quant.head.bits={head['bits']} conflicts with export lm_head W{bits}")
+
+
+def prepare_causal_head_checkpoint(source, *, bits, raw_model_dir, quant_cfg, device):
+    """Reuse a calibrated head or complete an existing QDQ backbone via GPTQModel."""
+    import json
+
+    root = Path(source).expanduser().resolve()
+    if not (root / "config.json").is_file():
+        raise FileNotFoundError(
+            f"MiniCPM checkpoint config does not exist: {root / 'config.json'}. "
+            "--quanted-model-dir must point to a saved checkpoint, not an HMONNX export directory."
+        )
+    config = json.loads((root / "config.json").read_text())
+    if ((config.get("quantization_config") or {}).get("meta") or {}).get("lm_head_quantization"):
+        validate_causal_head_checkpoint(root, bits)
+        return str(root)
+    if not isinstance(quant_cfg, Mapping) or not quant_cfg.get("head"):
+        raise ValueError(f"A floating MiniCPM head requires quant.head.bits={bits} for calibration")
+    _ensure_gptqmodel_on_path(quant_cfg)
+    from gptqmodel.recipes.minicpm_v47_qdq_head import quantize_minicpm_v47_head
+
+    calibration = _section(quant_cfg, "calibration")
+    runtime = _section(quant_cfg, "runtime")
+    dataset = calibration.get("jsonl", calibration.get("dataset", quant_cfg.get("calibration_jsonl")))
+    if dataset is None:
+        raise ValueError("MiniCPM head calibration requires calibration.jsonl or calibration.dataset")
+    dataset = _resolve_autoround_dataset(dataset)
+    calibration_key = "calibration_jsonl" if Path(str(dataset)).is_file() else "calibration_dataset"
+    result = quantize_minicpm_v47_head(
+        model_dir=str(root), tokenizer_dir=raw_model_dir, head=dict(quant_cfg["head"]),
+        nsamples=int(calibration.get("nsamples", quant_cfg.get("nsamples", 256))),
+        seqlen=int(calibration.get("seqlen", quant_cfg.get("seqlen", 2048))),
+        device=device, seed=int(runtime.get("seed", quant_cfg.get("sampling_seed", 42))),
+        **{calibration_key: str(dataset)},
+    )
+    validate_causal_head_checkpoint(result.output_dir, bits)
+    return result.output_dir
+
+
 def validate_causal_head_checkpoint(source: str | Path, bits: int) -> None:
     """Require the producer's float-QDQ backbone and matching calibrated head."""
     import json
@@ -185,7 +240,7 @@ def validate_causal_head_checkpoint(source: str | Path, bits: int) -> None:
     producer = (quant.get("meta") or {}).get("float_qdq_backbone") or {}
     if (producer.get("model_family") != "minicpm_v_4_7"
             or producer.get("artifact_format") != "float_causal_bin"
-            or config.get("model_type") != "qwen3_5_moe_text"):
+            or config.get("model_type") not in {"qwen3_5_text", "qwen3_5_moe_text"}):
         raise ValueError("Expected a MiniCPM-V-4.7 float-QDQ backbone with calibrated head")
     if quant.get("dynamic", {}).get("-:^(?!lm_head$).*") != {}:
         raise ValueError("Packed-head checkpoint must retain the float-QDQ backbone")

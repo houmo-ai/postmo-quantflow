@@ -7,6 +7,7 @@ from xhmodel_merak.model_catalog.contracts import (
     ArtifactFormatSpec,
     ModelRecipe,
     ResolvedPrecision,
+    VariantRecipe,
 )
 from xhmodel_merak.model_catalog.registry import ModelCatalog
 from xhmodel_merak.model_integrations._dependencies import (
@@ -77,10 +78,12 @@ def _dense_recipe() -> ModelRecipe:
         modalities=("text", "image"),
         variants=(
             variant("full", _DENSE_WORKFLOW),
-            variant(
-                "dflash",
-                _DENSE_WORKFLOW.replace("w8a8.yaml", "w8a8_dflash.yaml"),
-                speculative_mode="dflash",
+            VariantRecipe(
+                name="dspark",
+                workflow_config=_DENSE_WORKFLOW.replace("w8a8.yaml", "w8a8_dspark.yaml"),
+                speculative_mode="dspark",
+                required_sources=("dspark",),
+                extra_components=("dspark",),
             ),
         ),
         default_precision=ResolvedPrecision(weight="w8", activation="a8"),
@@ -125,10 +128,12 @@ def _moe_recipe() -> ModelRecipe:
         modalities=("text", "image"),
         variants=(
             variant("full", _MOE_WORKFLOW),
-            variant(
-                "dflash",
-                _MOE_WORKFLOW.replace("w8a8.yaml", "w8a8_dflash.yaml"),
-                speculative_mode="dflash",
+            VariantRecipe(
+                name="dspark",
+                workflow_config=_MOE_WORKFLOW.replace("w8a8.yaml", "w8a8_dspark.yaml"),
+                speculative_mode="dspark",
+                required_sources=("dspark",),
+                extra_components=("dspark",),
             ),
         ),
         default_precision=ResolvedPrecision(weight="w8", activation="a8"),

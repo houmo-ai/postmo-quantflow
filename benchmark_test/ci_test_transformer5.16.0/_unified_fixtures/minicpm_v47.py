@@ -11,10 +11,10 @@ def prepare(case, root, monkeypatch):
     configure_minicpm_v47_packaging_stub(
         source, monkeypatch, recipe=recipe, variant=case.variant,
     )
-    if case.variant == "dflash":
+    if case.variant == "dspark":
         kwargs.update(
-            speculative={"mode": "dflash", "num_draft_tokens": 3},
-            sources={"dflash": str(source / "draft")},
+            speculative={"mode": "dspark", "num_draft_tokens": 3},
+            sources={"dspark": str(source / "draft")},
         )
     inputs = {
         "prompt": "describe the image briefly",
@@ -75,7 +75,7 @@ def configure_minicpm_v47_packaging_stub(source, monkeypatch, *, recipe, variant
         cursor[parts[-1]] = value
     config["text_config"]["vocab_size"] = 8
     (source / "config.json").write_text(json.dumps(config), encoding="utf-8")
-    if variant == "dflash":
+    if variant == "dspark":
         draft = source / "draft"
         draft.mkdir()
         (draft / "config.json").write_text(json.dumps({
@@ -196,18 +196,18 @@ def configure_minicpm_v47_packaging_stub(source, monkeypatch, *, recipe, variant
                         "prefill_chunk_length": 256,
                     },
                 }
-                if variant == "dflash":
+                if variant == "dspark":
                     draft_contract = {"noise_token_id": 4, "architecture": "Qwen3DSparkModel"}
                     for name in ("context", "context_decode", "decode"):
-                        graph = out / f"dflash_{name}" / "draft.onnx"
+                        graph = out / f"dspark_{name}" / "draft.onnx"
                         graph.parent.mkdir()
                         write_minimal_hmonnx(graph)
                         draft_contract[f"{name}_hmonnx"] = str(graph.relative_to(out))
                     meta["llm"]["spec_decode"] = {
-                        "mode": "dflash", "num_draft_tokens": 3, "verify_length": 4,
+                        "mode": "dspark", "num_draft_tokens": 3, "verify_length": 4,
                         "draft": draft_contract,
                     }
-                    meta["components"].append("dflash")
+                    meta["components"].append("dspark")
                 (out / "export_meta_info.json").write_text(json.dumps(meta), encoding="utf-8")
                 return ExportResult(work_dir=str(out), config_file=str(config_file), meta=meta)
 

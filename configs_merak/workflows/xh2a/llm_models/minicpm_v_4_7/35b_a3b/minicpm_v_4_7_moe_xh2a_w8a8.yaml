@@ -16,7 +16,7 @@ export:
     linear_attention_mode: auto
     linear_chunk_size: 64
     flash_attention:
-      enable: false
+      enable: true
       q_bits: 8
       k_bits: 8
       v_bits: 8

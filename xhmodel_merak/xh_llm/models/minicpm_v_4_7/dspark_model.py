@@ -135,7 +135,7 @@ class MiniCPMDSparkDraftModel(XHQwen3_5DFlashDraftModel):
     def _to_wrap(self, hf_model):
         if not self._is_dspark():
             return super()._to_wrap(hf_model)
-        from .dspark_export import _build_dflash_export_adapter
+        from .dspark_export import _build_dspark_export_adapter
 
         core = MiniCPMDSparkModel.from_pretrained(
             self.config.dflash_model_dir,
@@ -150,7 +150,7 @@ class MiniCPMDSparkDraftModel(XHQwen3_5DFlashDraftModel):
             num_output_draft_tokens=self.config.num_output_draft_tokens,
             confidence_logits=True,
         )
-        self._wrap_model = _build_dflash_export_adapter(
+        self._wrap_model = _build_dspark_export_adapter(
             core, mode=self.config.mode, num_hidden_layers=self.config.num_hidden_layers,
             use_flash_attention=self._uses_flash_attention(), is_dspark=True,
         )

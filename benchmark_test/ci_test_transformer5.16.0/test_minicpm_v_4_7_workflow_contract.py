@@ -41,6 +41,19 @@ def _load_example(module_name: str, filename: str):
     return module
 
 
+@pytest.mark.parametrize("flag", ("--dspark-model-dir", "--dflash-model-dir"))
+def test_dspark_cli_emits_canonical_settings(monkeypatch, flag):
+    module = _load_example("minicpm_dspark_cli", "minicpm_v_4_7_workflow.py")
+    monkeypatch.setattr(sys, "argv", ["workflow", "--model-dir", "target", flag, "draft",
+                                    "--confidence-threshold", "0.3"])
+    args = module.parse_args()
+    overrides = module._overrides(args)
+    assert overrides["export.model.spec_decode_mode"] == "dspark"
+    assert overrides["export.model.dspark_config.hf_model"] == "draft"
+    assert overrides["export.model.dspark_config.enable_confidence_truncation"] is True
+    assert not any("dflash" in key for key in overrides)
+
+
 @pytest.mark.parametrize(
     ("model_id", "export_name", "config_path", "model_type"),
     (
@@ -144,9 +157,9 @@ def test_minicpm_v47_example_helpers_are_importable() -> None:
     assert callable(float_demo.parse_args)
 
 
-@pytest.mark.parametrize("dflash", (False, True))
-def test_minicpm35b_autoround_release_configs_keep_dynamic_vision(dflash):
-    suffix = "_dflash" if dflash else ""
+@pytest.mark.parametrize("dspark", (False, True))
+def test_minicpm35b_autoround_release_configs_keep_dynamic_vision(dspark):
+    suffix = "_dspark" if dspark else ""
     path = MOE_CONFIG.parent / f"minicpm_v_4_7_moe_xh2a_w4a8_autoround{suffix}.yaml"
     raw = yaml.safe_load(path.read_text())
     assert raw["quant"]["method"] == "autoround"
@@ -155,15 +168,15 @@ def test_minicpm35b_autoround_release_configs_keep_dynamic_vision(dflash):
     assert raw["export"]["vision"]["patch_token_gears"] == [384, 784, 1536, 2816, 6144]
     assert raw["export"]["model"]["quant_scheme"]["quant_type"] == "w4a8h0_ssfp"
     assert raw["export"]["components"]["vision_4x"]["quant_type"] == "w8a8h1_sefp"
-    if dflash:
-        assert raw["export"]["model"]["spec_decode_mode"] == "dflash"
+    if dspark:
+        assert raw["export"]["model"]["spec_decode_mode"] == "dspark"
         assert raw["export"]["model"]["num_draft_tokens"] == 3
     else:
         assert "spec_decode_mode" not in raw["export"]["model"]
 
 
-@pytest.mark.parametrize("dflash", (False, True))
-def test_minicpm35b_float_qdq_export_preserves_mixed_bits(dflash, tmp_path):
+@pytest.mark.parametrize("dspark", (False, True))
+def test_minicpm35b_float_qdq_export_preserves_mixed_bits(dspark, tmp_path):
     """The SDK must retain W4 experts without lowering W8 host projections."""
     import onnx
     import torch
@@ -173,7 +186,7 @@ def test_minicpm35b_float_qdq_export_preserves_mixed_bits(dflash, tmp_path):
         to_frontend_graph, to_quant_graph,
     )
 
-    suffix = "_dflash" if dflash else ""
+    suffix = "_dspark" if dspark else ""
     path = MOE_CONFIG.parent / f"minicpm_v_4_7_moe_xh2a_w4a8_autoround{suffix}.yaml"
     scheme = yaml.safe_load(path.read_text())["export"]["model"]["quant_scheme"]
 

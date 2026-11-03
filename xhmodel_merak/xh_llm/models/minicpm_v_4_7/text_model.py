@@ -28,7 +28,7 @@ from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_5_moe_model import XHQwen3_5M
 from xhquant.utils import log_function_call
 
 from .auto_classes import register_minicpmv47_auto_classes
-from .dspark_config import MiniCPMV47DFlashConfig
+from .dspark_config import MiniCPMV47DSparkConfig, MiniCPMV47ModelConfig, MiniCPMV47MoeModelConfig
 from .positions import MiniCPMV47DataPreprocess
 
 # MiniCPM keeps Qwen ABI placeholders for vision_start/end even though its
@@ -88,7 +88,7 @@ class _MiniCPMV47TextMixin:
             if config.dynamic_prune["mode"] != "off":
                 raise ValueError("LES requires original Top-K routing, without ACEP pruning")
         draft = getattr(config, "dflash_config", None)
-        with MiniCPMV47DFlashConfig._prepared_flat_checkpoint(getattr(draft, "hf_model", None)):
+        with MiniCPMV47DSparkConfig._prepared_flat_checkpoint(getattr(draft, "hf_model", None)):
             super().__init__(config)
         self.wrap_cfg["mask_causal_values"] = True
 
@@ -218,6 +218,7 @@ class _MiniCPMV47TextMixin:
         if is_huge_model_export_enabled() and draft.enable_confidence_truncation:
             raise NotImplementedError("DSpark confidence truncation requires regular target export")
         section = meta_info.spec_decode
+        section["mode"] = "dspark"
         section["draft"].update(
             architecture="Qwen3DSparkModel",
             abi="minicpm_dspark_v2",
@@ -269,14 +270,14 @@ class _MiniCPMV47TextMixin:
                     draft.num_output_draft_tokens = int(self.config.num_draft_tokens)
                 try:
                     from ..qwen3_5.qwen3_5_llm_model import _copy_model_shared_params
-                    from .dspark_config import MiniCPMV47DFlashConfig
+                    from .dspark_config import MiniCPMV47DSparkConfig
                     from .dspark_model import MiniCPMDSparkDraftExport
 
                     wrap_template = None
                     if dspark and draft.enable_confidence_truncation:
                         self.to_wrap()
                         wrap_template = _copy_model_shared_params(self._wrap_model)
-                    with MiniCPMV47DFlashConfig._prepared_flat_checkpoint(getattr(draft, "hf_model", None) if dspark else None):
+                    with MiniCPMV47DSparkConfig._prepared_flat_checkpoint(getattr(draft, "hf_model", None) if dspark else None):
                         with MiniCPMDSparkDraftExport(int(self.config.num_draft_tokens) if dspark else None):
                             meta = XHQwen3_5Model.export_hmonnx(self, output_dir)
                 finally:
@@ -290,6 +291,8 @@ class _MiniCPMV47TextMixin:
 
 class MiniCPMV47TextModel(_MiniCPMV47TextMixin, XHQwen3_5Model):
     """Export the embedded Qwen3.5 Dense backend without Qwen's Vision graph."""
+
+    CONFIG_CLS = MiniCPMV47ModelConfig
 
     @classmethod
     def get_hf_model(cls, hf_model_dir: str, quant_weight=None, **kwargs):
@@ -334,6 +337,8 @@ class MiniCPMV47TextModel(_MiniCPMV47TextMixin, XHQwen3_5Model):
 
 class MiniCPMV47MoeTextModel(_MiniCPMV47TextMixin, XHQwen3_5MoeModel):
     """Export the embedded Qwen3.5 MoE backend without Qwen's Vision graph."""
+
+    CONFIG_CLS = MiniCPMV47MoeModelConfig
 
     def _to_fronted(self, wrap_model):
         frontend = super()._to_fronted(wrap_model)

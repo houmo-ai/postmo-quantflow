@@ -4,6 +4,87 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize("name", [
+    "1b/minicpm_v_4_7_xh2a_w8a8.yaml",
+    "1b/minicpm_v_4_7_xh2a_w8a8_dspark.yaml",
+    "1b/minicpm_v_4_7_xh2a_w4a8_gptq.yaml",
+    "35b_a3b/minicpm_v_4_7_moe_xh2a_w8a8.yaml",
+    "35b_a3b/minicpm_v_4_7_moe_xh2a_w8a8_dspark.yaml",
+    "35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround.yaml",
+    "35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround_dspark.yaml",
+    "35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround_head_w5.yaml",
+    "35b_a3b/minicpm_v_4_7_moe_xh2a_w4a8_autoround_head_w5_dspark.yaml",
+])
+def test_presets_use_causal_fa_and_keep_draft_explicit(name):
+    from pathlib import Path
+    import yaml
+    root = Path(__file__).resolve().parents[2]
+    config = yaml.safe_load((root / 'configs_merak/workflows/xh2a/llm_models/minicpm_v_4_7' / name).read_text())
+    assert config['export']['model']['flash_attention'] == dict(
+        enable=True, q_bits=8, k_bits=8, v_bits=8, p_bits=8)
+    draft = config['export']['model'].get('dspark_config')
+    if draft is not None:
+        assert draft['flash_attention']['enable'] is False
+        assert draft['enable_confidence_truncation'] is False
+        assert 'confidence_threshold' not in draft
+
+
+@pytest.mark.parametrize("length", [1, 4], ids=["decode", "verify"])
+def test_real_target_kv_path_has_causal_fa_without_value_where(length, tmp_path):
+    import onnx
+    from xhquant.api import (ConfigDict, PrecisionMode, convert_quanted_model_to_hmonnx,
+                             ptq_quantize, to_frontend_graph, to_quant_graph)
+    from xhquant.core.cache_tensor import CacheTensor
+    from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5Attention
+    from xhmodel_merak.xh_llm.models.qwen3_5._llm_model_impl import register_wrap_modules
+    from xhmodel_merak.xh_llm.models.minicpm_v_4_7.causal_values import enable_minicpm_causal_values
+    from xhmodel_merak.xh_llm.wrap_model import wrap_llm_model
+
+    torch.manual_seed(47)
+    torch.set_num_threads(2)
+    register_wrap_modules()
+    native = Qwen3_5Attention(Qwen3_5TextConfig(
+        hidden_size=128, num_attention_heads=2, num_key_value_heads=1, head_dim=64), layer_idx=0).half().eval()
+    cfg = ConfigDict(dict(use_cache=True, kv_cache=dict(cache_axis=2), context_max_length=128,
+                          input_sequence_length=length, linear_attention_mode='recurrent',
+                          mask_causal_values=True, flash_attention=dict(enable=True,
+                          q_bits=8, k_bits=8, v_bits=8, p_bits=8)))
+    wrapped = wrap_llm_model(native, cfg)
+    enable_minicpm_causal_values(wrapped)
+    wrapped._update_cfg(cfg)
+    assert wrapped.causal_value_product is None
+
+    class Attention(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attention = wrapped
+
+        def forward(self, hidden, past, current, key, value):
+            return self.attention(hidden, past_seq_length=past, current_input_length=current,
+                                  past_k_cache=key, past_v_cache=value)
+
+    args = [torch.randn(1, length, 128).half() * .1, torch.tensor([61], dtype=torch.int32),
+            torch.tensor([length], dtype=torch.int32), torch.zeros(1, 1, 128, 64).half(),
+            torch.zeros(1, 1, 128, 64).half()]
+    graph = to_quant_graph(to_frontend_graph(Attention(), 'TorchFX', args),
+                           'XH2a', {'quant_type': 'w8a8h1_sefp'})
+    ptq_quantize(graph, [args], PrecisionMode.ALIGNED, ['cpu'], infer_shape=False)
+    path = tmp_path / 'target.onnx'
+    convert_quanted_model_to_hmonnx(graph, args, str(path))
+    nodes = list(onnx.load(path).graph.node)
+    assert not any(n.op_type == 'Where' for n in nodes)
+    assert sum(n.op_type == 'KVcache' for n in nodes) == 2
+    flash = [n for n in nodes if n.op_type == 'FlashAttention']
+    assert len(flash) == 1
+    assert next(a.i for a in flash[0].attribute if a.name == 'is_causal') == 1
+    session = HMONNXInferenceV2(str(path), HMONNXInferenceConfig(exec_devices=['cpu']))
+    values = args[:3] + [CacheTensor(t.clone()) for t in args[3:]]
+    with torch.inference_mode():
+        assert torch.isfinite(session(*values)).all()
+
+
 def _attention(causal):
     from xhquant.api import ConfigDict
 
