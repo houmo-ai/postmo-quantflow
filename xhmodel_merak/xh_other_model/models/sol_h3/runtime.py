@@ -28,6 +28,52 @@ from .host import (
 from .precision import require_finite
 
 
+def _resolve_refiner_options(meta, guide_policy, audio_mode):
+    """Resolve mode-specific defaults and reject graphs unable to host the guide."""
+    if guide_policy is not None and guide_policy not in ("midguide", "none"):
+        raise ValueError("ltx_guide_policy must be 'midguide' or 'none'")
+    mode = meta.get("mode", "t2va")
+    selected_guide = ("midguide" if mode == "ref2va" else "none") if guide_policy is None else guide_policy
+    if selected_guide == "midguide":
+        if mode != "ref2va":
+            raise ValueError("ltx_guide_policy='midguide' requires Ref2VA inputs")
+        frames = meta.get("refiner_frames")
+        if type(frames) is not int or frames not in (121, 361):
+            raise ValueError("ltx_guide_policy='midguide' requires a 5s or 15s refiner gear")
+        policy = meta.get("ltx_reference_conditioning") or {}
+        if not isinstance(policy, dict):
+            policy = {}
+        names = meta.get("graphs", {}).get("ltx_denoiser", {}).get("input_names", [])
+        required = [
+            "video", "audio", "step", "vcos", "vsin", "acos", "asin", "vccos", "vcsin", "accos", "acsin",
+            "first_role", "video_valid_length",
+        ]
+        if (
+            policy.get("enabled") is not True
+            or policy.get("graph_mode") != "static_maximum_guide"
+            or meta.get("ltx_rope_mode", "inputs") != "inputs"
+            or names[: len(required)] != required
+            or "ltx_rope" not in meta.get("resources", {})
+        ):
+            raise ValueError(
+                "ltx_guide_policy='midguide' requires a static_maximum_guide LTX graph with input RoPE; "
+                "use ltx_guide_policy='none' for an older bundle"
+            )
+        size = meta.get("refiner_size", ())
+        if (
+            not isinstance(size, (tuple, list))
+            or len(size) != 2
+            or any(type(n) is not int or n <= 0 or n % 32 for n in size)
+            or policy.get("first_frame_tokens") != (size[0] // 32) * (size[1] // 32)
+            or policy.get("target_tokens") != ((frames - 1) // 8 + 1) * policy["first_frame_tokens"]
+            or policy.get("video_tokens") != policy["target_tokens"] + policy["first_frame_tokens"]
+        ):
+            raise ValueError("ltx_guide_policy='midguide' requires a complete target and one full guide frame")
+    if audio_mode is None and mode == "ref2va":
+        audio_mode = "joint"
+    return selected_guide, resolve_ltx_audio_mode(meta, audio_mode)
+
+
 class SolH3Runtime:
     def __init__(self, root, *, device="cuda:0"):
         self.root = Path(root).resolve()
@@ -307,8 +353,12 @@ class SolH3Runtime:
             if value is not None:
                 validate_keyframe_resolution(value, self.meta["refiner_size"])
 
-    def refine(self, video, audio, seed, *, image=None, last_image=None, ltx_audio_mode=None):
-        selected_audio_mode = resolve_ltx_audio_mode(self.meta, ltx_audio_mode)
+    def refine(
+        self, video, audio, seed, *, image=None, last_image=None, ltx_audio_mode=None, ltx_guide_policy=None,
+    ):
+        selected_guide, selected_audio_mode = _resolve_refiner_options(self.meta, ltx_guide_policy, ltx_audio_mode)
+        if selected_guide == "midguide" and (image is not None or last_image is not None):
+            raise ValueError("Ref2VA midguide does not accept first/last keyframes")
         freeze_audio = selected_audio_mode == "frozen"
         audio_mode_input = ()
         if "ltx_audio_policy" in self.meta:
@@ -319,18 +369,44 @@ class SolH3Runtime:
         if self.meta.get("ltx_rope_mode", "inputs") == "inputs":
             with self.numpy_resource("ltx_rope") as rope_data:
                 rope = tuple(torch.from_numpy(rope_data[f"rope_{i}"]) for i in range(8))
-        policy = self.meta["ltx_reference_conditioning"]
-        if policy["graph_mode"] == "static_maximum_guide":
+        policy = self.meta.get("ltx_reference_conditioning") or {}
+        if policy.get("graph_mode") == "static_maximum_guide":
             from .conditioning import REFINER_SIGMAS
             from .ltx_keyframes import clear_static_keyframe_state, prepare_static_keyframe_state, static_keyframe_step
 
-            keyframes = self.ltx_image_encode(image=image, last_image=last_image)
+            keyframes = (
+                () if selected_guide == "midguide" else self.ltx_image_encode(image=image, last_image=last_image)
+            )
             state = prepare_static_keyframe_state(
                 video, audio, keyframe_latents=keyframes, seed=seed, size=self.meta["refiner_size"],
                 refiner_frames=self.meta["refiner_frames"], device=self.device, freeze_audio=freeze_audio
             )
+            if selected_guide == "midguide":
+                frame_tokens, target = policy["first_frame_tokens"], policy["target_tokens"]
+                if any(rope[i].ndim != 4 or rope[i].shape[2] != policy["video_tokens"] for i in (0, 1, 4, 5)):
+                    raise ValueError("LTX input RoPE does not match the static target/guide token layout")
+                # np.load returns fresh arrays on each call; save only the small
+                # guide suffix, not another copy of the full 15s RoPE tensors.
+                original_guide_rope = {i: rope[i][:, :, target:, :].clone() for i in (0, 1, 4, 5)}
+                guide_frames = (4, 10) if self.meta["refiner_frames"] == 121 else (12, 30)
             try:
                 for step, (sigma, next_sigma) in enumerate(zip(REFINER_SIGMAS[:-1], REFINER_SIGMAS[1:], strict=True)):
+                    if selected_guide == "midguide":
+                        if step < len(guide_frames):
+                            start = guide_frames[step] * frame_tokens
+                            end = start + frame_tokens
+                            guide = state.clean_video[:, start:end]
+                            state.video[:, target:].copy_(guide)
+                            state.clean_video[:, target:].copy_(guide)
+                            for i in original_guide_rope:
+                                rope[i][:, :, target:, :].copy_(rope[i][:, :, start:end, :])
+                            state.video_valid_length.fill_(target + frame_tokens)
+                        else:
+                            state.video[:, target:].zero_()
+                            state.clean_video[:, target:].zero_()
+                            for i, original in original_guide_rope.items():
+                                rope[i][:, :, target:, :].copy_(original)
+                            state.video_valid_length.fill_(target)
                     v, a = self.invoke(
                         "ltx_denoiser",
                         state.video,
@@ -397,13 +473,12 @@ class SolH3Runtime:
 
     def generate(
         self, prompt, *, seed=42, output_path="sol_h3.mp4", image=None, last_image=None, references=None,
-        ltx_audio_mode=None,
+        ltx_audio_mode=None, ltx_guide_policy=None,
     ):
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("Sol-H3 requires a nonempty prompt")
         if type(seed) is not int or not 0 <= seed < 2**63:
             raise ValueError("Sol-H3 seed is outside the supported range")
-        selected_audio_mode = resolve_ltx_audio_mode(self.bundle_meta, ltx_audio_mode)
         if self.device.type != "cuda":
             raise ValueError("this full Sol-H3 gear requires a CUDA HMONNX simulator")
         if self.bundle_meta.get("mode") == "all":
@@ -413,6 +488,7 @@ class SolH3Runtime:
             self.close()
             mode = infer_mode(image=image, last_image=last_image, references=references)
             self.meta = mode_metadata(self.bundle_meta, mode)
+        selected_guide, selected_audio_mode = _resolve_refiner_options(self.meta, ltx_guide_policy, ltx_audio_mode)
         if self.meta.get("mode") in ("i2va", "l2va", "fl2va"):
             self._validate_keyframe_resolution(image, last_image)
         stages = {}
@@ -439,7 +515,8 @@ class SolH3Runtime:
         video = stage(
             "refiner",
             lambda: self.refine(
-                video, audio, seed, image=image, last_image=last_image, ltx_audio_mode=selected_audio_mode
+                video, audio, seed, image=image, last_image=last_image, ltx_audio_mode=selected_audio_mode,
+                ltx_guide_policy=selected_guide,
             ),
         )
         pixels = stage("video_decode", lambda: self.video_decode(video))
@@ -462,6 +539,7 @@ class SolH3Runtime:
                 refiner_cache_policy=self.meta["refiner_cache_policy"],
                 ltx_audio_mode=selected_audio_mode,
                 ltx_audio_frozen=selected_audio_mode == "frozen",
+                ltx_guide_policy=selected_guide,
             ),
         )
 

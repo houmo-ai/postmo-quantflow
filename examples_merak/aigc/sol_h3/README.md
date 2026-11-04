@@ -10,24 +10,44 @@
 论文宣传中的 360p/720p 对应这里使用的作者对齐尺寸。注意当前 Merak 配置的两阶段 attention 都是 dense；
 4/3 步蒸馏权重、AdaLN 折叠、逐时间步精确文本 KV 缓存和数值补偿已接入，本次发布仅开放 Dense。
 
-## 如何选择 LTX 音频策略
+## Ref2VA 默认精修与音频策略
 
-新导出的 5 秒或 15 秒 schema 9 包各使用一张 LTX DiT 图，在推理时通过
-`ltx_audio_mode` 选择音频策略；两种策略共用图权重，不需要分别构建。未指定时默认为
-`frozen`，可选值只有 `frozen` 和 `joint`：
+使用当前 5 秒／15 秒 schema 9 包时，Ref2VA 默认采用 `ltx_guide_policy="midguide"`
+和 `ltx_audio_mode="joint"`。前两步 LTX 分别使用同一次 H3→LTX bridge 视频 latent 的
+中段时间格作 clean guide：5 秒为 `4`、`10`，15 秒为 `12`、`30`；第三步撤掉 guide。
+仍然实际运行三次 LTX，所有目标视频 token 三步都更新，guide 仅作条件。它复用现有图的
+1008-token 槽，guide 来自生成的 latent，不对输入参考图额外运行图像编码；不需要重导
+模型、更换权重或增加 ONNX 图。
 
-| 场景 | 建议策略 | LTX 阶段的音频行为 |
-| --- | --- | --- |
-| 咖啡馆人物对白、需要音频条件稳定的镜头 | `frozen` | H3 音频编码得到的干净 latent 保持不变，音频 sigma 为 0；三步只更新视频 |
-| 需要复现旧版联合精修，或冻结策略下参考角色产生额外形变；例如本次精灵画外旁白案例 | `joint` | 音视频按原联合策略加噪并在三步中一起去噪 |
-| 新场景尚无对照结果，或只提供环境声／配乐 | 先用 `frozen` | 沿用默认策略；有画面问题时固定素材、prompt 和 seed 对比 `joint` |
+统一接口的 `inputs["ltx_guide_policy"]` 与 CLI 的 `--ltx-guide-policy` 均可选：
 
-策略与 T2VA、I2VA、L2VA、FL2VA、Ref2VA 的输入模式互相独立，Ref2VA 也可能包含人物对白，
-请根据实际场景显式选择。上述建议不保证所有提示词都能消除画面或角色形变。
-画外旁白并不强制使用 `joint`。本次精灵案例在固定 H3 输出后，`joint` 消除了冻结策略下新增的尾巴；
-这是该输入的实测结论，不能据此把所有 Ref2VA 或旁白场景都切换到 `joint`。
-两种策略最后均将 H3 生成的原 PCM 音轨封装进视频；`joint` 中更新的 LTX 音频 latent 用于
-精修时的音视频交互，不替换最终音轨。两种策略的初始视频噪声抽样顺序一致。
+| 值 | 行为 |
+| --- | --- |
+| 省略参数 | Ref2VA 使用 `midguide`；T2VA、I2VA、L2VA、FL2VA 保持原有 guide 行为 |
+| `midguide` | 显式启用上述方案，只支持有静态 guide 槽及输入 RoPE 的 5 秒／15 秒 Ref2VA 包 |
+| `none` | Ref2VA 回退无中段 guide 的原三步；其他四种模式保持原有 guide 行为 |
+
+选择 `none` 不改变音频策略。音频由 `inputs["ltx_audio_mode"]` 或
+`--ltx-audio-mode` 独立指定，可选 `joint` 和 `frozen`：Ref2VA 省略该参数时采用 `joint`，
+其他四种模式采用包内默认值（当前 schema 9 包为 `frozen`）。显式指定会覆盖默认值：
+
+统一接口的两个策略字段均接受相应的字符串值；自动选择时省略对应字段。直接调用底层
+`SolH3Runtime` 时，两个参数仍可使用默认值 `None`。
+
+| 策略 | LTX 阶段的音频行为 |
+| --- | --- |
+| `joint` | 音视频加噪并在三步中一起去噪；是本次 Ref2VA 中段 guide 扩样本的实测设置 |
+| `frozen` | H3 音频编码得到的干净 latent 保持不变，音频 sigma 为 0；三步只更新视频；本次中段 guide 扩样本未覆盖该设置 |
+
+固定素材、prompt 和 seed 可对比两种音频策略及 `none` 回退。两种音频策略最终均将 H3
+生成的原 PCM 音轨封装进视频；`joint` 更新的 LTX 音频 latent 用于精修时的音视频交互，
+不替换最终音轨。两种策略的初始视频噪声抽样顺序一致。
+
+扩样本对照使用四套单人单图 Ref2VA、两种时长及两个 seed，共 16 对，均为 `joint`。
+六个固定时刻的单名 AI 助手盲评中，midguide 的外观接近 H3 为 13 较好、0 较差、3 无明确差异；
+细节不稳定更好，五官和服饰仍可能被重画。另有一组精灵多参考样例覆盖 5 秒／15 秒，
+这些结果不能推广为所有视频、音频参考或动态场景都有效；未做逐帧人工播放或口型验证。
+详细方法和结果见本机 `work_dirs/sol_h3_guide_generalization_20261104/REPORT.md`。
 
 统一接口示例使用随仓咖啡馆对白提示词，并显式选择 `frozen`：
 
@@ -45,7 +65,7 @@ result = inference_model(
 print(result.stats["ltx_audio_mode"], result.stats["ltx_audio_frozen"])
 ```
 
-命令行示例使用随仓咖啡馆图片和音频，通过 Ref2VA 和 `joint` 生成画外旁白场景；
+命令行示例使用随仓咖啡馆图片和音频，通过默认 Ref2VA 策略生成画外旁白场景；
 女孩不说话，参考音频只用于画外旁白的音色：
 
 ```bash
@@ -72,12 +92,38 @@ PROMPT
 )
 python -m examples_merak.aigc.sol_h3.generate \
   --artifact-dir work_dirs/sol_h3_dual_audio_20261103/bundle_5s \
-  --prompt "$PROMPT" --references "$REFS" --ltx-audio-mode joint --seed 42 \
+  --prompt "$PROMPT" --references "$REFS" --seed 42 \
   --output /tmp/cafe-narration.mp4
 ```
 
+例如对同一输入回退中段 guide，保留默认 `joint` 音频：
+
+```bash
+python -m examples_merak.aigc.sol_h3.generate \
+  --artifact-dir work_dirs/sol_h3_dual_audio_20261103/bundle_5s \
+  --prompt "$PROMPT" --references "$REFS" --ltx-guide-policy none --seed 42 \
+  --output /tmp/cafe-narration-no-midguide.mp4
+```
+
+统一接口中同样可传入该开关；省略两项策略时，Ref2VA 使用 `midguide` 和 `joint`：
+
+```python
+from xhmodel_merak.model_inference import inference_model
+
+result = inference_model(
+    artifact_dir="work_dirs/sol_h3_dual_audio_20261103/bundle_5s", device="cuda:0",
+    inputs={"prompt": "A woman at a cafe smiles gently.",
+            "references": [{"kind": "image", "path": "data/sol_h3/cafe_first_hd.png"}],
+            "ltx_guide_policy": "none", "seed": 42,
+            "output_path": "/tmp/cafe-no-midguide.mp4"},
+)
+print(result.output_path, result.stats["ltx_guide_policy"], result.stats["ltx_audio_mode"])
+```
+
 CLI 的 `--ltx-audio-mode` 与统一接口的 `inputs["ltx_audio_mode"]` 接受相同枚举，输出 stats
-记录所选的 `ltx_audio_mode` 和 `ltx_audio_frozen`。底层图在原输入末尾增加独立的
+记录所选的 `ltx_guide_policy`、`ltx_audio_mode` 和 `ltx_audio_frozen`。
+`ltx_guide_policy` 为 `none` 仅表示未使用 Ref2VA 中段 guide，首尾图的 guide 不受影响。
+底层图在原输入末尾增加独立的
 INT32 `[1]` `audio_mode`：`0=joint`、`1=frozen`；`step` 仍为 0–2。
 默认首尾帧静态 guide 图为 14 个输入，target-only 图为 12 个输入。模型内部按该输入选择
 相应折叠表，Host 按同一选择决定是否加噪和更新音频。
@@ -86,10 +132,22 @@ INT32 `[1]` `audio_mode`：`0=joint`、`1=frozen`；`step` 仍为 0–2。
 改用冻结策略时，传入 INT32 `[1]`，音频输入保持干净的编码 latent，Host 不对它加噪或更新。
 直接使用上述统一接口／CLI 会自动完成这些配套操作。
 
-此 ABI 需要重导两个时长的 LTX DiT，不能只改旧包 metadata。已上传的 schema 8 图固定
-`frozen`；加载器可读且通过产物校验的 schema 3/4/5 旧图固定 `joint`。省略策略时旧包
-保留原有行为，显式请求它们不支持的策略会报错并提示重新导出。
-schema 9 包请配套当前仓库的 runtime／CLI；直接集成 ONNX 的旧 13 输入脚本也须同步新增的控制输入。
+上述音频可选 ABI 原本需要重导两个时长的 LTX DiT，不能只改旧包 metadata；这次中段
+guide 则复用现有 schema 9 图，无须再导出。已上传的 schema 8 图固定 `frozen`；加载器
+可读且通过产物校验的 schema 3/4/5 旧图固定 `joint`。运行时根据静态 guide 槽、输入 RoPE
+及控制输入检查图能力；旧包不支持默认中段 guide 时会报错，可显式传入
+`ltx_guide_policy="none"` 回退。schema 8 的 Ref2VA 还须显式设置
+`ltx_audio_mode="frozen"`，以匹配该图固定的音频策略。直接集成 ONNX 的旧 13 输入脚本
+须同步音频控制输入和 Host 规则。
+
+例如使用上述 `$PROMPT` 和 `$REFS` 以原策略运行 schema 8 包：
+
+```bash
+python -m examples_merak.aigc.sol_h3.generate \
+  --artifact-dir work_dirs/sol_h3_external_mask_20261103/bundle_5s \
+  --prompt "$PROMPT" --references "$REFS" --ltx-guide-policy none \
+  --ltx-audio-mode frozen --seed 42 --output /tmp/cafe-schema8.mp4
+```
 
 两种时长的参数用法一致，时长由 `--artifact-dir`／`artifact_dir` 选择，不能用 5 秒包生成 15 秒。
 例如 15 秒咖啡馆 I2VA 对白，在仓库根目录运行：
@@ -114,7 +172,7 @@ python -m examples_merak.aigc.sol_h3.generate \
 
 相对下文已上传的 schema 8 包，LTX 新增 `audio_mode` 输入和两套音频条件表，
 每个包的 LTX external data 增加约 1.14 GiB；DiT 主矩阵权重共用，不是两张完整 LTX 图。
-默认 `frozen` 保留原冻结策略，显式 `joint` 提供原联合策略；H3、VAE 和外部 mask 接口沿用原包。
+非 Ref2VA 模式保留包默认的 `frozen`，Ref2VA 默认使用 `joint`；H3、VAE 和外部 mask 接口沿用原包。
 下面的 Artifactory 链接仍对应固定冻结音频的 schema 8 包，不能切换这两个策略。
 
 实际权重的固定 H3 输出回放共六条：5 秒精灵 Ref2VA、5 秒和 15 秒咖啡馆 I2VA，
@@ -263,7 +321,8 @@ SDK 必须支持 `conv3d_to_conv2d_fastpath`；否则导出在加载组件前拒
 I2VA/L2VA/FL2VA 分别编码首图、末图、两图；T2VA/Ref2VA 不把参考素材解释为目标首尾帧。
 5 秒／15 秒 LTX DiT 分别使用 17136／47376 个视频 token，包含一帧 guide，使用 `first_role:int32[1]` 与
 `video_valid_length:int32[1]`。首图固定首1008个目标token；末图追加1008个guide，参与attention，
-三步结束后丢弃。无末图时有效长度分别为 16128／46368，dummy guide 保持零且不能影响目标或音频。
+三步结束后丢弃。没有末图且未启用 Ref2VA 中段 guide 时，有效长度分别为 16128／46368，
+dummy guide 保持零且不能影响目标或音频。
 目标最后latent仍参与更新，不能用末图覆盖它所对应的八帧。
 
 `enabled:false` 构建不带图像 encoder 的 16128／46368-token 目标档，保留原生首 target marker；

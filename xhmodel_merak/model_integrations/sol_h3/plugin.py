@@ -115,8 +115,15 @@ def register(catalog):
                     "ltx_audio_mode": {
                         "type": "string", "enum": ["joint", "frozen"],
                         "description": (
-                            "LTX audio policy; schema-9 bundles default to frozen, "
-                            "older bundles retain their fixed policy"
+                            "LTX audio policy; omission selects joint for Ref2VA and the bundle default "
+                            "for other modes; fixed-policy bundles only support their own mode"
+                        ),
+                    },
+                    "ltx_guide_policy": {
+                        "type": "string", "enum": ["midguide", "none"],
+                        "description": (
+                            "LTX guide policy; omission selects midguide for Ref2VA and the existing guide "
+                            "behavior for other modes; none disables the Ref2VA midguide"
                         ),
                     },
                     "output_path": {"type": "string", "minLength": 1, "default": "sol_h3.mp4"},

@@ -16,7 +16,11 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--ltx-audio-mode", choices=("joint", "frozen"),
-        help="LTX audio policy (new bundles default to frozen)",
+        help="LTX audio policy (Ref2VA defaults to joint; other modes use the bundle default)",
+    )
+    parser.add_argument(
+        "--ltx-guide-policy", choices=("midguide", "none"),
+        help="LTX guide policy (Ref2VA defaults to midguide; none runs without a midguide)",
     )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--image", help="First keyframe")
@@ -24,8 +28,9 @@ def main():
     parser.add_argument("--references", help='JSON array of ordered {"kind", "path"} references')
     args = parser.parse_args()
     inputs = {"prompt": args.prompt, "seed": args.seed, "output_path": args.output}
-    if args.ltx_audio_mode is not None:
-        inputs["ltx_audio_mode"] = args.ltx_audio_mode
+    for name in ("ltx_audio_mode", "ltx_guide_policy"):
+        if getattr(args, name) is not None:
+            inputs[name] = getattr(args, name)
     for name in ("image", "last_image"):
         if getattr(args, name) is not None:
             inputs[name] = getattr(args, name)

@@ -299,6 +299,9 @@ def bundle_fixture(root):
 
 
 def test_independent_public_plan_materializes_sefp8_static_workflow(tmp_path):
+    from xhmodel_merak.model_build import describe_model
+    from xhmodel_merak.model_inference.inputs import validate_inputs
+
     source = tmp_path / "source"
     source.mkdir()
     source_fixture(source)
@@ -329,6 +332,51 @@ def test_independent_public_plan_materializes_sefp8_static_workflow(tmp_path):
     assert config["h3_precision"]["rms_norm_mode"] == "plain"
     assert config["h3_precision"]["rms_norm_eps"] == 2.0**-24
     assert get_recipe("sol-h3").inference_adapter != get_recipe("minimax-h3-fl2va").inference_adapter
+    recipe = get_recipe("sol-h3")
+    schema = describe_model("sol-h3", full=True)["input_schema"]["properties"]
+    assert schema["ltx_guide_policy"]["type"] == "string"
+    assert schema["ltx_guide_policy"]["enum"] == ["midguide", "none"]
+    assert schema["ltx_audio_mode"]["type"] == "string"
+    assert schema["ltx_audio_mode"]["enum"] == ["joint", "frozen"]
+    automatic = validate_inputs(recipe, {"prompt": "A scene"})
+    assert "ltx_guide_policy" not in automatic and "ltx_audio_mode" not in automatic
+    for policy in ("midguide", "none"):
+        values = validate_inputs(recipe, {"prompt": "A scene", "ltx_guide_policy": policy})
+        assert values["ltx_guide_policy"] == policy
+    for mode in ("joint", "frozen"):
+        assert validate_inputs(recipe, {"prompt": "A scene", "ltx_audio_mode": mode})["ltx_audio_mode"] == mode
+    for field, value in (("ltx_guide_policy", "auto"), ("ltx_guide_policy", 1), ("ltx_guide_policy", None),
+                         ("ltx_audio_mode", "auto"), ("ltx_audio_mode", None)):
+        with pytest.raises(ModelError, match=field):
+            validate_inputs(recipe, {"prompt": "A scene", field: value})
+
+
+def test_cli_forwards_policies_and_omits_automatic_defaults(monkeypatch, capsys):
+    import sys
+
+    from examples_merak.aigc.sol_h3 import generate
+    from xhmodel_merak.model_inference.inputs import validate_inputs
+
+    captured = {}
+
+    def inference_model(**kwargs):
+        captured.update(kwargs)
+        validate_inputs(get_recipe("sol-h3"), kwargs["inputs"])
+        return SimpleNamespace(to_dict=lambda: {"output_path": "out.mp4"})
+
+    monkeypatch.setattr(generate, "inference_model", inference_model)
+    for flags, expected in (
+        ([], {}),
+        (["--ltx-guide-policy", "midguide"], {"ltx_guide_policy": "midguide"}),
+        (["--ltx-guide-policy", "none", "--ltx-audio-mode", "frozen"],
+         {"ltx_guide_policy": "none", "ltx_audio_mode": "frozen"}),
+    ):
+        monkeypatch.setattr(
+            sys, "argv", ["generate", "--artifact-dir", "bundle", "--prompt", "A scene", "--output", "out.mp4", *flags]
+        )
+        generate.main()
+        assert captured["inputs"] == {"prompt": "A scene", "seed": 42, "output_path": "out.mp4", **expected}
+        assert '"output_path": "out.mp4"' in capsys.readouterr().out
 
 
 def test_unsafe_rms_is_rejected_even_when_its_interface_is_fp16(tmp_path):
