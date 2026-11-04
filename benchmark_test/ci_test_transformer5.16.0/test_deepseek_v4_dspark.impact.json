@@ -3,6 +3,7 @@
   "rules": [{
     "id": "deepseek-v4-dspark",
     "patterns": [
+    "benchmark_test/ci_test_transformer5.16.0/_small_model_threads.py",
     "xhmodel_merak/model_integrations/deepseek_v4/**",
     "configs_merak/workflows/xh2a/llm_models/deepseek_v4/flash_0731/*dspark*",
     "xhmodel_merak/xh_llm/models/deepseek_v4/workflow.py",

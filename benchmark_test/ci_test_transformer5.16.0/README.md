@@ -256,6 +256,34 @@ avoid repeated large-model setup, redundant cases and a Cartesian product of
 unrelated dimensions. Full coverage means the changed contracts are exercised,
 not that every model size is exported.
 
+The focused DeepSeek-V4 DSpark and FLUX 3 modules cap PyTorch CPU execution at
+four threads and restore the caller's setting at module teardown. Separate
+small real-graph contracts from complete publication/runtime coverage:
+
+- DSpark GPU numerical probes and loaded packages use a 64-wide residual model,
+  retaining all three draft layers, two query heads/one KV head, 128-wide latent
+  caches and 64-dimensional partial RoPE. The hybrid target has one SWA, one
+  CSA and one HCA layer. Component probes check all roles at A8, including the
+  draft's W4 routed experts. W4/W5/W8 shared-head bundles use W8A8
+  bodies and retain 128-wide residuals to exercise two G64 weight groups.
+  Configuration checks cover the A8 routing for every head width; A16 cases
+  are omitted. Loaded SWA/A8 checks greedy sequence equality; loaded hybrid/A8
+  checks clean-prefix replay across the 16/128 cache/compression boundaries.
+  These replace the full architecture/activation Cartesian product. The
+  longer native reference cases and small boundary/error matrices stay intact.
+- FLUX checks Linear/FlashAttention and Conv/large-head attention precision on
+  small real graphs at W8A8 only. The DiT probe retains
+  the large-residual overflow trigger; legacy/FX deployment interpreters must
+  agree and remain finite. Native graph equivalence stays in the CPU cases,
+  separately from quantization accuracy. A single W8A8 pipeline owns reuse, relocation,
+  single/dual/eight-reference geometry, Golden and repeatability. The unified
+  Flux case independently checks source-independent W8A8 inference in a fresh
+  process. W8A16 and W16 cases are omitted. Valid metadata and invalid Q/K/V/P
+  checks use W8A8.
+  The shared fixture keeps all eight official feature taps through layer 32,
+  two query heads/one KV head and every VAE scale, with 64-wide text residuals
+  and MLPs. VAE attention remains 64-wide for the tested CUDA backend.
+
 Keep PR CI fast: prefer small native models or the block harness for a necessary
 real export. Full-model downloads, re-quantization or golden generation require
 a concrete regression that smaller layers cannot catch; retain the existing

@@ -7,13 +7,17 @@ import pytest
 import torch
 from PIL import Image
 
+from _small_model_threads import small_model_cpu_threads  # noqa: F401
+
 from xhmodel_merak.xh_other_model.models.flux3_klein.capacity import validate_capacity, validate_request
 from xhmodel_merak.xh_other_model.models.flux3_klein.processor import prepare_references
 
 
-@pytest.mark.parametrize("precision,bits", [("w16a16_sefp", 16), ("w8a16_sefp", 16), ("w8a8_sefp", 8)])
+pytestmark = pytest.mark.usefixtures("small_model_cpu_threads")
+
+
 @pytest.mark.parametrize("invalid_part", [None, "q", "k", "v", "p"])
-def test_bundle_attention_precision_uses_current_qkvp_contract(tmp_path, precision, bits, invalid_part):
+def test_bundle_attention_precision_uses_current_qkvp_contract(tmp_path, invalid_part):
     """The current SDK exports Q/K/V/P attributes, without score precision."""
     import json
 
@@ -37,9 +41,9 @@ def test_bundle_attention_precision_uses_current_qkvp_contract(tmp_path, precisi
     }
     graphs = {}
     for role, shapes in ports.items():
-        attributes = {f"{part}_bits": bits for part in ("q", "k", "v", "p")}
+        attributes = {f"{part}_bits": 8 for part in ("q", "k", "v", "p")}
         if role == "denoise" and invalid_part:
-            attributes[f"{invalid_part}_bits"] = 24 - bits
+            attributes[f"{invalid_part}_bits"] = 16
         first = next(iter(shapes))
         node = helper.make_node("FlashAttention", [first] * 3, ["output"], domain="com.houmo", **attributes)
         graph = helper.make_graph(
@@ -57,7 +61,7 @@ def test_bundle_attention_precision_uses_current_qkvp_contract(tmp_path, precisi
         "schema_version": 1,
         "kind": "flux3_klein",
         "model_id": MODEL_ID,
-        "quant_type": precision,
+        "quant_type": "w8a8_sefp",
         "capacity": capacity,
         "graphs": graphs,
         "resources": {name: f"{name}.json" for name in ("source_config", "text_config")},
@@ -163,11 +167,10 @@ def test_dual_reference_default_profiles_and_individual_pixel_budget():
 
     root = Path(__file__).resolve().parents[2]
     profiles = root / "configs_merak/workflows/xh2a/other_models/flux3_klein"
-    for precision in ("w16", "w8a16", "w8"):
-        capacity = validate_build_config(
-            yaml.safe_load((profiles / f"flux3_klein_1mp_{precision}.yaml").read_text())["export"]
-        )
-        assert capacity == validate_capacity({})
+    capacity = validate_build_config(
+        yaml.safe_load((profiles / "flux3_klein_1mp_w8.yaml").read_text())["export"]
+    )
+    assert capacity == validate_capacity({})
     originals = [Image.new("RGB", size, color) for size, color in [((2048, 2048), "red"), ((2400, 1600), "blue")]]
     prepared, crop = prepare_references(
         originals,
@@ -342,7 +345,7 @@ def test_masked_norm_real_hmonnx_export(tmp_path):
         inputs,
         output,
         ["value", "mask", "fraction"],
-        create_quant_config(QuantScheme(target_device="XH2a", quant_type="w16a16_sefp")),
+        create_quant_config(QuantScheme(target_device="XH2a", quant_type="w8a8_sefp")),
         device="cuda",
     )
     session = HMONNXInferenceV2(str(output), session_config=HMONNXInferenceConfig(exec_devices=["cuda:0"]))
@@ -366,6 +369,22 @@ def test_native_bf16_timestep_embedding_rounding():
     torch.testing.assert_close(time_features(values, dtype=torch.bfloat16), timestep_embedding(values), atol=0, rtol=0)
 
 
+def _assert_exported_precision(path):
+    import onnx
+
+    nodes = onnx.load(str(path), load_external_data=False).graph.node
+    assert any(node.op_type in {"Linear", "Conv2d"} for node in nodes)
+    assert any(node.op_type == "FlashAttention" for node in nodes)
+    for node in nodes:
+        attributes = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
+        if node.op_type in {"Linear", "Conv2d"}:
+            assert attributes["hmfp_weight_man_bit"] == attributes["hmfp_act_man_bit"] == 8
+            assert attributes["hmfp_weight_nshare"] == attributes["hmfp_act_nshare"] == 64
+            assert attributes["mode"] == b"sefp"
+        elif node.op_type == "FlashAttention":
+            assert all(attributes[f"{part}_bits"] == 8 for part in ("q", "k", "v", "p"))
+
+
 def test_vae_512_head_padding_real_hmonnx(tmp_path):
     from xhmodel_merak.xh_other_model.models.flux3_klein.export import export_graph
     from xhmodel_merak.xh_other_model.models.flux3_klein.native_autoencoder import AttnBlock
@@ -373,6 +392,7 @@ def test_vae_512_head_padding_real_hmonnx(tmp_path):
     from xhquant.api import QuantScheme, create_quant_config
     from xhquant.xhonnxruntime.hmonnx_inference_v2 import HMONNXInferenceConfig, HMONNXInferenceV2
 
+    precision = "w8a8_sefp"
     torch.manual_seed(41)
     source = AttnBlock(512).eval()
     graph = Attention(source).eval()
@@ -389,10 +409,11 @@ def test_vae_512_head_padding_real_hmonnx(tmp_path):
         inputs,
         path,
         ["value", "mask", "fraction", "order", "restore", "length"],
-        create_quant_config(QuantScheme(target_device="XH2a", quant_type="w16a16_sefp")),
+        create_quant_config(QuantScheme(target_device="XH2a", quant_type=precision)),
         device="cuda:0",
         dynamo=False,
     )
+    _assert_exported_precision(path)
     session = HMONNXInferenceV2(str(path), session_config=HMONNXInferenceConfig(exec_devices=["cuda:0"]))
     actual = session(*(x.half().cuda() if x.is_floating_point() else x.cuda() for x in inputs))
     torch.testing.assert_close(actual[:, :, :4, :4].float().cpu(), expected, atol=0.03, rtol=0.03)
@@ -423,30 +444,39 @@ def test_flow_map_real_hmonnx_export(tmp_path):
     # in the real checkpoint. A direct unscaled residual projection saturates.
     text[:, 0, 0] = 20000
     inputs = denoise_inputs(target, reference, text, (32, 32), [(32, 32)], (8, 8, 8), 0.8, 0.6)
+    cases = [inputs, denoise_inputs(target, reference[:, :0], text, (32, 32), [], (8, 8, 8), 0.8, 0.4)]
     path = tmp_path / "dit.onnx"
     export_graph(
         graph,
         inputs,
         path,
         DIT_INPUT_NAMES,
-        create_quant_config(QuantScheme(target_device="XH2a", quant_type="w16a16_sefp")),
+        create_quant_config(QuantScheme(target_device="XH2a", quant_type="w8a8_sefp")),
         device="cuda:0",
     )
+    _assert_exported_precision(path)
+    # The legacy interpreter is an independent deployment reference for the
+    # FX runtime. Native graph equivalence is checked by the CPU cases above;
+    # comparing W8 outputs directly to floats would test quantization accuracy.
+    from xhquant.xhonnxruntime.hmonnx_inference import HMONNXInference as LegacyHMONNXInference
+
+    reference_session = LegacyHMONNXInference(str(path), exec_device="cuda:0").to("cuda:0")
     session = HMONNXInferenceV2(str(path), session_config=HMONNXInferenceConfig(exec_devices=["cuda:0"]))
-    for references in (True, False):
-        current = (
-            inputs if references else denoise_inputs(target, reference[:, :0], text, (32, 32), [], (8, 8, 8), 0.8, 0.4)
-        )
+    for current in cases:
         values = [x.cuda().half() if x.is_floating_point() else x.cuda() for x in current]
-        actual = session(*values)[:, :4].float().cpu()
-        expected = graph(*current)[:, :4]
-        torch.testing.assert_close(actual, expected, atol=0.03, rtol=0.03)
+        with torch.no_grad():
+            assert torch.isfinite(graph(*current)).all()
+            expected = reference_session(*values)
+            actual = session(*values)
+        assert torch.isfinite(expected).all() and torch.isfinite(actual).all()
+        torch.testing.assert_close(actual[:, :4].float().cpu(), expected[:, :4].float().cpu(), atol=0.03, rtol=0.03)
 
 
-@pytest.mark.parametrize("precision", ["w16a16_sefp", "w8a16_sefp", "w8a8_sefp"])
 def test_public_four_graph_build_relocate_generate_edit_and_repeat(
-    tmp_path, monkeypatch, restore_model_initialization_state, precision
+    tmp_path, monkeypatch, restore_model_initialization_state
 ):
+    # One W8A8 run owns publication, geometry/reuse, Golden and repeatability.
+    precision = "w8a8_sefp"
     import json
     import shutil
     from dataclasses import replace
@@ -562,7 +592,7 @@ def test_public_four_graph_build_relocate_generate_edit_and_repeat(
     original = metadata_path.read_text()
     try:
         for field, value in [
-            ("quant_type", "w16a16_sefp" if precision != "w16a16_sefp" else "w8a8_sefp"),
+            ("quant_type", "w16a16_sefp"),
             (
                 "capacity",
                 {
@@ -614,23 +644,22 @@ def test_public_four_graph_build_relocate_generate_edit_and_repeat(
     again, repeated = runtime.generate(**inputs)
     torch.testing.assert_close(initial, repeated, atol=0, rtol=0)
     np.testing.assert_array_equal(np.asarray(again), np.asarray(image))
-    if precision == "w16a16_sefp":
-        from xhmodel_merak.xh_other_model.models.flux3_klein.golden import dump_golden
+    from xhmodel_merak.xh_other_model.models.flux3_klein.golden import dump_golden
 
-        reference_path = tmp_path / "reference.png"
-        edited.save(reference_path)
-        report_path = dump_golden(
-            moved,
-            inputs={**inputs, "steps": 1, "height": 32, "width": 64, "images": [str(reference_path)] * 8},
-        )
-        report = json.loads(Path(report_path).read_text())
-        assert report["complete"] and report["real_reference"]
-        assert len(report["cases"]) == 2
-        assert len(report["cases"][1]["geometry"]["references_hw"]) == 8
-        for path in graphs:
-            for step in (0, 1):
-                dumps = list((path.parent / f"step_{step}").rglob("*.npy"))
-                assert len(dumps) > 10
-        assert not any(path.is_symlink() for path in moved.rglob("*"))
-        after_golden = inference_model(artifact_dir=str(moved), device="cuda:0", inputs=inputs)
-        np.testing.assert_array_equal(after_golden.image, output.image)
+    reference_path = tmp_path / "reference.png"
+    edited.save(reference_path)
+    report_path = dump_golden(
+        moved,
+        inputs={**inputs, "steps": 1, "height": 32, "width": 64, "images": [str(reference_path)] * 8},
+    )
+    report = json.loads(Path(report_path).read_text())
+    assert report["complete"] and report["real_reference"]
+    assert len(report["cases"]) == 2
+    assert len(report["cases"][1]["geometry"]["references_hw"]) == 8
+    for path in graphs:
+        for step in (0, 1):
+            dumps = list((path.parent / f"step_{step}").rglob("*.npy"))
+            assert len(dumps) > 10
+    assert not any(path.is_symlink() for path in moved.rglob("*"))
+    after_golden = inference_model(artifact_dir=str(moved), device="cuda:0", inputs=inputs)
+    np.testing.assert_array_equal(after_golden.image, output.image)

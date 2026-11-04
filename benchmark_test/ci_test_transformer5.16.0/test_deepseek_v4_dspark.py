@@ -6,15 +6,20 @@ import torch
 from torch import nn
 from transformers import DeepseekV4Config, DeepseekV4ForCausalLM
 
+from _small_model_threads import small_model_cpu_threads  # noqa: F401
+
 from xhmodel_merak.xh_llm.models.deepseek_v4.dspark import DSparkContext, DSparkDraft, DSparkMarkov, DSparkSpec
 from xhmodel_merak.xh_llm.models.deepseek_v4.dspark_runtime import DSparkSlidingCache, dspark_attention_mask, sample_dspark
 from xhmodel_merak.xh_llm.models.deepseek_v4.norm import build_xh_rms_norm
 
 
-def _case(device="cpu"):
+pytestmark = pytest.mark.usefixtures("small_model_cpu_threads")
+
+
+def _case(device="cpu", *, hidden_size=128):
     torch.manual_seed(523)
     config = DeepseekV4Config(
-        hidden_size=128, moe_intermediate_size=64, num_hidden_layers=3,
+        hidden_size=hidden_size, moe_intermediate_size=64, num_hidden_layers=3,
         num_attention_heads=2, num_key_value_heads=1, head_dim=128,
         q_lora_rank=64, o_groups=1, o_lora_rank=64, n_routed_experts=2,
         n_shared_experts=1, num_experts_per_tok=1, num_hash_layers=0,
@@ -23,18 +28,18 @@ def _case(device="cpu"):
         vocab_size=64, qk_rope_head_dim=64, max_position_embeddings=64,
     )
     target = DeepseekV4ForCausalLM(config).eval().half().to(device)
-    spec = DSparkSpec(target_layer_ids=(0, 1, 2), hidden_size=128, head_dim=128,
+    spec = DSparkSpec(target_layer_ids=(0, 1, 2), hidden_size=hidden_size, head_dim=128,
                       sliding_window=16, context_chunk_length=8, vocab_size=64,
                       noise_token_id=63, markov_rank=8, max_context_length=256)
     draft = DSparkDraft.from_hf(target, target.lm_head, spec).eval().half().to(device)
-    projection = nn.Linear(384, 128, bias=False).half().to(device)
-    norm = build_xh_rms_norm(128, 1e-6, weight=torch.ones(128, dtype=torch.float16, device=device))
+    projection = nn.Linear(3 * hidden_size, hidden_size, bias=False).half().to(device)
+    norm = build_xh_rms_norm(hidden_size, 1e-6, weight=torch.ones(hidden_size, dtype=torch.float16, device=device))
     context = DSparkContext(projection, norm, list(draft.layers), spec, input_sequence_length=8, position_rope=draft.position_rope).eval().half().to(device)
     context_decode = DSparkContext(projection, norm, list(draft.layers), spec,
                                     input_sequence_length=spec.block_size + 1, position_rope=draft.position_rope).eval().half().to(device)
     markov = DSparkMarkov(torch.randn(64, 8, device=device).half() * .1,
                           torch.randn(64, 8, device=device).half() * .1,
-                          confidence_weight=torch.randn(1, 136, device=device).half() * .1)
+                          confidence_weight=torch.randn(1, hidden_size + spec.markov_rank, device=device).half() * .1)
     return target, spec, draft, context, context_decode, markov
 
 
@@ -145,8 +150,7 @@ def test_target_verify_emits_all_logits_and_ordered_mean_mhc_features():
     assert torch.isfinite(output.logits).all()
 
 
-@pytest.mark.parametrize("activation_bits", [8, 16])
-def test_dspark_target_verify_hmonnx_preserves_all_logits_and_features(tmp_path, activation_bits):
+def test_dspark_target_verify_hmonnx_preserves_all_logits_and_features(tmp_path):
     from xhquant.api import (HMONNXInference, PrecisionMode, ptq_quantize,
                              to_export_hmonnx_from_quanted_graph, to_frontend_graph, to_quant_graph)
     from xhmodel_merak.xh_llm.models.deepseek_v4.cache_abi import DeepSeekV4CacheABI
@@ -154,7 +158,7 @@ def test_dspark_target_verify_hmonnx_preserves_all_logits_and_features(tmp_path,
     from xhmodel_merak.xh_llm.models.deepseek_v4.runtime import DeepSeekV4CacheMixin, DeepSeekV4DataPreprocess
     from xhmodel_merak.xh_llm.models.deepseek_v4.static_cache import DeepSeekV4StaticCacheSpec
 
-    target, spec, _, _, _, _ = _case("cuda:0")
+    target, spec, _, _, _, _ = _case("cuda:0", hidden_size=64)
     model = StaticDeepSeekV4ForCausalLM.from_hf(target, input_sequence_length=6,
         max_context_length=64, auxiliary_layer_ids=(0, 1, 2), return_all_logits=True,
         swa_backing_length=spec.cache_backing_length).half()
@@ -166,12 +170,13 @@ def test_dspark_target_verify_hmonnx_preserves_all_logits_and_features(tmp_path,
     processor = DeepSeekV4DataPreprocess(token_embedding=target.model.embed_tokens,
                                         input_sequence_length=6, cache_mixin=cache).to("cuda:0")
     args = processor({"input_ids": torch.tensor([[1, 2, 3, 4, 5]]), "past_seq_length": 0})
-    graph = to_quant_graph(to_frontend_graph(model, "TorchFX", args), "XH2a", spec.quant_scheme(activation_bits))
+    graph = to_quant_graph(to_frontend_graph(model, "TorchFX", args), "XH2a", spec.quant_scheme(8))
     flat_args = list(args[:-1]) + list(args[-1])
     ptq_quantize(graph, [flat_args], PrecisionMode.ALIGNED, ["cuda:0"], infer_shape=False)
     cache.reset_kv_cache()
     expected = [value.dequantize().clone() for value in graph(*flat_args)]
-    assert expected[0].shape == (1, 6, 64) and expected[-1].shape == (1, 6, 384)
+    assert expected[0].shape == (1, 6, 64)
+    assert expected[-1].shape == (1, 6, 3 * spec.hidden_size)
     cache.reset_kv_cache()
     path = tmp_path / "target_decode.onnx"
     to_export_hmonnx_from_quanted_graph(graph, flat_args, str(path))
@@ -191,6 +196,12 @@ def test_dspark_config_resolves_decode_width_and_one_shared_head(bits):
     assert config.dspark["block_size"] == 5
     scheme = config.quant_scheme.to_dict() if hasattr(config.quant_scheme, "to_dict") else config.quant_scheme
     assert scheme["nodes"]["lm_head"]["quant_type"] == f"w{bits}a8h1_sefp"
+    # Keep DSpark's W4 routed-expert and shared-head format overrides while
+    # running the dense body only at W8A8.
+    routed = DSparkSpec(head_weight_bits=bits).quant_scheme(8)
+    assert routed["quant_type"] == "w8a8h1_sefp"
+    assert routed["nodes_cfg"]["lm_head"]["quant_type"] == f"w{bits}a8h1_sefp"
+    assert routed["ops_cfg"]["MoeBlock"]["w_schema"] == {"bits": 4, "nshare": 64}
     from xhmodel_merak.xh_llm.types import BaseLLMModelConfig
     assert BaseLLMModelConfig.from_dict(config.to_dict()).num_logits_to_keep == 6
 
@@ -275,14 +286,13 @@ def test_dspark_full_greedy_loop_matches_real_target_and_replays_rejected_prefix
 
 
 @pytest.mark.parametrize("component", ["context", "context_decode", "draft", "markov"])
-@pytest.mark.parametrize("quant_type", ["w8a8h1_sefp", "w8a16h1_sefp"])
-def test_dspark_components_hmonnx_export_and_runtime(tmp_path, component, quant_type):
+def test_dspark_components_hmonnx_export_and_runtime(tmp_path, component):
     from xhquant.api import (HMONNXInference, PrecisionMode, ptq_quantize,
                              to_export_hmonnx_from_quanted_graph, to_frontend_graph, to_quant_graph)
     from xhmodel_merak.xh_llm.shared_head import bind_quantized_head, quantized_head
 
     assert torch.cuda.is_available(), "DSpark HMONNX regression requires a GPU"
-    target, spec, draft, context, context_decode, markov = _case("cuda:0")
+    target, spec, draft, context, context_decode, markov = _case("cuda:0", hidden_size=64)
     past = torch.tensor([3], dtype=torch.int32, device="cuda:0")
     cache = DSparkSlidingCache(spec, device="cuda:0")
     for value in cache.caches:
@@ -290,7 +300,7 @@ def test_dspark_components_hmonnx_export_and_runtime(tmp_path, component, quant_
     if component in ("context", "context_decode"):
         length = 8 if component == "context" else 6
         model = context if component == "context" else context_decode
-        args = [torch.randn(1, length, 384, device="cuda:0").half(), past,
+        args = [torch.randn(1, length, 3 * spec.hidden_size, device="cuda:0").half(), past,
                 torch.tensor([length - 1], dtype=torch.int32, device="cuda:0"),
                 *cache.caches]
     elif component == "draft":
@@ -302,8 +312,9 @@ def test_dspark_components_hmonnx_export_and_runtime(tmp_path, component, quant_
                 dspark_attention_mask(spec, 3, device="cuda:0"), *cache.caches]
     else:
         model = markov
-        args = [torch.tensor([[2]], device="cuda:0", dtype=torch.int32), torch.randn(1, 1, 128, device="cuda:0").half()]
-    scheme = spec.quant_scheme(8 if quant_type == "w8a8h1_sefp" else 16)
+        args = [torch.tensor([[2]], device="cuda:0", dtype=torch.int32),
+                torch.randn(1, 1, spec.hidden_size, device="cuda:0").half()]
+    scheme = spec.quant_scheme(8)
     graph = to_quant_graph(to_frontend_graph(model, "TorchFX", args), "XH2a", scheme)
     if component == "draft":
         class TargetHead(nn.Module):
@@ -314,7 +325,7 @@ def test_dspark_components_hmonnx_export_and_runtime(tmp_path, component, quant_
             def forward(self, hidden):
                 return self.lm_head(hidden)
 
-        head_args = [torch.randn(1, 1, 128, device="cuda:0").half()]
+        head_args = [torch.randn(1, 1, spec.hidden_size, device="cuda:0").half()]
         owner = to_quant_graph(to_frontend_graph(TargetHead(target.lm_head), "TorchFX", head_args),
                                "XH2a", {"quant_type": "w5a8h1_sefp"})
         ptq_quantize(owner, [head_args], PrecisionMode.ALIGNED, ["cuda:0"], infer_shape=False)
@@ -371,7 +382,7 @@ def test_dspark_components_hmonnx_export_and_runtime(tmp_path, component, quant_
         loader = MultiHMONNXLoader({"draft": str(path)})
         summary = loader.initializer_pool.summary()
         assert summary["runtime_w4_packed_initializers"] == 9
-        assert summary["runtime_w4_packed_saved_nbytes"] == 3 * 2 * 3 * 128 * 64 // 2
+        assert summary["runtime_w4_packed_saved_nbytes"] == 3 * 2 * 3 * spec.hidden_size * 64 // 2
         packed = HMONNXInferenceV2.from_onnx_graph(str(path), loader.graphs["draft"])
         packed.to("cuda:0")
         for value, (data, valid) in zip(cache.caches, initial, strict=True):
@@ -384,9 +395,8 @@ def test_dspark_components_hmonnx_export_and_runtime(tmp_path, component, quant_
             torch.testing.assert_close(value.float(), reference.float(), rtol=3e-3, atol=3e-3)
 
 
-@pytest.mark.parametrize("activation_bits", [8, 16])
 @pytest.mark.parametrize("head_bits", [4, 5, 8])
-def test_dspark_bundle_exports_sequentially_and_shares_the_target_head(tmp_path, activation_bits, head_bits):
+def test_dspark_bundle_exports_sequentially_and_shares_the_target_head(tmp_path, head_bits):
     import json
     import onnx
     from dataclasses import replace
@@ -396,6 +406,8 @@ def test_dspark_bundle_exports_sequentially_and_shares_the_target_head(tmp_path,
     from xhmodel_merak.xh_llm.models.deepseek_v4.dspark_export import _HeadOwner, export_dspark_components
     from xhmodel_merak.xh_llm.shared_head import quantized_head
 
+    # Retain two G64 groups here for every head width. Other GPU tests use
+    # a narrower residual model. Both body and head activations use A8.
     target, spec, draft, context, _, markov = _case("cuda:0")
     draft.spec = replace(spec, head_weight_bits=head_bits)
     args = [torch.zeros(1, 1, 128, dtype=torch.float16, device="cuda:0")]
@@ -406,11 +418,16 @@ def test_dspark_bundle_exports_sequentially_and_shares_the_target_head(tmp_path,
     to_export_hmonnx_from_quanted_graph(owner, args, str(head_path), save_as_external_data=True)
     result = export_dspark_components(draft, context.main_proj, context.main_norm, markov,
                                        target.model.embed_tokens, tmp_path,
-                                       activation_bits=activation_bits, device="cuda:0",
+                                       activation_bits=8, device="cuda:0",
                                        fixed_target_head=quantized_head(owner))
     assert json.loads((tmp_path / "dspark_runtime_meta_info.json").read_text()) == json.loads(json.dumps(result))
     paths = {name: str(tmp_path / value["path"]) for name, value in result["components"].items()}
     assert len(paths) == 4
+    for path in paths.values():
+        for node in onnx.load(path, load_external_data=False).graph.node:
+            if node.op_type == "Linear":
+                attributes = {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
+                assert attributes["hmfp_act_man_bit"] == 8
     loader = MultiHMONNXLoader({"target_head": str(head_path), **paths})
     summary = loader.initializer_pool.summary()
     assert summary["runtime_w4_packed_initializers"] == (10 if head_bits == 4 else 9)
@@ -429,9 +446,8 @@ def test_dspark_bundle_exports_sequentially_and_shares_the_target_head(tmp_path,
     assert owner_weight is draft_weight
 
 
-@pytest.mark.parametrize("activation_bits", [8, 16])
-@pytest.mark.parametrize("hybrid", [False, True])
-def test_complete_dspark_hmonnx_package_loads_shared_graphs_and_generates(tmp_path, monkeypatch, activation_bits, hybrid):
+@pytest.mark.parametrize("hybrid", [True, False])
+def test_complete_dspark_hmonnx_package_loads_shared_graphs_and_generates(tmp_path, monkeypatch, hybrid):
     import copy
     from types import SimpleNamespace
     from xhquant.api import (PrecisionMode, ptq_quantize, to_export_hmonnx_from_quanted_graph,
@@ -446,18 +462,17 @@ def test_complete_dspark_hmonnx_package_loads_shared_graphs_and_generates(tmp_pa
     from xhmodel_merak.xh_llm.types import KVCacheConfig, LLMModelMeta
 
     monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
-    target, spec, draft, context, _, markov = _case("cuda:0")
+    target, spec, draft, context, _, markov = _case("cuda:0", hidden_size=64)
     draft_config = copy.deepcopy(target.config)
     layer_types = ["sliding_attention"] * 3
     maximum_context = 160 if hybrid else 64
     if hybrid:
         config = copy.deepcopy(target.config)
-        config.num_hidden_layers = 4
         config.max_position_embeddings = maximum_context
-        layer_types = ["sliding_attention", "sliding_attention",
-                       "compressed_sparse_attention", "heavily_compressed_attention"]
+        layer_types = ["sliding_attention", "compressed_sparse_attention", "heavily_compressed_attention"]
+        config.num_hidden_layers = len(layer_types)
         config.layer_types = layer_types
-        config.mlp_layer_types = ["moe"] * 4
+        config.mlp_layer_types = ["moe"] * len(layer_types)
         target = DeepseekV4ForCausalLM(config).half().eval().to("cuda:0")
     torch.manual_seed(524)
     draft_source = DeepseekV4ForCausalLM(draft_config).half().eval().to("cuda:0")
@@ -484,7 +499,7 @@ def test_complete_dspark_hmonnx_package_loads_shared_graphs_and_generates(tmp_pa
         frontends[role] = to_frontend_graph(models[length], "TorchFX", args)
         inputs[role] = list(args[:-1]) + list(args[-1])
     for role in ("prefill", "decode"):
-        graph = to_quant_graph(frontends[role], "XH2a", spec.quant_scheme(activation_bits))
+        graph = to_quant_graph(frontends[role], "XH2a", spec.quant_scheme(8))
         if head is not None:
             bind_quantized_head(graph, head)
         flat = inputs[role]
@@ -495,7 +510,7 @@ def test_complete_dspark_hmonnx_package_loads_shared_graphs_and_generates(tmp_pa
         cache.reset_kv_cache()
         to_export_hmonnx_from_quanted_graph(graph, flat, str(paths[role]), save_as_external_data=True)
     metadata = export_dspark_components(draft, context.main_proj, context.main_norm, markov,
-                                         target.model.embed_tokens, tmp_path, activation_bits=activation_bits,
+                                         target.model.embed_tokens, tmp_path, activation_bits=8,
                                          device="cuda:0", fixed_target_head=head)
     config = SimpleNamespace(max_layers=len(layer_types), context_max_length=maximum_context, prefill_chunk_length=8,
                               num_logits_to_keep=6, batch_size=1, dspark={"block_size": 5})
@@ -522,12 +537,17 @@ def test_complete_dspark_hmonnx_package_loads_shared_graphs_and_generates(tmp_pa
         return logits, features
 
     engine.target_forward = record_target
-    prompt_length, budget = (123, 24) if hybrid else (9, 12)
+    # These prompts put proposal rounds across the HCA/CSA boundary at
+    # 128 or the SWA boundary at 16. Eight output tokens retain multiple
+    # rounds and rejected-prefix replay without repeatedly rebuilding the
+    # same 123-token reference prefix for another sixteen decode steps.
+    prompt_length, budget = (123, 8) if hybrid else (9, 8)
+    assert prompt_length < (128 if hybrid else spec.sliding_window) < prompt_length + budget
     prompt = (torch.arange(prompt_length, device="cuda:0") % (spec.vocab_size - 2) + 1).unsqueeze(0)
     result = engine.generate(prompt, max_new_tokens=budget, temperature=0)
     assert result.shape == (1, prompt_length + budget)
     assert torch.equal(result[:, :prompt_length].to(prompt.device), prompt)
-    assert engine.statistics.rounds > 0
+    assert engine.statistics.rounds >= 2
     engine.target_forward = target_forward
     if hybrid:
         # A8 compressor/attention rounding depends on the target query batch.

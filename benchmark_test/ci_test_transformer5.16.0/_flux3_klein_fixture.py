@@ -36,7 +36,7 @@ def prepare_source(root, monkeypatch):
             axes_dim=[32] * 4,
             theta=10000,
             image_rope_scale=0.5,
-            in_channels=dict(image=128, image_cond=128, text=1024),
+            in_channels=dict(image=128, image_cond=128, text=512),
             out_modes=["image"],
             flow_map=True,
         ),
@@ -61,9 +61,12 @@ def prepare_source(root, monkeypatch):
         text_config = Qwen3VLConfig(
             text_config=dict(
                 vocab_size=64,
-                hidden_size=128,
-                intermediate_size=256,
-                num_hidden_layers=36,
+                # Keep all eight official feature taps through layer 32 and
+                # the two-query/one-KV-head geometry; shrink only residual/MLP
+                # widths. The exported feature width remains eight times this.
+                hidden_size=64,
+                intermediate_size=64,
+                num_hidden_layers=32,
                 num_attention_heads=2,
                 num_key_value_heads=1,
                 head_dim=64,
@@ -74,7 +77,7 @@ def prepare_source(root, monkeypatch):
                 hidden_size=32,
                 intermediate_size=64,
                 num_heads=2,
-                out_hidden_size=128,
+                out_hidden_size=64,
                 deepstack_visual_indexes=[0, 1, 2],
             ),
         )

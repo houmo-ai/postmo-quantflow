@@ -1,6 +1,7 @@
 {
   "version": 1,
   "rules": [{"id": "flux3-klein-complete-pipeline", "patterns": [
+    "benchmark_test/ci_test_transformer5.16.0/_small_model_threads.py",
     "xhmodel_merak/xh_other_model/models/flux3_klein/**",
     "xhmodel_merak/model_integrations/flux3_klein/**",
     "configs_merak/workflows/xh2a/other_models/flux3_klein/**",
