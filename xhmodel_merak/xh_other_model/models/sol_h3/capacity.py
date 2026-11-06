@@ -9,6 +9,23 @@ from math import ceil, isfinite, lcm, sqrt
 MODES = ("t2va", "i2va", "l2va", "fl2va", "ref2va")
 
 
+def dense_profile(size, seconds, mode=None, *, portrait=False):
+    """Name a static canvas, retaining the original height-based legacy form."""
+    edge = size[1] if portrait else size[0]
+    direction = "-portrait" if portrait else ""
+    prefix = f"{mode}-" if mode else ""
+    return f"{prefix}dense-{edge}p-{edge * 2}p{direction}-{seconds}s"
+
+
+def matches_dense_profile(profile, size, seconds, mode, *, require_mode=False):
+    """Accept legacy profiles and the explicit short-edge portrait form."""
+    modes = (mode,) if require_mode else (None, mode)
+    names = {dense_profile(size, seconds, value) for value in modes}
+    if size[0] > size[1]:
+        names.update(dense_profile(size, seconds, value, portrait=True) for value in modes)
+    return isinstance(profile, str) and profile in names
+
+
 def _visual_gears(capacities):
     """Merge small Sol-H3 gears while retaining larger native/custom routes."""
     values = sorted({capacity for capacity in capacities if capacity})
@@ -31,7 +48,8 @@ def mode_configs(config):
         value = deepcopy(config)
         value["mode"] = mode
         size = value["draft_size"]
-        value["profile"] = ("" if mode == "t2va" else mode + "-") + f"dense-{size[0]}p-{size[0] * 2}p-{seconds}s"
+        portrait = size[0] > size[1] and config.get("profile") == dense_profile(size, seconds, "all", portrait=True)
+        value["profile"] = dense_profile(size, seconds, None if mode == "t2va" else mode, portrait=portrait)
         if "calibration_inputs" in value:
             inventory = value.pop("calibration_inputs")
             if not isinstance(inventory, dict) or any(key not in MODES for key in inventory):

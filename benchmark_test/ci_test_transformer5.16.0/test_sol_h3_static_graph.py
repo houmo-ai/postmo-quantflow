@@ -124,19 +124,20 @@ def test_invalid_static_scale_is_rejected(value):
         H3PrecisionPolicy(residual_scale=value)
 
 
-@pytest.mark.parametrize("anchors", [("first", "last")])
-def test_keyframe_layout_roles_and_positions(anchors):
+@pytest.mark.parametrize("size", [(32, 64), (64, 32)])
+def test_keyframe_layout_roles_and_positions(size):
     from diffusers.modular_pipelines.minimax_h3.before_denoise import MiniMaxH3PrepareLayoutStep
 
     from xhmodel_merak.xh_other_model.models.sol_h3.host import conditioned_h3_layout
 
+    anchors = ("first", "last")
     text_tags = torch.tensor([1, 0, 1])
-    positions, roles, cv, ca = conditioned_h3_layout(text_tags, size=(32, 64), anchors=anchors)
+    positions, roles, cv, ca = conditioned_h3_layout(text_tags, size=size, anchors=anchors)
     native = MiniMaxH3PrepareLayoutStep.build_packed_sequence(
         text_tags,
         37,
-        2,
-        4,
+        size[0] // 16,
+        size[1] // 16,
         207,
         (1, 2, 2),
         2,

@@ -26,6 +26,8 @@ _QUANT_REQUIREMENTS = (*GPTQ_REQUIREMENTS, "torchao==0.17.0")
 _PROFILE_WORKFLOWS = (
     ("all-dense-384p-768p-5s", _WORKFLOWS + "sol_h3_all_384p_768p_w4.yaml"),
     ("all-dense-384p-768p-15s", _WORKFLOWS + "sol_h3_all_384p_768p_15s_w4.yaml"),
+    ("all-dense-384p-768p-portrait-5s", _WORKFLOWS + "sol_h3_all_384p_768p_portrait_w4.yaml"),
+    ("all-dense-384p-768p-portrait-15s", _WORKFLOWS + "sol_h3_all_384p_768p_portrait_15s_w4.yaml"),
 )
 __all__ = ("PROVIDER_ID", "COMPONENTS", "register")
 

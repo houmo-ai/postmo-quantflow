@@ -6,6 +6,8 @@
 
 默认公开档位 `all-dense-384p-768p-5s` 在一个包中支持五种模式：672×384、124 帧 H3 粗生成，随后 1344×768、121 帧 LTX 精修，24 FPS。
 `all-dense-384p-768p-15s` 档位另导出一套五模式包，H3/LTX 帧数为 `362/361`。
+另有 `all-dense-384p-768p-portrait-5s` 和 `all-dense-384p-768p-portrait-15s`
+竖屏档位，H3 画布为 384×672，LTX 输出为 768×1344（宽×高），帧数分别与对应横屏档位相同。
 当前包使用 schema 9，支持运行时选择 LTX 音频策略；模型位置及本轮验证见下文。
 论文宣传中的 360p/720p 对应这里使用的作者对齐尺寸。注意当前 Merak 配置的两阶段 attention 都是 dense；
 4/3 步蒸馏权重、AdaLN 折叠、逐时间步精确文本 KV 缓存和数值补偿已接入，本次发布仅开放 Dense。
@@ -239,7 +241,7 @@ H3 的 4 步、LTX 的 3 步、生成尺寸、帧数及首尾帧 guide 机制保
 图像／视频的 Qwen token 另计入容量规划；五模式包的 base 文本容量为 1792、ref 为 3328，
 公共 Qwen cache 容量为 3328。不要把它们与 1024-token 用户文本预算混为一项。
 增强后的随库图像、视频和原音频已通过两档五模式的真实 Host 预处理，视觉时间组均能放入 1280 档。
-当前两个公开 YAML 分别为 `sol_h3_all_384p_768p_w4.yaml`（5s）和
+当时的横屏 YAML 分别为 `sol_h3_all_384p_768p_w4.yaml`（5s）和
 `sol_h3_all_384p_768p_15s_w4.yaml`（15s）；单模式、W8 和 2s 的历史 Sol-H3 YAML 已移除，
 Native H3 的独立配置归入 `configs_merak/workflows/xh2a/other_models/h3/`。
 本轮配置与示例整理的选中 CI 共 1034 项通过，包含 Native H3 full／LoRA 和 Sol-H3 full
@@ -666,6 +668,21 @@ CUDA_VISIBLE_DEVICES=0 python -m examples_merak.aigc.sol_h3.build \
 默认构建 5 秒包；增加 `--profile all-dense-384p-768p-15s` 可构建 15 秒包。
 构建前需准备上述权重、checkpoint 和下文的校准媒体索引。
 
+构建竖屏包时分别指定 profile 和输出目录，例如：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m examples_merak.aigc.sol_h3.build \
+  --model-dir /models/sol-h3-inventory --quant-checkpoint /models/qwen3-vl-autoround-w4g64 \
+  --profile all-dense-384p-768p-portrait-5s --output-dir /outputs/sol-h3-portrait-5s
+CUDA_VISIBLE_DEVICES=0 python -m examples_merak.aigc.sol_h3.build \
+  --model-dir /models/sol-h3-inventory --quant-checkpoint /models/qwen3-vl-autoround-w4g64 \
+  --profile all-dense-384p-768p-portrait-15s --output-dir /outputs/sol-h3-portrait-15s
+```
+
+竖屏首尾条件图片经 EXIF 方向修正后至少为 768×1344（宽×高）；下文横屏示例的图片不满足此要求。
+横屏包不能通过交换输出宽高当作竖屏包使用，应选择对应竖屏 profile 重新导出。
+自动产物名不区分时长或方向，构建多个档位时应分别指定 `output_dir`；已有目录不会被覆盖。
+
 ### 五模式推理示例
 
 从仓库根目录运行。先将 `ARTIFACT_DIR` 改为当前代码导出的五模式包；
@@ -868,12 +885,14 @@ export:
 
 ## 模式、输入上限与 YAML 选择
 
-unified API 提供两种时长的五模式共用包：
+unified API 提供横竖屏、两种时长的五模式共用包：
 
 | 模式 | `build_model(profile=...)` | 推理媒体输入 |
 | --- | --- | --- |
 | 五模式共包 | `all-dense-384p-768p-5s`（默认） | 按下述媒体输入自动选择 |
 | 五模式共包 | `all-dense-384p-768p-15s` | 15 秒输出，按下述媒体输入自动选择 |
+| 竖屏五模式共包 | `all-dense-384p-768p-portrait-5s` | 5 秒输出，按下述媒体输入自动选择 |
+| 竖屏五模式共包 | `all-dense-384p-768p-portrait-15s` | 15 秒输出，按下述媒体输入自动选择 |
 
 | 推理模式 | 媒体输入 |
 | --- | --- |
@@ -889,9 +908,10 @@ unified API 提供两种时长的五模式共用包：
 视频自带音轨不占独立音频数量。图片按原始宽高比选择最接近的尺寸，直接缩放到
 `384×672`、`448×672`、`672×448`、`512×512` 四档之一；视频直接缩放到 `384×672`。
 输入与选中档位的宽高比不一致时会有拉伸，宽高比超出 1:4 至 4:1 的输入会报错。
-参考媒体最大时长独立于输出时长，两个档位均可输入完整 5 秒参考视频。
-在本地 checkpoint/tokenizer 下，公共 Qwen KV 规划为 3328，5 秒 base/ref 的五角色 H3
-静态长度分别为 12288/23552；替换 processor 后应重新规划。
+竖屏包额外提供 `672×384`（高×宽）参考图档，参考视频固定缩放到该竖屏尺寸。
+参考媒体最大时长独立于输出时长，各档位均可输入完整 5 秒参考视频。
+在当前本地 checkpoint/tokenizer 下，横竖屏包的公共 Qwen KV 均为 3328；5 秒 base/ref 的
+五角色 H3 静态长度分别为 12288/23040，15 秒为 30720/41472。替换 processor 后应重新规划。
 
 默认不覆盖 Qwen processor 的像素预算。本地官方 checkpoint 的 image `longest_edge` 为
 16777216，video 为 25165824；修改模型来源后以其实际 processor 配置为准。

@@ -134,7 +134,7 @@ def read_metadata(root):
     meta = json.loads(artifact_path(root, "runtime_meta_info.json").read_text())
     if meta.get("schema_version") == 5 or (meta.get("schema_version") in (8, 9) and meta.get("mode") == "all"):
         from .bundle import mode_metadata
-        from .capacity import MODES
+        from .capacity import MODES, matches_dense_profile
         from .duration import duration_gear
 
         size = meta.get("draft_size", [])
@@ -142,7 +142,7 @@ def read_metadata(root):
         if (
             meta.get("mode") != "all"
             or len(size) != 2
-            or meta.get("profile") != f"all-dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s"
+            or not matches_dense_profile(meta.get("profile"), size, gear.seconds, "all", require_mode=True)
         ):
             raise ValueError("unified Sol-H3 requires a five-mode profile")
         audits = {}
@@ -245,17 +245,15 @@ def _validate_metadata(root, meta, *, audits=None):
     if meta.get("draft_attention", "dense") != "dense" or meta.get("refiner_attention", "dense") != "dense":
         raise ValueError("this release supports only Dense Sol-H3")
     gear = duration_gear(meta.get("draft_frames"), meta.get("refiner_frames"), meta.get("fps"))
+    from .capacity import matches_dense_profile
+
     size = meta.get("draft_size")
     if (
         not isinstance(size, list)
         or len(size) != 2
         or any(type(n) is not int or n <= 0 or n % 32 for n in size)
         or meta.get("refiner_size") != [n * 2 for n in size]
-        or meta.get("profile")
-        not in (
-            f"dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s",
-            f"{meta.get('mode', 't2va')}-dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s",
-        )
+        or not matches_dense_profile(meta.get("profile"), size, gear.seconds, meta.get("mode", "t2va"))
     ):
         raise ValueError("unexpected Sol-H3 deployment canvas")
     role_layout = _validate_role_layout(meta)

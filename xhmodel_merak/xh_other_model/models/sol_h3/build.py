@@ -36,7 +36,7 @@ def _example_reference_moments(shape, geometry, *, seed):
 
 def validate_build_config(config):
     cfg = deepcopy(dict(config))
-    from .capacity import MODES
+    from .capacity import MODES, matches_dense_profile
     from .duration import duration_gear
 
     cfg.setdefault("norm_fp16", True)
@@ -95,11 +95,7 @@ def validate_build_config(config):
         or len(size) != 2
         or any(type(n) is not int or n <= 0 or n % 32 for n in size)
         or cfg.get("refiner_size") != [n * 2 for n in size]
-        or cfg.get("profile")
-        not in (
-            f"dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s",
-            f"{cfg.get('mode', 't2va')}-dense-{size[0]}p-{size[0] * 2}p-{gear.seconds}s",
-        )
+        or not matches_dense_profile(cfg.get("profile"), size, gear.seconds, cfg.get("mode", "t2va"))
     ):
         raise ValueError("Sol-H3 static canvases must be aligned to 32 with a fixed x2 refiner")
     layers, capacity = cfg.get("text_layers"), cfg.get("text_capacity")

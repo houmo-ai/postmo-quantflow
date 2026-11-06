@@ -126,6 +126,21 @@ def test_compact_reference_budget_is_independent_of_target_duration(components, 
     assert video_size(1080, 1920, config["references"]["video"]["vae_size"]) == (384, 672)
 
 
+@pytest.mark.parametrize("suffix", ["", "_15s"])
+def test_portrait_and_landscape_workflows_plan_equal_capacities(components, suffix):
+    from pathlib import Path
+
+    import yaml
+
+    workflows = Path(__file__).resolve().parents[2] / "configs_merak/workflows/xh2a/other_models/sol_h3"
+    plans = []
+    for orientation in ("", "_portrait"):
+        path = workflows / f"sol_h3_all_384p_768p{orientation}{suffix}_w4.yaml"
+        config = yaml.safe_load(path.read_text())["export"]
+        plans.append(plan_unified_capacities(config, **components))
+    assert plans[0] == plans[1]
+
+
 def test_native_rounding_geometries_and_processor_override_are_shared(components):
     from diffusers.modular_pipelines.minimax_h3.modular_pipeline import resolve_canvas_size
 

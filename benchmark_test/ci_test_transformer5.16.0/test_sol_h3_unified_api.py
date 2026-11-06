@@ -68,31 +68,39 @@ def test_unified_mode_views_bind_native_weights_without_mutating_shared_inventor
     assert json.dumps(unified_mode_metadata, sort_keys=True) == before
 
 
-@pytest.mark.parametrize("field,size", [("image", (63, 32)), ("last_image", (64, 31))])
-def test_low_resolution_keyframes_fail_before_model_loading(tmp_path, unified_mode_metadata, field, size):
+@pytest.mark.parametrize(
+    "canvas,field,size",
+    [
+        ((32, 64), "image", (63, 32)),
+        ((32, 64), "last_image", (64, 31)),
+        ((64, 32), "image", (31, 64)),
+        ((64, 32), "last_image", (32, 63)),
+    ],
+)
+def test_low_resolution_keyframes_fail_before_model_loading(tmp_path, unified_mode_metadata, canvas, field, size):
     import torch
     from PIL import Image
 
     from xhmodel_merak.xh_other_model.models.sol_h3.ltx_keyframes import validate_keyframe_resolution
     from xhmodel_merak.xh_other_model.models.sol_h3.runtime import SolH3Runtime
 
-    rotated = Image.new("RGB", (32, 64))
+    rotated = Image.new("RGB", canvas)
     rotated.getexif()[274] = 6
     rotated.save(tmp_path / "rotated.png", exif=rotated.getexif())
-    validate_keyframe_resolution(tmp_path / "rotated.png", (32, 64))
+    validate_keyframe_resolution(tmp_path / "rotated.png", canvas)
     Image.new("RGB", size).save(tmp_path / "low_resolution.png")
     runtime = object.__new__(SolH3Runtime)
     runtime.device, runtime.sessions = torch.device("cuda:0"), {}
     runtime.bundle_meta = unified_mode_metadata
     runtime.bundle_meta.update(
-        schema_version=8, ltx_audio_frozen=True, refiner_size=[32, 64],
+        schema_version=8, ltx_audio_frozen=True, refiner_size=list(canvas),
         ltx_reference_conditioning={"enabled": True, "require_native_resolution": True},
     )
     runtime.meta = runtime.bundle_meta
     runtime.close = runtime.sessions.clear
     runtime.condition = lambda *args, **kwargs: pytest.fail("conditioning loaded before keyframe validation")
     runtime.invoke = lambda *args, **kwargs: pytest.fail("model loaded before keyframe validation")
-    with pytest.raises(ValueError, match="requires at least 64x32"):
+    with pytest.raises(ValueError, match=f"requires at least {canvas[1]}x{canvas[0]}"):
         runtime.generate("A person in a cafe", **{field: str(tmp_path / "low_resolution.png")})
     assert runtime.sessions == {}
 
@@ -117,11 +125,13 @@ def test_unified_mode_views_reject_incomplete_or_cross_bound_branches(unified_mo
 
 
 @pytest.mark.parametrize("field", ["text_capacity", "dit_capacity", "root_text"])
-def test_unified_metadata_rejects_root_capacity_drift(tmp_path, unified_mode_metadata, field):
+@pytest.mark.parametrize("portrait", [False, True])
+def test_unified_metadata_rejects_root_capacity_drift(tmp_path, unified_mode_metadata, field, portrait):
     meta = unified_mode_metadata
     meta.update(
-        schema_version=5, draft_size=[384, 672], draft_frames=124, refiner_frames=121, fps=24,
-        profile="all-dense-384p-768p-5s", text_capacity=512,
+        schema_version=5, draft_size=[672, 384] if portrait else [384, 672],
+        draft_frames=124, refiner_frames=121, fps=24,
+        profile="all-dense-384p-768p-portrait-5s" if portrait else "all-dense-384p-768p-5s", text_capacity=512,
     )
     for profile in meta["mode_profiles"].values():
         profile["capacity_plan"].update(
@@ -426,14 +436,46 @@ def test_missing_refiner_or_path_escape_is_rejected(tmp_path):
         read_metadata(tmp_path)
 
 
-def test_public_duration_profiles_select_unified_workflows(tmp_path):
+@pytest.mark.parametrize("seconds,frames", [(5, (124, 121)), (15, (362, 361))])
+def test_portrait_metadata_keeps_direction_and_legacy_compatibility(tmp_path, seconds, frames):
+    meta = bundle_fixture(tmp_path)
+    meta.update(
+        draft_size=[672, 384], refiner_size=[1344, 768],
+        draft_frames=frames[0], refiner_frames=frames[1],
+    )
+    path = tmp_path / "runtime_meta_info.json"
+    for profile in (f"dense-384p-768p-portrait-{seconds}s", f"dense-672p-1344p-{seconds}s"):
+        meta["profile"] = profile
+        path.write_text(json.dumps(meta))
+        assert read_metadata(tmp_path)["profile"] == profile
+    meta["profile"] = f"dense-384p-768p-{seconds}s"
+    path.write_text(json.dumps(meta))
+    with pytest.raises(ValueError, match="deployment canvas"):
+        read_metadata(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "profile,draft_size,frames,portrait",
+    [
+        ("all-dense-384p-768p-5s", [384, 672], (124, 121), False),
+        ("all-dense-384p-768p-15s", [384, 672], (362, 361), False),
+        ("all-dense-384p-768p-portrait-5s", [672, 384], (124, 121), True),
+        ("all-dense-384p-768p-portrait-15s", [672, 384], (362, 361), True),
+    ],
+)
+def test_public_duration_profiles_select_unified_workflows(tmp_path, profile, draft_size, frames, portrait):
+    from xhmodel_merak.xh_other_model.models.sol_h3.capacity import mode_configs
+    from xhmodel_merak.xh_other_model.models.sol_h3.reference_geometry import image_size
+
     recipe = get_recipe("sol-h3")
-    assert recipe.profiles == ("all-dense-384p-768p-5s", "all-dense-384p-768p-15s")
+    assert recipe.profiles == (
+        "all-dense-384p-768p-5s", "all-dense-384p-768p-15s",
+        "all-dense-384p-768p-portrait-5s", "all-dense-384p-768p-portrait-15s",
+    )
     assert recipe.default_profile == recipe.profiles[0]
     source = tmp_path / "source"
     source.mkdir()
     source_fixture(source)
-    profile = recipe.profiles[1]
     plan = resolve_build_plan(
         model_id="sol-h3",
         model_dir=str(source),
@@ -446,7 +488,18 @@ def test_public_duration_profiles_select_unified_workflows(tmp_path):
     cfg = validate_build_config(yaml.safe_load(destination.read_text())["export"])
     assert plan.variant == "full"
     assert cfg["mode"] == "all" and cfg["profile"] == profile
-    assert (cfg["draft_frames"], cfg["refiner_frames"]) == (362, 361)
+    assert (cfg["draft_frames"], cfg["refiner_frames"]) == frames
+    assert cfg["draft_size"] == draft_size
+    assert cfg["refiner_size"] == [2 * dimension for dimension in draft_size]
+    assert cfg["video_tile"] == ([128, 768, 448] if portrait else [128, 448, 768])
+    for mode, mode_cfg in mode_configs(cfg).items():
+        assert ("-portrait-" in mode_cfg["profile"]) is portrait
+        assert validate_build_config(mode_cfg)["mode"] == mode
+    wrong_profile = profile.replace("-portrait-", "-") if portrait else profile.replace("-5s", "-portrait-5s").replace(
+        "-15s", "-portrait-15s"
+    )
+    with pytest.raises(ValueError, match="static canvases"):
+        validate_build_config({**cfg, "profile": wrong_profile})
     assert cfg["ltx_reference_conditioning"]["require_native_resolution"] is True
     assert cfg["conditioner_quant_type"] == "w4a8h0_ssfp"
     assert cfg["prompt"]["max_tokens"] == 1024
@@ -454,8 +507,19 @@ def test_public_duration_profiles_select_unified_workflows(tmp_path):
     assert "image_max_pixels" not in cfg["qwen3_vl"]
     assert "video_max_pixels" not in cfg["qwen3_vl"]
     assert cfg["references"]["image"]["max_count"] == 3
-    assert cfg["references"]["image"]["vae_gears"] == [[384, 672], [448, 672], [672, 448], [512, 512]]
-    assert cfg["references"]["video"]["vae_size"] == [384, 672]
+    image_gears = cfg["references"]["image"]["vae_gears"]
+    assert image_gears == (
+        [[384, 672], [672, 384], [448, 672], [672, 448], [512, 512]]
+        if portrait else [[384, 672], [448, 672], [672, 448], [512, 512]]
+    )
+    assert image_size(1344, 768, image_gears, 384 * 672) == ((672, 384) if portrait else (672, 448))
+    assert cfg["references"]["video"]["vae_size"] == draft_size
+    if portrait:
+        seconds = 5 if frames[1] == 121 else 15
+        legacy = {**cfg, "profile": f"all-dense-672p-1344p-{seconds}s"}
+        validate_build_config(legacy)
+        for mode_cfg in mode_configs(legacy).values():
+            validate_build_config(mode_cfg)
     with pytest.raises(ModelError, match="profile"):
         resolve_build_plan(model_id="sol-h3", model_dir=str(source), profile="all-dense-384p-768p-2s")
 
