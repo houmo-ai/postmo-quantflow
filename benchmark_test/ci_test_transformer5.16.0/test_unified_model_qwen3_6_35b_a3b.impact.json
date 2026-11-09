@@ -45,6 +45,7 @@
         "benchmark_test/ci_test_transformer5.16.0/_unified_e2e_worker.py",
         "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/__init__.py",
         "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/transformer.py",
+        "benchmark_test/ci_test_transformer5.16.0/_unified_fixtures/qwen36_video.py",
         "benchmark_test/ci_test_transformer5.16.0/_unified_preparation.py",
         "benchmark_test/ci_test_transformer5.16.0/_unified_runner.py",
         "benchmark_test/ci_test_transformer5.16.0/_unified_small_model.py",

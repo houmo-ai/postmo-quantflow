@@ -128,44 +128,39 @@ head 补校准会保留它们。导出自动读取并校验实际 packed 张量�
 失败或成功搜索的中间报告写到量化输出目录旁的
 `<output_dir>.auto_mixed_precision_search.json`，便于检查失败原因。
 
-## Qwen3.6-35B-A3B 视频帧 ViT
+## Qwen3.5 / Qwen3.6 视频推理
 
-独立入口为模型包内的
-[`qwen3_6_video_vision.py`](../../../xhmodel_merak/xh_llm/models/qwen3_5_moe/qwen3_6_video_vision.py)。
-使用 checkpoint 的原生 video processor 接收按时间排列的 RGB 帧，关闭二次抽帧。
-输入支持 PIL 图像列表、NumPy `[T,H,W,C]` 或 Torch `[T,C,H,W]`。
-
-`temporal_patch_size=2` 表示 Conv3D 每组融合两帧，并非视频总共只能两帧。
-4 帧为 `[f0,f1]、[f2,f3]`；5 帧为 `[f0,f1]、[f2,f3]、[f4,f4]`，
-只在最后一组不足时复制末帧。原生 ViT 的 attention 按时间组独立计算，
-因此该入口逐组复用现有 `grid_t=1` 的 patch-token 导出图，并按时间顺序拼接特征。
-不需要重新导出；每组的空间 token 数必须能装入已有 visual gear，超出会报错。
+图片和视频共用已有 visual gear 图，无需重新导出或新增 `video_visual` 组件。
+视频使用 checkpoint 原生 video processor 采样、生成时间戳和占位 token；
+模型 runtime 逐时间组编码，并把视频特征送入 LLM。每组空间 token 数不能超过最大 gear。
+`full` 和普通 `lora` 支持视频；MTP / DFlash 投机推理仍只接受文本。
 
 ```python
-from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_6_video_vision import Qwen3_6VideoVision
+from xhmodel_merak.model_build import build_model
+from xhmodel_merak.model_inference import inference_model
 
-# visual 为已加载的 VisualTokenGearHMONNXModel，例如完整 runtime 的 runtime.visual。
-encoder = Qwen3_6VideoVision.from_pretrained(visual, "/path/to/Qwen3.6-35B-A3B")
-video_embeds = encoder.encode_frames(frames)  # [ceil(T/2) * Hgrid * Wgrid / 4, hidden_size]
-
-# 如需保留视频网格：
-inputs = encoder.preprocess(frames)
-video_grid_thw = inputs["video_grid_thw"]  # [[ceil(T/2), Hgrid, Wgrid]]
-video_embeds = encoder.encode_patches(inputs["pixel_values_videos"], video_grid_thw)
+built = build_model(model_id="qwen3.6-35b-a3b", model_dir="/path/to/model",
+                    output_dir="/path/to/new_artifact", device="cuda:0")
+result = inference_model(artifact_dir=built.output_dir, device="cuda:0", inputs={
+    "prompt": "描述这段视频。", "video": "/path/to/video.mp4", "max_new_tokens": 64,
+})
+print(result.output_text)
 ```
 
-独立 visual 发布目录可使用示例（`--visual-meta` 指向含 `gears` 的运行 metadata JSON）：
+已有统一发布目录可直接运行：
 
 ```bash
-ENABLE_HMINFERENCE_V2=1 PYTHONPATH=. python examples_merak/llm/qwen3_5_moe/qwen3_6_video_vit.py \
-  --model-dir /path/to/Qwen3.6-35B-A3B \
-  --visual-meta /path/to/visual_release/runtime_meta_info.json \
-  --frames frame_000.png frame_001.png frame_002.png frame_003.png \
-  --output work_dirs/video_vit/features.pt
+python examples_merak/llm/qwen3_5_moe/qwen3_6_video.py \
+  --artifact-dir /path/to/artifact --video /path/to/video.mp4 --prompt '描述视频。'
 ```
 
-输出包含 `video_embeds` 和 `video_grid_thw`。本入口仅处理 ViT 特征；将其接入 LLM
-仍需原生视频时间戳、video token 占位和位置编码，统一 `inference_model` 的视频输入契约未在此扩展。
+`video` 也允许 RGB 帧目录：按文件名排序，所有帧尺寸相同，时间轴按 2 FPS 解释。
+帧目录保留所有输入帧；末组不足 `temporal_patch_size` 时由原生 processor 补齐末帧。
+视频文件使用原生采样，并实际调用 TorchCodec 解码。PyTorch 2.8 对应
+TorchCodec 0.6 / 0.7（推荐 `pip install torchcodec==0.7.0`），还需要 FFmpeg 共享库，
+兼容关系见 [官方版本表](https://github.com/meta-pytorch/torchcodec#compatibility-with-torch-versions)。
+文本、图片和帧目录不需要安装视频文件解码器。损坏文件或不兼容解码环境直接报错。
+底层独立 visual 发布的运行元数据仍为 `visual_meta_info.json`；完整模型请使用统一发布目录。
 
 ## Qwen3.6-35B-A3B head W4 / W5
 

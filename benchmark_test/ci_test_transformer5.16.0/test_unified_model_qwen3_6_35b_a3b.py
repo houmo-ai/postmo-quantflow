@@ -5,7 +5,7 @@ import pytest
 from _unified_cases import cases_for
 from _unified_runner import check_case_result
 
-CASE_SPEC = ('qwen3.6-35b-a3b', 'qwen_moe', '_unified_fixtures.transformer', ('full', 'mtp', 'dflash', 'lora', 'lora_mtp'))
+CASE_SPEC = ('qwen3.6-35b-a3b', 'qwen_moe', '_unified_fixtures.qwen36_video', ('full', 'mtp', 'dflash', 'lora', 'lora_mtp'))
 
 
 @pytest.mark.parametrize("case", cases_for(__file__), ids=lambda case: case.id)

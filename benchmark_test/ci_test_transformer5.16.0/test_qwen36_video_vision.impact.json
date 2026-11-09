@@ -4,13 +4,11 @@
     {
       "id": "qwen36-video-vision",
       "patterns": [
-        "xhmodel_merak/xh_llm/models/qwen3_5_moe/qwen3_6_video_vision.py",
         "xhmodel_merak/xh_llm/models/qwen3_5_moe/_vision_model_impl.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/_vision_model_impl.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/visual_token_gears.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py",
-        "xhmodel_merak/xh_llm/wrap_model.py",
-        "examples_merak/llm/qwen3_5_moe/qwen3_6_video_vit.py"
+        "xhmodel_merak/xh_llm/wrap_model.py"
       ]
     }
   ]

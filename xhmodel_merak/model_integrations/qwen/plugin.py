@@ -26,6 +26,11 @@ from xhmodel_merak.model_integrations._shared import (
 
 PROVIDER_ID = "qwen"
 
+_VIDEO_SYSTEM_REQUIREMENT = (
+    "Video files only: torchcodec==0.7.0 with torch==2.8.0 and FFmpeg shared libraries; "
+    "text/images/frame directories do not require the decoder"
+)
+
 _QWEN35 = "configs_merak/workflows/xh2a/llm_models/qwen3_5"
 _QWEN35_MOE = "configs_merak/workflows/xh2a/llm_models/qwen3_5_moe"
 _QWEN3_NEXT = "configs_merak/workflows/xh2a/llm_models/qwen3_next"
@@ -49,6 +54,8 @@ def _dense_recipe(
     return ModelRecipe(
         dependencies=runtime_dependencies(
             common=QWEN_MEDIA,
+            inference=("torchcodec==0.7.0; extra == 'video'",),
+            system=(_VIDEO_SYSTEM_REQUIREMENT,),
             quantization=(("autoround", AUTOROUND_REQUIREMENTS),),
             checkpoint_build=GPTQ_REQUIREMENTS,
         ),
@@ -59,7 +66,7 @@ def _dense_recipe(
         config_resolver="xhmodel_merak.model_integrations.qwen.planning:resolve_config",
         export_name=export_name,
         task="vision-language-generation",
-        modalities=("text", "image"),
+        modalities=("text", "image", "video"),
         variants=_export_modes(variants),
         default_precision=ResolvedPrecision(weight=weight, activation=activation),
         supported_precisions=((weight, activation), ("w16", activation)),
@@ -72,7 +79,7 @@ def _dense_recipe(
         build_adapter=AUTOREGRESSIVE_BUILD,
         inference_adapter=QWEN_INFERENCE,
         artifact_format="autoregressive",
-        input_schema=text_media_input_schema(("image",)),
+        input_schema=text_media_input_schema(("image", "video")),
         output_schema=text_output_schema(),
         default_profile="visualm96-196-384-704-1536",
         profiles=("visualm96-196-384-704-1536",),
@@ -130,6 +137,8 @@ def _moe_recipe(
     return ModelRecipe(
         dependencies=runtime_dependencies(
             common=QWEN_MEDIA if vision else (),
+            inference=(("torchcodec==0.7.0; extra == 'video'",) if vision else ()),
+            system=((_VIDEO_SYSTEM_REQUIREMENT,) if vision else ()),
             build=("Defuser==0.0.25",) if quant_method == "gptq" else (),
             quantization=(
                 (quant_method, AUTOROUND_REQUIREMENTS if quant_method == "autoround" else GPTQ_REQUIREMENTS),
@@ -143,7 +152,7 @@ def _moe_recipe(
         config_resolver="xhmodel_merak.model_integrations.qwen.planning:resolve_config",
         export_name=export_name,
         task="vision-language-generation" if vision else "text-generation",
-        modalities=("text", "image") if vision else ("text",),
+        modalities=("text", "image", "video") if vision else ("text",),
         variants=_export_modes(variants),
         default_precision=moe_precision(),
         supported_precisions=(("w4", "a8"), ("w16", "a8")),
@@ -156,7 +165,7 @@ def _moe_recipe(
         build_adapter=AUTOREGRESSIVE_BUILD,
         inference_adapter=QWEN_INFERENCE,
         artifact_format="autoregressive",
-        input_schema=text_media_input_schema(("image",) if vision else ()),
+        input_schema=text_media_input_schema(("image", "video") if vision else ()),
         output_schema=text_output_schema(),
         default_profile=profile,
         profiles=(profile,) if profile else (),
