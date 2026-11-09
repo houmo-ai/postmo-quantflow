@@ -84,12 +84,15 @@ def quick_test_hmonnx(
     *,
     prompt: str = "用中文一句话说明模型是否可用。",
     image_path: str | None = None,
+    video_path: str | None = None,
     device: str | None = None,
     max_new_tokens: int = 64,
     do_sample: bool = False,
     **kwargs: Any,
 ) -> HMONNXQuickTestResult:
     """Run the right quick-test path for a full/visual/MTP/DFlash HMONNX export."""
+    if image_path is not None and video_path is not None:
+        raise ValueError("image_path and video_path are mutually exclusive")
     meta_file = find_hmonnx_meta_file(export_result_or_meta_file)
     meta_info = _load_meta_info(meta_file)
     spec_decode = meta_info.get("spec_decode")
@@ -102,6 +105,8 @@ def quick_test_hmonnx(
         ):
             return visual_hmonnx_smoke_test(meta_file=meta_file, device=device)
         if spec_mode in {"mtp", "dflash", "dflash2"}:
+            if image_path is not None or video_path is not None:
+                raise ValueError("The speculative runtime accepts text input only")
             return spec_decode_generate(
                 meta_file=meta_file,
                 prompt=prompt,
@@ -115,6 +120,7 @@ def quick_test_hmonnx(
             meta_file=meta_file,
             prompt=prompt,
             image_path=image_path,
+            video_path=video_path,
             device=device,
             max_new_tokens=max_new_tokens,
             do_sample=do_sample,
@@ -169,6 +175,7 @@ def hmonnx_generate(
     meta_file: str | Path,
     prompt: str = "用中文一句话说明模型是否可用。",
     image_path: str | None = None,
+    video_path: str | None = None,
     device: str | None = None,
     max_new_tokens: int = 64,
     do_sample: bool = False,
@@ -215,14 +222,17 @@ def hmonnx_generate(
         hmonnx_model.enable_auto_offload = True
 
     runtime_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    use_multimodal = bool(image_path) and Path(str(image_path)).exists() and hasattr(hmonnx_model, "get_tf_processor")
+    if image_path is not None and video_path is not None:
+        raise ValueError("image_path and video_path are mutually exclusive")
+    use_multimodal = image_path is not None or video_path is not None
     if use_multimodal:
         tokenizer, model_inputs = _build_multimodal_inputs(
             hmonnx_model,
             prompt,
-            str(image_path),
+            image_path,
             think,
             runtime_device,
+            video_path=video_path,
         )
     else:
         tokenizer, model_inputs = _build_text_inputs(hmonnx_model, prompt, think, runtime_device)
@@ -468,19 +478,20 @@ def _build_text_inputs(hmonnx_model: Any, prompt: str, think: bool, device: str)
     ).to(device)
 
 
-def _build_multimodal_inputs(hmonnx_model: Any, prompt: str, image_path: str, think: bool, device: str):
+def _build_multimodal_inputs(hmonnx_model: Any, prompt: str, image_path: str | None, think: bool, device: str,
+                             *, video_path: str | None = None):
+    if (image_path is None) == (video_path is None):
+        raise ValueError("provide exactly one of image_path and video_path")
     processor = hmonnx_model.get_tf_processor()
-    tokenizer = processor.tokenizer
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": image_path},
-                {"type": "text", "text": prompt},
-            ],
-        },
-    ]
-    return tokenizer, processor.apply_chat_template(messages, enable_thinking=think).to(device)
+    if video_path is None:
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": image_path}, {"type": "text", "text": prompt},
+        ]}]
+        return processor.tokenizer, processor.apply_chat_template(messages, enable_thinking=think).to(device)
+
+    from .video_inputs import build_video_inputs
+    hmonnx_model.visual.validate_video_processor(processor.video_processor)
+    return processor.tokenizer, build_video_inputs(processor, Path(video_path), prompt, think).to(device)
 
 
 def _dump_golden_input(

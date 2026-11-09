@@ -370,6 +370,11 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
                 image_embeds = torch.cat(image_embeds, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
                 image_embeds = image_embeds.squeeze(0)
 
+        video_embeds = None
+        if pixel_values_videos is not None:
+            video_outputs = self._llm_model.visual.encode_videos(pixel_values_videos, video_grid_thw)
+            video_embeds = torch.cat(video_outputs, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+
         seq_length = inputs_embeds.shape[1]
         data_processor = self._llm_model.get_data_preprocessor()
         net_input_seq_len = self._llm_model.get_input_sequence_length()
@@ -379,6 +384,7 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
                 "input_ids": input_ids,
                 "inputs_embeds": inputs_embeds if input_ids is None else None,
                 "image_embeds": image_embeds,
+                "video_embeds": video_embeds,
                 "past_seq_length": self._past_seq_length,
                 "image_grid_thw": image_grid_thw,
                 "video_grid_thw": video_grid_thw,
@@ -415,19 +421,19 @@ class _Qwen3_5HFCompatible(TextLLMHFCompatible):  # noqa: N801
         else:
             device = inputs_embeds.device
 
-            if image_embeds is not None and input_ids is not None:
-                image_token_id = data_processor.image_token_id
-                n_image_tokens = int((input_ids == image_token_id).sum().item())
-                if n_image_tokens > 0:
-                    n_image_features = int(image_embeds.shape[0])
-                    if n_image_features != n_image_tokens:
-                        raise ValueError(
-                            "Image features and image tokens do not match: "
-                            f"tokens={n_image_tokens}, features={n_image_features}"
-                        )
-                    image_mask = (input_ids == image_token_id).unsqueeze(-1).expand_as(inputs_embeds)
-                    image_embeds_merged = image_embeds.to(device=device, dtype=inputs_embeds.dtype)
-                    inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds_merged)
+            for name, features, token_id in (
+                ("Image", image_embeds, data_processor.image_token_id),
+                ("Video", video_embeds, data_processor.video_token_id),
+            ):
+                if features is None:
+                    continue
+                if input_ids is None:
+                    raise ValueError(f"{name} features require input_ids")
+                count = int((input_ids == token_id).sum().item())
+                if count != features.shape[0]:
+                    raise ValueError(f"{name} features and {name.lower()} tokens do not match: tokens={count}, features={features.shape[0]}")
+                mask = (input_ids == token_id).unsqueeze(-1).expand_as(inputs_embeds)
+                inputs_embeds = inputs_embeds.masked_scatter(mask, features.to(inputs_embeds))
 
             position_ids, rope_deltas = data_processor.get_rope_index(
                 input_ids, inputs_embeds, image_grid_thw, video_grid_thw, attention_mask

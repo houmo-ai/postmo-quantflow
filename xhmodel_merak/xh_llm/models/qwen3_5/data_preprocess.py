@@ -126,6 +126,11 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
             position_ids (`torch.LongTensor` of shape `(3, batch_size, sequence_length)`)
             mrope_position_deltas (`torch.Tensor` of shape `(batch_size)`)
         """
+        # The processor emits timestamps and a separate vision span for every
+        # temporal group. RoPE consumes one [1,H,W] grid per such span.
+        if video_grid_thw is not None:
+            video_grid_thw = video_grid_thw.repeat_interleave(video_grid_thw[:, 0], dim=0).clone()
+            video_grid_thw[:, 0] = 1
         spatial_merge_size = self.spatial_merge_size
         image_token_id = self.image_token_id
         video_token_id = self.video_token_id
@@ -295,21 +300,20 @@ class Qwen3_5_DataPreprocess(BaseLLMInputProcessor):  # noqa: N801
         linear_attn_mask.append(mask.unsqueeze(0))
         linear_attn_mask = torch.cat(linear_attn_mask, dim=0).to(device=device, dtype=torch.float16)
 
-        image_embeds = data.get("image_embeds", None)
-        if image_embeds is not None:
-            n_image_tokens = (input_ids == self.image_token_id).sum().item()
-            image_embeds = data["image_embeds"]
-            n_image_features = image_embeds.shape[0]
-            if n_image_tokens != n_image_features:
+        for name, token_id in (("image", self.image_token_id), ("video", self.video_token_id)):
+            features = data.get(f"{name}_embeds")
+            if features is None:
+                continue
+            if input_ids is None:
+                raise ValueError(f"{name.title()} features require input_ids")
+            count = int((input_ids == token_id).sum().item())
+            if count != features.shape[0]:
                 raise ValueError(
-                    "Image features and image tokens do not match: "
-                    f"tokens: {n_image_tokens}, features {n_image_features}"
+                    f"{name.title()} features and {name} tokens do not match: "
+                    f"tokens: {count}, features {features.shape[0]}"
                 )
-            image_mask = (
-                (input_ids == self.image_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-            )
-            image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+            mask = (input_ids == token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
+            inputs_embeds = inputs_embeds.masked_scatter(mask, features.to(inputs_embeds))
 
         past_seq_length = data["past_seq_length"]
         assert past_seq_length >= 0, "past_seq_length should be non-negative."
