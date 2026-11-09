@@ -128,6 +128,45 @@ head 补校准会保留它们。导出自动读取并校验实际 packed 张量�
 失败或成功搜索的中间报告写到量化输出目录旁的
 `<output_dir>.auto_mixed_precision_search.json`，便于检查失败原因。
 
+## Qwen3.6-35B-A3B 视频帧 ViT
+
+独立入口为模型包内的
+[`qwen3_6_video_vision.py`](../../../xhmodel_merak/xh_llm/models/qwen3_5_moe/qwen3_6_video_vision.py)。
+使用 checkpoint 的原生 video processor 接收按时间排列的 RGB 帧，关闭二次抽帧。
+输入支持 PIL 图像列表、NumPy `[T,H,W,C]` 或 Torch `[T,C,H,W]`。
+
+`temporal_patch_size=2` 表示 Conv3D 每组融合两帧，并非视频总共只能两帧。
+4 帧为 `[f0,f1]、[f2,f3]`；5 帧为 `[f0,f1]、[f2,f3]、[f4,f4]`，
+只在最后一组不足时复制末帧。原生 ViT 的 attention 按时间组独立计算，
+因此该入口逐组复用现有 `grid_t=1` 的 patch-token 导出图，并按时间顺序拼接特征。
+不需要重新导出；每组的空间 token 数必须能装入已有 visual gear，超出会报错。
+
+```python
+from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_6_video_vision import Qwen3_6VideoVision
+
+# visual 为已加载的 VisualTokenGearHMONNXModel，例如完整 runtime 的 runtime.visual。
+encoder = Qwen3_6VideoVision.from_pretrained(visual, "/path/to/Qwen3.6-35B-A3B")
+video_embeds = encoder.encode_frames(frames)  # [ceil(T/2) * Hgrid * Wgrid / 4, hidden_size]
+
+# 如需保留视频网格：
+inputs = encoder.preprocess(frames)
+video_grid_thw = inputs["video_grid_thw"]  # [[ceil(T/2), Hgrid, Wgrid]]
+video_embeds = encoder.encode_patches(inputs["pixel_values_videos"], video_grid_thw)
+```
+
+独立 visual 发布目录可使用示例（`--visual-meta` 指向含 `gears` 的运行 metadata JSON）：
+
+```bash
+ENABLE_HMINFERENCE_V2=1 PYTHONPATH=. python examples_merak/llm/qwen3_5_moe/qwen3_6_video_vit.py \
+  --model-dir /path/to/Qwen3.6-35B-A3B \
+  --visual-meta /path/to/visual_release/runtime_meta_info.json \
+  --frames frame_000.png frame_001.png frame_002.png frame_003.png \
+  --output work_dirs/video_vit/features.pt
+```
+
+输出包含 `video_embeds` 和 `video_grid_thw`。本入口仅处理 ViT 特征；将其接入 LLM
+仍需原生视频时间戳、video token 占位和位置编码，统一 `inference_model` 的视频输入契约未在此扩展。
+
 ## Qwen3.6-35B-A3B head W4 / W5
 
 现有 Qwen3.5/Qwen3.6 YAML 和 W8 head 路径保持不变。只有导出 head 小于 8 bit

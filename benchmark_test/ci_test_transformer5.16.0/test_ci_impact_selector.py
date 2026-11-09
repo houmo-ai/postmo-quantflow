@@ -148,6 +148,10 @@ def test_moe_source_selects_its_registered_block_export(filename, expects_layout
     })
     if filename == "qwen3_5_moe_model.py":
         expected.add(f"{SUITE_RELATIVE}/test_hmonnx_export_boundary.py")
+    if filename == "_vision_model_impl.py":
+        video = f"{SUITE_RELATIVE}/test_qwen36_video_vision.py"
+        expected.add(video)
+        assert f"rule:qwen36-video-vision:{changed}" in selection.reasons[video]
     if expects_layout:
         layout = f"{SUITE_RELATIVE}/test_qwen35_visual_release_layout.py"
         expected.add(layout)
