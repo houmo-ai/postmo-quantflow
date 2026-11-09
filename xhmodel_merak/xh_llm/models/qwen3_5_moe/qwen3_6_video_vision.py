@@ -16,7 +16,7 @@ import torch
 
 
 class _ImageEncoder(Protocol):
-    def encode(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor: ...
+    def encode_video(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor: ...
 
 
 class Qwen3_6VideoVision:  # noqa: N801
@@ -87,40 +87,7 @@ class Qwen3_6VideoVision:  # noqa: N801
         counts temporal groups, not raw frames. Each group must fit a configured
         visual token gear. There is no two-frame limit on the complete video.
         """
-        if tuple(video_grid_thw.shape) != (1, 3):
-            raise ValueError(f"expected one video_grid_thw with shape [1, 3], got {tuple(video_grid_thw.shape)}")
-        if video_grid_thw.dtype not in (torch.int32, torch.int64):
-            raise ValueError("video_grid_thw must use an integer dtype")
-        t, h, w = (int(value) for value in video_grid_thw[0].tolist())
-        if min(t, h, w) <= 0:
-            raise ValueError(f"video grid dimensions must be positive, got {(t, h, w)}")
-        merge = self.spatial_merge_size
-        if h % merge or w % merge:
-            raise ValueError(f"video grid {(t, h, w)} must be divisible by spatial_merge_size={merge}")
-        expected_patches = t * h * w
-        if pixel_values_videos.ndim != 2 or pixel_values_videos.shape[0] != expected_patches:
-            raise ValueError(
-                f"video grid requires {expected_patches} flattened patches [N, D], "
-                f"got {tuple(pixel_values_videos.shape)}"
-            )
-
-        group_grid = video_grid_thw.clone()
-        group_grid[0, 0] = 1
-        group_patch_count = h * w
-        group_token_count = group_patch_count // merge**2
-        outputs = []
-        for patches in pixel_values_videos.split(group_patch_count, dim=0):
-            output = self.visual.encode(patches, group_grid)
-            if output.ndim == 3 and output.shape[0] == 1:
-                output = output[0]
-            if output.ndim != 2 or output.shape[0] != group_token_count:
-                raise ValueError(
-                    f"visual encoder must return {group_token_count} tokens per temporal group, "
-                    f"got {tuple(output.shape)}"
-                )
-            # Sessions may reuse output buffers on the next group invocation.
-            outputs.append(output.clone())
-        return torch.cat(outputs, dim=0)
+        return self.visual.encode_video(pixel_values_videos, video_grid_thw)
 
     def encode_frames(self, frames, **processor_kwargs) -> torch.Tensor:
         """Preprocess decoded RGB frames and return time-ordered ViT features."""

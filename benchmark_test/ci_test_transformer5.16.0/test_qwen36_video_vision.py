@@ -20,7 +20,6 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import Qwen3VLVideoP
 
 from xhmodel_merak.xh_llm.models.qwen3_5.qwen3_5_hmonnx_inference import VisualTokenGearHMONNXModel
 from xhmodel_merak.xh_llm.models.qwen3_5_moe import _vision_model_impl  # noqa: F401
-from xhmodel_merak.xh_llm.models.qwen3_5_moe.qwen3_6_video_vision import Qwen3_6VideoVision
 from xhmodel_merak.xh_llm.wrap_model import wrap_llm_model
 from xhquant.api import ConfigDict
 
@@ -28,7 +27,7 @@ from xhquant.api import ConfigDict
 def _processor():
     return Qwen3VLVideoProcessor(
         patch_size=2, temporal_patch_size=2, merge_size=2,
-        do_resize=False, image_mean=[0.5] * 3, image_std=[0.5] * 3,
+        do_resize=False, do_sample_frames=False, image_mean=[0.5] * 3, image_std=[0.5] * 3,
     )
 
 
@@ -60,9 +59,7 @@ def test_preprocess_preserves_real_frame_pairs_and_only_pads_the_tail(count, con
     source = {"torch": frames, "numpy": pixels, "pil": [Image.fromarray(frame) for frame in pixels]}[container]
     processor = _processor()
     processor.max_frames = 2  # Sampling limits must not discard supplied frames.
-    encoder = Qwen3_6VideoVision(object(), processor)
-
-    inputs = encoder.preprocess(source)
+    inputs = processor(videos=[source], do_sample_frames=False, return_tensors="pt")
 
     assert inputs["video_grid_thw"].tolist() == [[(count + 1) // 2, 4, 6]]
     torch.testing.assert_close(inputs["pixel_values_videos"], _reference_patches(frames), rtol=1e-6, atol=1e-6)
@@ -115,14 +112,13 @@ def tiny_vision():
 @pytest.mark.parametrize("count", [1, 2, 4, 5])
 def test_video_features_match_native_conv3d_and_temporal_attention(tiny_vision, count):
     native, runtime = tiny_vision
-    encoder = Qwen3_6VideoVision(runtime, _processor())
     frames = _frames(count)
     grid = torch.tensor([[(count + 1) // 2, 4, 6]])
     session = runtime.models[8]
     calls_before = session.calls
     with torch.no_grad():
         expected = native(_reference_patches(frames), grid).pooler_output
-        actual = encoder.encode_frames(frames)
+        actual = runtime.encode_video(_reference_patches(frames), grid)
 
     assert actual.shape == ((count + 1) // 2 * 6, 32)
     assert session.calls - calls_before == (count + 1) // 2
@@ -131,19 +127,20 @@ def test_video_features_match_native_conv3d_and_temporal_attention(tiny_vision, 
 
 def test_changing_second_frame_changes_video_features(tiny_vision):
     _, runtime = tiny_vision
-    encoder = Qwen3_6VideoVision(runtime, _processor())
     frames = _frames(2)
-    actual = encoder.encode_frames(frames)
-    repeated = encoder.encode_frames(frames[:1].repeat(2, 1, 1, 1))
+    grid = torch.tensor([[1, 4, 6]])
+    actual = runtime.encode_video(_reference_patches(frames), grid)
+    repeated = runtime.encode_video(_reference_patches(frames[:1].repeat(2, 1, 1, 1)), grid)
     assert not torch.allclose(actual, repeated, rtol=1e-5, atol=1e-6)
 
 
 def test_processor_round_trip_uses_checkpoint_parameters(tmp_path):
     _processor().save_pretrained(tmp_path)
-    encoder = Qwen3_6VideoVision.from_pretrained(object(), str(tmp_path))
-    assert encoder.temporal_patch_size == 2
-    assert encoder.video_processor.patch_size == 2
-    inputs = encoder.preprocess(_frames(5))
+    from transformers import AutoVideoProcessor
+    processor = AutoVideoProcessor.from_pretrained(tmp_path, local_files_only=True)
+    assert processor.temporal_patch_size == 2
+    assert processor.patch_size == 2
+    inputs = processor(videos=[_frames(5)], do_sample_frames=False, return_tensors="pt")
     torch.testing.assert_close(inputs["pixel_values_videos"], _reference_patches(_frames(5)), rtol=1e-6, atol=1e-6)
 
 
@@ -155,30 +152,42 @@ def test_processor_round_trip_uses_checkpoint_parameters(tmp_path):
     (torch.tensor([[2, 4, 6]]), torch.empty(24, 24), "requires 48"),
     (torch.tensor([[1, 4, 6]]), torch.empty(1, 24, 24), "flattened patches"),
 ])
-def test_video_rejects_invalid_geometry_before_encoding(grid, pixels, message):
-    encoder = Qwen3_6VideoVision(object(), _processor())
+def test_video_rejects_invalid_geometry_before_encoding(tiny_vision, grid, pixels, message):
+    _, runtime = tiny_vision
+    calls = runtime.models[8].calls
     with pytest.raises(ValueError, match=message):
-        encoder.encode_patches(pixels, grid)
-
-
-@pytest.mark.parametrize("field", ["patch_size", "temporal_patch_size", "spatial_merge_size"])
-def test_video_rejects_processor_runtime_geometry_mismatch(field):
-    values = dict(patch_size=2, temporal_patch_size=2, spatial_merge_size=2)
-    values[field] = 4
-    with pytest.raises(ValueError, match=field):
-        Qwen3_6VideoVision(SimpleNamespace(visual_meta=SimpleNamespace(**values)), _processor())
+        runtime.encode_video(pixels, grid)
+    assert runtime.models[8].calls == calls
 
 
 def test_video_preserves_per_group_gear_overflow_error(tiny_vision):
     _, runtime = tiny_vision
-    encoder = Qwen3_6VideoVision(runtime, _processor())
+    calls = runtime.models[8].calls
     with pytest.raises(ValueError, match="exceeds the largest configured gear"):
-        encoder.encode_patches(torch.empty(2 * 6 * 6, 24), torch.tensor([[2, 6, 6]]))
+        runtime.encode_video(torch.empty(2 * 6 * 6, 24), torch.tensor([[2, 6, 6]]))
 
 
-def test_video_rejects_empty_frames_and_sampling_overrides():
-    encoder = Qwen3_6VideoVision(object(), _processor())
-    with pytest.raises(ValueError, match="must not be empty"):
-        encoder.preprocess([])
-    with pytest.raises(ValueError, match="cannot be overridden"):
-        encoder.preprocess(_frames(2), do_sample_frames=True)
+    assert runtime.models[8].calls == calls
+
+
+def test_multiple_videos_keep_owned_outputs_and_input_order(tiny_vision):
+    native, runtime = tiny_vision
+    grids = torch.tensor([[2, 4, 6], [1, 4, 6]])
+    patches = [_reference_patches(_frames(4)), _reference_patches(_frames(1))]
+    with torch.no_grad():
+        expected = [native(pixels, grid.reshape(1, 3)).pooler_output for pixels, grid in zip(patches, grids)]
+        actual = runtime.encode_videos(torch.cat(patches), grids)
+        saved = [value.clone() for value in actual]
+        runtime.encode_video(patches[1] + 1, grids[1:])
+    for output, reference, snapshot in zip(actual, expected, saved):
+        torch.testing.assert_close(output, reference, rtol=2e-5, atol=2e-5)
+        torch.testing.assert_close(output, snapshot)
+
+
+@pytest.mark.parametrize("field", ["patch_size", "temporal_patch_size", "spatial_merge_size"])
+def test_video_rejects_processor_runtime_geometry_mismatch(tiny_vision, field):
+    _, runtime = tiny_vision
+    processor = _processor()
+    setattr(processor, "merge_size" if field == "spatial_merge_size" else field, 4)
+    with pytest.raises(ValueError, match=field):
+        runtime.validate_video_processor(processor)

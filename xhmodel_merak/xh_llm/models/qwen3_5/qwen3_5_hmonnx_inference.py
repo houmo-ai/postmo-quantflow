@@ -49,7 +49,7 @@ class VisualHMONNXModel(HMONNXModel):
 
 
 class VisualTokenGearHMONNXModel:
-    """Route one image at a time across shared-weight static visual graphs."""
+    """Route images and independent video groups through the same visual graphs."""
 
     INPUT_NAMES = (
         "pixel_values",
@@ -290,6 +290,56 @@ class VisualTokenGearHMONNXModel:
         output = self.models[gear].forward(*inputs)
         return self._slice_valid_output(output, valid_image_tokens)
 
+    def encode_video(self, pixel_values: torch.Tensor, video_grid_thw: torch.Tensor) -> torch.Tensor:
+        """Encode one native [T,H,W] video, retaining chronological token order.
+
+        Native vision attention separates temporal groups. Each group therefore
+        uses the image graph, including its geometry checks and gear selection.
+        Clone each output before another invocation can reuse the session buffer.
+        """
+        if tuple(video_grid_thw.shape) != (1, 3):
+            raise ValueError("expected one video_grid_thw with shape [1, 3]")
+        if video_grid_thw.dtype not in (torch.int32, torch.int64):
+            raise ValueError("video_grid_thw must use an integer dtype")
+        t, h, w = (int(value) for value in video_grid_thw[0].tolist())
+        if min(t, h, w) <= 0:
+            raise ValueError("video grid dimensions must be positive")
+        merge = int(self.visual_meta.spatial_merge_size)
+        if h % merge or w % merge:
+            raise ValueError(f"video grid must be divisible by spatial_merge_size={merge}")
+        if pixel_values.ndim != 2 or pixel_values.shape[0] != t * h * w:
+            raise ValueError(f"video grid requires {t * h * w} flattened patches [N, D], got {tuple(pixel_values.shape)}")
+        group_grid = video_grid_thw.clone()
+        group_grid[0, 0] = 1
+        outputs = []
+        for patches in pixel_values.split(h * w, dim=0):
+            output = self.encode(patches, group_grid)
+            if output.ndim == 3 and output.shape[0] == 1:
+                output = output[0]
+            if output.ndim != 2 or output.shape[0] != h * w // merge**2:
+                raise ValueError(f"unexpected visual group output shape: {tuple(output.shape)}")
+            outputs.append(output.clone())
+        return torch.cat(outputs, dim=0)
+
+    def encode_videos(self, pixel_values: torch.Tensor, video_grid_thw: torch.Tensor) -> list[torch.Tensor]:
+        """Encode flattened patches for multiple videos in input order."""
+        if video_grid_thw.ndim != 2 or video_grid_thw.shape[1] != 3:
+            raise ValueError("video_grid_thw must have shape [num_videos, 3]")
+        if video_grid_thw.dtype not in (torch.int32, torch.int64) or (video_grid_thw <= 0).any():
+            raise ValueError("video_grid_thw must contain positive integer dimensions")
+        sizes = [int(grid.prod()) for grid in video_grid_thw]
+        if pixel_values.ndim != 2 or pixel_values.shape[0] != sum(sizes):
+            raise ValueError(f"video grids require {sum(sizes)} flattened patches [N, D]")
+        return [self.encode_video(pixels, grid.reshape(1, 3)) for pixels, grid in
+                zip(pixel_values.split(sizes, dim=0), video_grid_thw, strict=True)]
+
+    def validate_video_processor(self, processor) -> None:
+        for name, value in (("patch_size", processor.patch_size),
+                            ("temporal_patch_size", processor.temporal_patch_size),
+                            ("spatial_merge_size", processor.merge_size)):
+            if int(value) != int(getattr(self.visual_meta, name)):
+                raise ValueError(f"video processor {name}={value} does not match visual runtime")
+
     def encode_many(self, pixel_values, image_grid_thw: torch.Tensor) -> list[torch.Tensor]:
         grids = [grid.reshape(1, 3) for grid in image_grid_thw]
         if isinstance(pixel_values, torch.Tensor):
@@ -309,7 +359,7 @@ class VisualTokenGearHMONNXModel:
                 if selected_gear != gear:
                     continue
                 output = self.models[gear].forward(*inputs)
-                outputs[index] = self._slice_valid_output(output, valid_image_tokens)
+                outputs[index] = self._slice_valid_output(output, valid_image_tokens).clone()
         if any(output is None for output in outputs):
             missing = [index for index, output in enumerate(outputs) if output is None]
             raise RuntimeError(f"visual gear scheduler did not produce outputs for image indices {missing}")
