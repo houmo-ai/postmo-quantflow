@@ -1210,6 +1210,7 @@ class Qwen3_5MerakForCausalLM(MerakForCausalLM):
                     "pixel_values",
                     "image_grid_thw",
                     "pixel_values_videos",
+                    "video_grid_thw",
                 )
             ):
                 raise NotImplementedError(
@@ -1217,10 +1218,29 @@ class Qwen3_5MerakForCausalLM(MerakForCausalLM):
                 )
             return []
 
-        if kwargs.get("pixel_values_videos") is not None:
-            raise NotImplementedError(
-                "Merak backend currently supports image inputs but not video inputs."
-            )
+        if kwargs.get("pixel_values_videos") is not None or kwargs.get("video_grid_thw") is not None:
+            pixels, grids = kwargs.get("pixel_values_videos"), kwargs.get("video_grid_thw")
+            if not isinstance(pixels, torch.Tensor) or not isinstance(grids, torch.Tensor):
+                raise ValueError("Merak video inputs require pixel_values_videos and video_grid_thw tensors together")
+            visual = cast(Any, getattr(self.inference_model, "visual"))
+            encode_videos = getattr(visual, "encode_videos", None)
+            if not callable(encode_videos):
+                raise ValueError("Merak video inputs require the patch-token visual runtime")
+            image_kwargs = {key: value for key, value in kwargs.items()
+                            if key not in {"pixel_values_videos", "video_grid_thw"}}
+            images = tuple(self.embed_multimodal(**image_kwargs))
+            with hmonnx_op_trace_scope("visual", request_id=None):
+                outputs = encode_videos(pixels, grids)
+            videos = tuple(self._normalize_visual_embeds(output).to(
+                device=self._runner_device, dtype=self.input_embeddings.weight.dtype,
+            ) for output in outputs)
+            if len(videos) != grids.shape[0]:
+                raise ValueError("Merak visual runtime must return one tensor per video")
+            # vLLM's multimodal field ordering determines the embedding order.
+            first = next(key for key in kwargs if kwargs[key] is not None and key in {
+                "pixel_values", "image_grid_thw", "hm_pixel_values", "pixel_values_videos", "video_grid_thw",
+            })
+            return videos + images if first in {"pixel_values_videos", "video_grid_thw"} else images + videos
 
         visual = cast(Any, getattr(self.inference_model, "visual"))
         hm_pixel_values = kwargs.get("hm_pixel_values")
@@ -1455,12 +1475,30 @@ class Qwen3_5MerakForCausalLM(MerakForCausalLM):
         )
 
         next_image_offset = image_grid_offset + num_images
-        next_video_offset = video_grid_offset + num_videos
 
-        if num_videos > 0:
-            raise NotImplementedError(
-                "Merak backend currently supports image inputs but not video inputs."
-            )
+        # Each video contributes one timestamped span per temporal group. The
+        # batch grid still has one row per video; offsets here count group rows.
+        next_video_offset = video_grid_offset
+        if flat_input_ids is not None and self.video_token_id >= 0:
+            video_mask = flat_input_ids == self.video_token_id
+            if torch.any(video_mask):
+                if inputs_embeds is None:
+                    raise ValueError("Merak multimodal request is missing merged video embeddings")
+                request_kwargs["video_embeds"] = self._flatten_inputs_embeds(inputs_embeds)[video_mask]
+        if num_videos and video_grid_thw is not None:
+            if video_grid_thw.ndim != 2 or video_grid_thw.shape[1] != 3:
+                raise ValueError("Merak video_grid_thw must have shape [num_videos, 3]")
+            if video_grid_thw.dtype not in (torch.int32, torch.int64) or (video_grid_thw <= 0).any():
+                raise ValueError("Merak video_grid_thw must contain positive integer dimensions")
+            groups = video_grid_thw.repeat_interleave(video_grid_thw[:, 0], dim=0).clone()
+            groups[:, 0] = 1
+            next_video_offset = video_grid_offset + num_videos
+            request_grids = groups[video_grid_offset:next_video_offset]
+            if request_grids.shape[0] != num_videos:
+                raise ValueError(f"Merak multimodal request expected {num_videos} video group grids")
+            request_kwargs["video_grid_thw"] = request_grids
+        # Cached/resumed chunks may contain video tokens without a new grid or
+        # vision-start token. Their merged features and vLLM M-RoPE are sufficient.
 
         if num_images == 0 and num_image_tokens == 0:
             return request_kwargs, next_image_offset, next_video_offset
