@@ -16,6 +16,28 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("entrypoint", ["quick_test_hmonnx", "hmonnx_generate"])
+@pytest.mark.parametrize("mode", ["mtp", "dflash"])
+@pytest.mark.parametrize("media", ["image_path", "video_path"])
+def test_spec_public_helpers_preserve_media_and_reject_component_golden(monkeypatch, tmp_path, entrypoint, mode, media):
+    runtime = _load_runtime_module(monkeypatch)
+    meta = tmp_path / "runtime_meta_info.json"
+    meta.write_text(json.dumps({"spec_decode": {"mode": mode}}))
+    calls = []
+    monkeypatch.setattr(runtime, "spec_decode_generate", lambda **kwargs: calls.append(kwargs))
+    kwargs = dict(prompt="describe", device="cpu", think=True, **{media: str(tmp_path / "media")})
+    if entrypoint == "quick_test_hmonnx":
+        invoke = lambda **extra: runtime.quick_test_hmonnx(meta, **kwargs, **extra)
+    else:
+        invoke = lambda **extra: runtime.hmonnx_generate(meta_file=meta, **kwargs, **extra)
+    invoke()
+    assert calls[0][media] == str(tmp_path / "media")
+    assert calls[0]["enable_thinking"] is True
+    with pytest.raises(ValueError, match="Component Golden is unavailable"):
+        invoke(golden_components=("visual",))
+    assert len(calls) == 1
+
+
 def _install_lightweight_xh_llm_packages(monkeypatch) -> None:
     packages = {
         "xhmodel_merak.xh_llm": REPO_ROOT / "xhmodel_merak/xh_llm",
@@ -300,6 +322,7 @@ def test_hmonnx_generate_keeps_path_like_prompts_literal_and_preserves_supported
     monkeypatch, tmp_path: Path
 ):
     runtime = _load_runtime_module(monkeypatch)
+    (tmp_path / "meta.json").write_text("{}", encoding="utf-8")
     calls = _install_fake_generation_dependencies(monkeypatch)
     prompt = tmp_path / "worker-local-prompt.txt"
     prompt.write_text("filesystem contents must not replace the prompt", encoding="utf-8")

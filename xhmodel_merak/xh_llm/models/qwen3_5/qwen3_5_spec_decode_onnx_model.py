@@ -23,6 +23,7 @@ from transformers import TextStreamer
 from xhmodel_merak.exec_backends import CacheTensor, HybridCacheTensor
 
 from ._spec_decode_shared import SpecDecodeVerifyResult, run_spec_decode_loop
+from .spec_decode_visual import SpecDecodeVisualMixin
 from .qwen3_5_onnx_model import (
     HMONNXSession,
     Qwen3_5ONNXModel,
@@ -55,7 +56,7 @@ def _pad_hidden_tensor(hidden: torch.Tensor, target_seq_len: int) -> torch.Tenso
     return torch.cat([hidden, pad], dim=1)
 
 
-class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
+class Qwen3_5SpecDecodeONNXModel(SpecDecodeVisualMixin, Qwen3_5ONNXModel):  # noqa: N801
     """Speculative decoding runtime extending Qwen3_5ONNXModel with a draft model.
 
     Supports two speculative decoding modes:
@@ -395,7 +396,9 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
             raise RuntimeError("MTP prefill session is not available.")
         actual_input_length = int(hidden_states.shape[1])
         prefill_seq_len = int(self.draft_prefill_session.get_input("post_norm_hidden").shape[1])
-        next_token_embedding = _pad_hidden_tensor(self._embed_token_ids(next_token_ids), prefill_seq_len)
+        next_token_embedding = _pad_hidden_tensor(
+            self._embed_mtp_prompt_tokens(next_token_ids, past_seq_len), prefill_seq_len
+        )
         hidden_states = _pad_hidden_tensor(hidden_states.to(device=self.device, dtype=self._dtype), prefill_seq_len)
         batch_size = hidden_states.shape[0]
         current_input_length = torch.full(
@@ -789,7 +792,7 @@ class Qwen3_5SpecDecodeONNXModel(Qwen3_5ONNXModel):  # noqa: N801
     # Speculative decoding generate
     # ---------------------------------------------------------------
     @torch.no_grad()
-    def generate(
+    def _generate(
         self,
         input_ids: torch.Tensor,
         tokenizer,

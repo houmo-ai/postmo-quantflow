@@ -23,8 +23,8 @@ def test_video_recipe_reuses_visual_component(model):
         validate_inputs(recipe, {"prompt": "hello", "image": "a.png", "video": "b.mp4"})
 
 
-@pytest.mark.parametrize("variant", ["full", "mtp", "dflash"])
-def test_adapter_routes_video_directory_and_rejects_speculation(tmp_path, monkeypatch, variant):
+@pytest.mark.parametrize("variant", ["full", "mtp", "dflash", "lora_mtp"])
+def test_adapter_routes_video_directory_including_speculation(tmp_path, monkeypatch, variant):
     from xhmodel_merak.xh_llm.models.qwen3_5 import hmonnx_validation
     calls = []
     def generate(meta, **kwargs):
@@ -35,16 +35,16 @@ def test_adapter_routes_video_directory_and_rejects_speculation(tmp_path, monkey
                   manifest={"recipe": {"variant": variant}}, meta_file=tmp_path / "runtime_meta_info.json",
                   inputs={"prompt": "hello", "video": str(tmp_path), "max_new_tokens": 2}, device="cpu",
                   components=("visual", "prefill", "decode"), selected_golden=(), golden_artifacts={})
+    assert adapter.run(**kwargs).output_tokens == 2
+    assert calls[0]["video_path"] == str(tmp_path)
     if variant != "full":
-        with pytest.raises(ModelError, match="text input only"):
+        kwargs["selected_golden"] = ("visual",)
+        with pytest.raises(ModelError, match="Golden is unavailable"):
             adapter.run(**kwargs)
-        assert not calls
-    else:
-        assert adapter.run(**kwargs).output_tokens == 2
-        assert calls[0]["video_path"] == str(tmp_path)
+        assert len(calls) == 1
 
 
-def test_video_fixture_is_private_to_qwen36_full(tmp_path, monkeypatch):
+def test_video_fixture_retains_native_processor(tmp_path, monkeypatch):
     from _unified_cases import CASES
     from _unified_fixtures.qwen36_video import prepare
     from transformers import AutoVideoProcessor

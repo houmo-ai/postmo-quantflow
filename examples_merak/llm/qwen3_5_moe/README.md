@@ -133,7 +133,9 @@ head 补校准会保留它们。导出自动读取并校验实际 packed 张量�
 图片和视频共用已有 visual gear 图，无需重新导出或新增 `video_visual` 组件。
 视频使用 checkpoint 原生 video processor 采样、生成时间戳和占位 token；
 模型 runtime 逐时间组编码，并把视频特征送入 LLM。每组空间 token 数不能超过最大 gear。
-`full` 和普通 `lora` 支持视频；MTP / DFlash 投机推理仍只接受文本。
+`full`、`lora`、MTP / LoRA-MTP 和 DFlash 投机推理均支持图像和视频。
+投机 target prefill 复用相同视觉融合和 M-RoPE；draft 消费 target hidden state，
+MTP 的移位输入使用融合后的 embedding。投机变体的公共组件 Golden 仍显式拒绝。
 
 ```python
 from xhmodel_merak.model_build import build_model
@@ -145,6 +147,15 @@ result = inference_model(artifact_dir=built.output_dir, device="cuda:0", inputs=
     "prompt": "描述这段视频。", "video": "/path/to/video.mp4", "max_new_tokens": 64,
 })
 print(result.output_text)
+```
+
+MTP / LoRA-MTP 的 build 增加 `speculative={"mode": "mtp"}`；DFlash 使用
+`speculative={"mode": "dflash"}, sources={"dflash": "/path/to/draft"}`。
+同一个 `inference_model` 调用可传 `image` 或 `video`。模型包调试入口也支持：
+
+```bash
+python examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py \
+  --config /path/to/golden_meta_info.json --video-path /path/to/video.mp4
 ```
 
 已有统一发布目录可直接运行：

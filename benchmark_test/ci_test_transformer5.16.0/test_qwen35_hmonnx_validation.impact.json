@@ -10,7 +10,8 @@
         "xhmodel_merak/_environment.py",
         "configs_merak/workflows/xh2a/llm_models/qwen3_5*/**",
         "pyproject.toml",
-        "benchmark_test/ci_test_transformer5.16.0/test_qwen35_hmonnx_validation.py"
+        "benchmark_test/ci_test_transformer5.16.0/test_qwen35_hmonnx_validation.py",
+        "examples_merak/llm/qwen3_5/debug_scripts/qwen3_5_xh_spec_decode_test.py"
       ]
     }
   ]

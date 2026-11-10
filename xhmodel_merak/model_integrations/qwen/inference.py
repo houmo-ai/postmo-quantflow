@@ -36,13 +36,6 @@ class _QwenAdapter:
         video_path = str(require_local_file(recipe, "video", video, allow_directory=True)) if video is not None else None
         variant = str(manifest.get("recipe", {}).get("variant", recipe.variants[0].name))
         spec_mode = recipe.get_variant(variant).speculative_mode
-        if spec_mode in {"mtp", "dflash", "dflash2"} and (image_path is not None or video_path is not None):
-            raise ModelError(
-                ErrorCode.UNSUPPORTED_COMBINATION,
-                "The public speculative runtime accepts text input only",
-                model=recipe.model_id,
-                variant=variant,
-            )
         if video_path is not None and Path(video_path).is_file():
             from packaging.requirements import Requirement
             from xhmodel_merak._requirements import validate_worker_requirements

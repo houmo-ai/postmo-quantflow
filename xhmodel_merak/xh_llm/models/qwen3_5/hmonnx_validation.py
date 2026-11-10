@@ -105,11 +105,15 @@ def quick_test_hmonnx(
         ):
             return visual_hmonnx_smoke_test(meta_file=meta_file, device=device)
         if spec_mode in {"mtp", "dflash", "dflash2"}:
-            if image_path is not None or video_path is not None:
-                raise ValueError("The speculative runtime accepts text input only")
+            if kwargs.pop("golden_components", None):
+                raise ValueError("Component Golden is unavailable for speculative draft sessions")
+            if "think" in kwargs:
+                kwargs["enable_thinking"] = kwargs.pop("think")
             return spec_decode_generate(
                 meta_file=meta_file,
                 prompt=prompt,
+                image_path=image_path,
+                video_path=video_path,
                 device=device or "cuda:0",
                 exec_device=kwargs.pop("exec_device", device or "cuda:0"),
                 max_new_tokens=max_new_tokens,
@@ -198,6 +202,20 @@ def hmonnx_generate(
         raise ValueError("golden and golden_components are mutually exclusive")
     if (golden or "decode" in selected_golden) and max_new_tokens < 2:
         raise ValueError("Decode Golden requires max_new_tokens >= 2 so the decode graph executes")
+
+    spec = _load_meta_info(resolved_meta).get("spec_decode") or {}
+    if spec.get("mode") in {"mtp", "dflash", "dflash2"}:
+        if selected_golden:
+            raise ValueError("Component Golden is unavailable for speculative draft sessions")
+        if page_attention:
+            raise ValueError("The standalone speculative runtime does not support PageAttention")
+        return spec_decode_generate(
+            meta_file=meta_file, prompt=prompt, image_path=image_path, video_path=video_path,
+            device=device or "cuda:0", exec_device=device or "cuda:0",
+            max_new_tokens=max_new_tokens, min_output_tokens=min_output_tokens,
+            do_sample=do_sample, enable_thinking=think, stream_output=stream_output,
+            disable_auto_offload=not auto_offload, enable_cuda_graph=cuda_graph, golden=golden,
+        )
 
     import torch
     from transformers import TextStreamer
@@ -307,6 +325,8 @@ def spec_decode_generate(
     meta_file: str | Path,
     prompt: str = "写一首关于 AI 的诗",
     prompt_file: str | None = None,
+    image_path: str | None = None,
+    video_path: str | None = None,
     device: str = "cuda:0",
     exec_device: str = "cuda:0",
     dtype: str = "fp16",
@@ -334,6 +354,8 @@ def spec_decode_generate(
     golden: bool = False,
 ) -> HMONNXQuickTestResult:
     """Run MTP/DFlash speculative decoding and return acceptance metrics."""
+    if image_path is not None and video_path is not None:
+        raise ValueError("image_path and video_path are mutually exclusive")
     runtime, tokenizer, meta_info = _load_merak_spec_runtime(
         meta_file=meta_file,
         device=device,
@@ -352,6 +374,7 @@ def spec_decode_generate(
     input_prompt = prompt
     if prompt_file is not None:
         input_prompt = Path(prompt_file).read_text(encoding="utf-8")
+    media = {"image_path": image_path, "video_path": video_path} if image_path or video_path else {}
 
     for _ in range(warmup_runs):
         _run_spec_decode_once(
@@ -367,6 +390,7 @@ def spec_decode_generate(
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
             stream_output=stream_output,
+            **media,
         )
 
     if golden:
@@ -394,6 +418,7 @@ def spec_decode_generate(
             repetition_penalty=repetition_penalty,
             presence_penalty=presence_penalty,
             stream_output=stream_output,
+            **media,
         )
         timings.append(elapsed)
 
@@ -845,6 +870,7 @@ def _load_merak_spec_runtime(
     runtime.to(torch.device(device))
     runtime.set_exec_device(torch.device(exec_device))
     runtime.to(torch_dtype)
+    runtime.configure_multimodal(meta_info, model_dir, hf_model_config_dir)
     return runtime, tokenizer, meta_info
 
 
@@ -862,8 +888,20 @@ def _run_spec_decode_once(
     repetition_penalty: float,
     presence_penalty: float,
     stream_output: bool,
+    image_path: str | None = None,
+    video_path: str | None = None,
 ) -> tuple[str, dict[str, Any], float, int]:
-    input_ids = _build_chat_input_ids(tokenizer, prompt, enable_thinking)
+    media_inputs = {}
+    if image_path is not None or video_path is not None:
+        tokenizer, prepared = _build_multimodal_inputs(
+            runtime, prompt, image_path, enable_thinking, str(runtime.device), video_path=video_path,
+        )
+        input_ids = prepared["input_ids"]
+        media_inputs = {key: prepared[key] for key in (
+            "pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw",
+        ) if key in prepared}
+    else:
+        input_ids = _build_chat_input_ids(tokenizer, prompt, enable_thinking)
     start = time.perf_counter()
     output, stats = runtime.generate(
         input_ids,
@@ -877,6 +915,7 @@ def _run_spec_decode_once(
         presence_penalty=presence_penalty,
         stream_output=stream_output,
         return_stats=True,
+        **media_inputs,
     )
     elapsed = time.perf_counter() - start
     cleaned = _postprocess_chat_output(output, enable_thinking=enable_thinking)

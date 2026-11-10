@@ -13,7 +13,7 @@ from typing import Any, Optional, cast
 
 import pytest
 import torch
-from test_qwen36_video_vision import _frames, _reference_patches, tiny_vision  # noqa: F401
+from test_qwen36_video_vision import _frames, _reference_patches, tiny_vision as tiny_vision
 
 
 @pytest.fixture
@@ -66,6 +66,79 @@ def test_multiple_video_items_use_runtime_group_encoding(model, tiny_vision):
         result = model.embed_multimodal(pixel_values_videos=patches, video_grid_thw=torch.tensor([[2, 4, 6], [3, 4, 6]]))
     assert [tuple(value.shape) for value in result] == [(12, 32), (18, 32)]
     assert runtime.models[8].calls - before == 5
+
+
+@pytest.mark.parametrize("video_first", [False, True])
+def test_registered_mtp_keeps_visual_pairs_across_resumed_chunks(model, tmp_path, monkeypatch, video_first):
+    import logging
+    import sys
+    import types
+
+    from test_qwen35_spec_visual import make_runtime
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parents[2] / "vllm_merak"))
+    # Only the optional service logger is substituted; controller, backend,
+    # processor, visual model and HMONNX sessions all execute production code.
+    logger = types.ModuleType("vllm.logger")
+    logger.init_logger = logging.getLogger
+    monkeypatch.setitem(sys.modules, "vllm.logger", logger)
+    from vllm_merak.spec_decode.artifact import HMONNXSpecDecodeArtifact, SpecDecodeDraftGraphs
+    from vllm_merak.spec_decode.controller import HMONNXSpecDecodeController
+    from vllm_merak.spec_decode.hmonnx_backend import HMONNXDraftRuntimeBackend, _PrivateCacheState
+
+    runtime = make_runtime(tmp_path, "mtp")
+    artifact = HMONNXSpecDecodeArtifact(
+        artifact_dir=tmp_path, metadata_path=tmp_path / "meta.json", runtime_contract_version=2,
+        mode="mtp", num_draft_tokens=2, verify_length=3, target_hidden_output_name="post_norm_out",
+        target_linear_state_outputs=None, draft_abi="qwen_mtp_v1", draft_graphs=SpecDecodeDraftGraphs(),
+        draft_cache_mutation="in_place", draft_cache_binding=None, draft_constant_positions=False,
+        draft_position_semantics=None, draft_layer_attention_types=(), minimum_sliding_cache_slack=None,
+        dflash_noise_token_id=None,
+    )
+    backend = object.__new__(HMONNXDraftRuntimeBackend)
+    backend.artifact, backend.device = artifact, torch.device("cpu")
+    backend._private_cache = _PrivateCacheState(values={}, storage_ptrs={})
+    backend._sessions = {"prefill": runtime.draft_prefill_session, "decode": runtime.draft_decode_session}
+    backend.target_model = SimpleNamespace(embed_input_ids=runtime.token_embedding)
+    feeds = []
+    for session in backend._sessions.values():
+        run = session.run
+
+        def record(feed, run=run):
+            feeds.append({name: value.clone() for name, value in feed.items()})
+            return run(feed)
+
+        monkeypatch.setattr(session, "run", record)
+    controller = HMONNXSpecDecodeController(artifact=artifact, backend=backend)
+    image_grid, video_grid = torch.tensor([[1, 4, 6]]), torch.tensor([[2, 4, 6]])
+    image = dict(pixel_values=_reference_patches(_frames(1)), image_grid_thw=image_grid)
+    video = dict(pixel_values_videos=_reference_patches(_frames(4)), video_grid_thw=video_grid)
+    features = model.embed_multimodal(**(video | image if video_first else image | video))
+    image_span = [6] + [4] * 6 + [7]
+    video_span = [6] + [5] * 6 + [7, 9, 6] + [5] * 6 + [7]
+    ids = torch.tensor([1] + (video_span + image_span if video_first else image_span + video_span) + [2])
+    fused = runtime.token_embedding(ids).detach()
+    for tokens, rows in zip(([5, 4] if video_first else [4, 5]), features):
+        fused[ids == tokens] = rows[:, :4].detach()
+    hidden = fused.tanh()
+    image_offset = video_offset = 0
+    for start in range(0, ids.numel(), 3):
+        chunk, embeddings = ids[start:start+3], fused[start:start+3]
+        fields, image_offset, video_offset = model._extract_request_multimodal_kwargs(
+            input_ids=chunk, inputs_embeds=embeddings,
+            image_grid_thw=image_grid, image_grid_offset=image_offset,
+            video_grid_thw=video_grid, video_grid_offset=video_offset,
+        )
+        if (chunk == 5).any():
+            torch.testing.assert_close(fields["video_embeds"], embeddings[chunk == 5])
+        controller.on_target_forward(req_id="visual", phase="prefill", past_len=start,
+                                     input_ids=chunk, input_embeddings=embeddings,
+                                     result=SimpleNamespace(hidden_states=hidden[start:start+3]))
+    paired = torch.cat([feed["next_token_embedding"][:, :feed["current_input_length"].item()] for feed in feeds], 1)
+    torch.testing.assert_close(paired[0], fused[1:])
+    paired_hidden = torch.cat([feed["post_norm_hidden"][:, :feed["current_input_length"].item()] for feed in feeds], 1)
+    torch.testing.assert_close(paired_hidden[0], hidden[:-1])
+    assert (image_offset, video_offset) == (1, 2)
 
 
 @pytest.mark.parametrize("fields", [

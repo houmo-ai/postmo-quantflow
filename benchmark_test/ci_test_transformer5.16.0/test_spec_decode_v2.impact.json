@@ -11,7 +11,8 @@
         "xhmodel_merak/model_integrations/qwen/inference.py",
         "xhmodel_merak/_environment.py",
         "xhmodel_merak/xh_llm/hmonnx/shared_head.py",
-        "xhmodel_merak/xh_llm/models/qwen3_5/hybrid_cache_runtime.py"
+        "xhmodel_merak/xh_llm/models/qwen3_5/hybrid_cache_runtime.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/spec_decode_visual.py"
       ]
     }
   ]

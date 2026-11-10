@@ -1,15 +1,21 @@
 {
   "version": 1,
-  "rules": [{
-    "id": "vllm-qwen-video",
-    "patterns": [
-      "vllm_merak/vllm_merak/model_executor/model_loader/qwen3_5.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5/visual_token_gears.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5/_vision_model_impl.py",
-      "xhmodel_merak/xh_llm/models/qwen3_5_moe/_vision_model_impl.py",
-      "xhmodel_merak/xh_llm/wrap_model.py",
-      "benchmark_test/ci_test_transformer5.16.0/test_qwen36_video_vision.py"
-    ]
-  }]
+  "rules": [
+    {
+      "id": "vllm-qwen-video",
+      "patterns": [
+        "vllm_merak/vllm_merak/model_executor/model_loader/qwen3_5.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/qwen3_5_hmonnx_inference.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/visual_token_gears.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5/_vision_model_impl.py",
+        "xhmodel_merak/xh_llm/models/qwen3_5_moe/_vision_model_impl.py",
+        "xhmodel_merak/xh_llm/wrap_model.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_qwen36_video_vision.py",
+        "vllm_merak/vllm_merak/spec_decode/controller.py",
+        "vllm_merak/vllm_merak/spec_decode/hmonnx_backend.py",
+        "vllm_merak/vllm_merak/spec_decode/artifact.py",
+        "benchmark_test/ci_test_transformer5.16.0/test_qwen35_spec_visual.py"
+      ]
+    }
+  ]
 }

@@ -49,6 +49,8 @@ def main(args: argparse.Namespace) -> None:
         dtype=args.dtype,
         prompt=args.prompt,
         prompt_file=args.prompt_file,
+        image_path=args.image_path,
+        video_path=args.video_path,
         max_new_tokens=args.max_new_tokens,
         min_output_tokens=args.min_output_tokens,
         enable_thinking=args.enable_thinking,
@@ -83,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dtype", type=str, default="fp16")
     parser.add_argument("--prompt", type=str, default="写一首关于 AI的诗")
     parser.add_argument("--prompt-file", "--prompt_file", dest="prompt_file", type=str, default=None)
+    media = parser.add_mutually_exclusive_group()
+    media.add_argument("--image-path", help="Image file for target visual prefill")
+    media.add_argument("--video-path", help="Video file or frame directory for target visual prefill")
     parser.add_argument("--max-new-tokens", "--max_new_tokens", dest="max_new_tokens", type=int, default=128)
     parser.add_argument(
         "--min-output-tokens",
