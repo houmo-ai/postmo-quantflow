@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import torch
+
 
 def _is_verify_phase(phase: str) -> bool:
     return re.fullmatch(r"decode_m(?:[2-9]|[1-9][0-9]+)", phase) is not None
@@ -232,3 +234,219 @@ def _save_state(directory: Path, prefix: str, values: Mapping[str, Any]) -> list
         np.save(directory / filename, array, allow_pickle=False)
         result.append({"name": name, "file": filename, "shape": list(array.shape), "dtype": str(array.dtype)})
     return result
+
+
+@torch.no_grad()
+def run_qwen4_exp_hmonnx_golden(
+    hmonnx_path: str | Path,
+    sample_inputs: tuple[torch.Tensor, ...],
+    golden_dir: str | Path,
+    *,
+    device: str | torch.device = "cpu",
+    step: int = 0,
+) -> dict[str, torch.Tensor]:
+    """Execute one cached decode turn and persist full HMONNX Golden tensors."""
+
+    from .xhquant_extensions import qwen4_exp_xhquant_extension_scope
+
+    with qwen4_exp_xhquant_extension_scope():
+        from xhquant.api import HMONNXGoldenInference
+        from xhquant.core.cache_tensor import CacheTensor
+
+        session = HMONNXGoldenInference(str(hmonnx_path))
+        session.exec_device = torch.device(device)
+        session.save_golden = True
+        session.golden_dir = str(golden_dir)
+        session.step = int(step)
+        session.initialize()
+        input_names = session.get_input_names()
+        from .host_ple_inputs import HostPLEInputs
+        from .qsa_host_controls import QSA_HOST_CONTROL_NAMES, build_qsa_host_controls, qsa_host_control_spec
+
+        host_ple = HostPLEInputs.from_graph(hmonnx_path) if Path(hmonnx_path).is_file() else None
+        host_names = [spec["input_name"] for spec in host_ple.manifest["layers"]] if host_ple else []
+        base_names = [name for name in input_names if name not in host_names]
+        if len(sample_inputs) == len(input_names):
+            values = dict(zip(input_names, sample_inputs, strict=True))
+        elif host_ple and len(sample_inputs) == len(base_names):
+            values = dict(zip(base_names, sample_inputs, strict=True))
+        elif (qsa_host_control_spec(session) is not None
+              and len(sample_inputs) == len(base_names) - len(QSA_HOST_CONTROL_NAMES)):
+            names = [name for name in base_names if name not in QSA_HOST_CONTROL_NAMES]
+            values = dict(zip(names, sample_inputs, strict=True))
+        else:
+            raise ValueError(
+                f"Qwen4-Exp HMONNX input count mismatch: expected {len(input_names)}, got {len(sample_inputs)}"
+            )
+        qsa_spec = qsa_host_control_spec(session)
+        if qsa_spec is not None and "qsa_attention_mask" not in values:
+            topk, mask_dtype = qsa_spec
+            pool_cache = next(value for name, value in values.items() if name.startswith("qsa_indexer_key_cache_"))
+            controls = build_qsa_host_controls(
+                int(values["past_seq_length"].item()), int(values["current_input_length"].item()),
+                int(values["inputs_embeds"].shape[1]), int(pool_cache.shape[2]) * 4,
+                topk, device=device, dtype=mask_dtype,
+            )
+            values.update(zip(QSA_HOST_CONTROL_NAMES, controls, strict=True))
+        if host_ple:
+            embeddings = host_ple.prepare(
+                values["ple_input_ids"], values, int(values["current_input_length"].item()), device=device,
+            )
+            for name, embedding in zip(host_names, embeddings, strict=True):
+                if name in values and not torch.equal(values[name].to(embedding), embedding):
+                    raise ValueError(f"Provided PLE embeddings disagree with host lookup: {name}")
+                values[name] = embedding
+        input_feed = {
+            name: (
+                values[name].to(session.get_input(name).dtype)
+                if isinstance(values[name], CacheTensor)
+                else values[name].detach().to(session.get_input(name).dtype)
+            )
+            for name in input_names
+        }
+        if host_ple and any((Path(golden_dir) / f"step_{step}" / f"{name}.npy").exists() for name in host_names):
+            raise FileExistsError("External PLE Golden step already exists")
+        outputs = session.run(input_feed)
+        if not isinstance(outputs, (tuple, list)):
+            outputs = (outputs,)
+        output_map = dict(zip(session.get_output_names(), outputs, strict=True))
+    if host_ple:
+        import numpy as np
+
+        from .golden_runtime import copy_ple_resources, record_ple_sample
+
+        root = Path(golden_dir)
+        manifest_path = root / "ple/manifest.json"
+        if manifest_path.exists():
+            entry = {"path": "ple/manifest.json", "manifest": json.loads(manifest_path.read_text())}
+            saved_layers = entry["manifest"]["layers"]
+            if len(saved_layers) != len(host_ple.manifest["layers"]):
+                raise ValueError("Existing Golden PLE layer contract differs")
+            for saved, original in zip(saved_layers, host_ple.manifest["layers"], strict=True):
+                if ({k: v for k, v in saved.items() if k not in {"packed", "exponent"}}
+                        != {k: v for k, v in original.items() if k not in {"packed", "exponent"}}):
+                    raise ValueError("Existing Golden PLE hash contract differs")
+                for kind in ("packed", "exponent"):
+                    archived = (root / "ple" / saved[kind]["path"]).resolve()
+                    original_path = host_ple.root / original[kind]["path"]
+                    if not archived.is_relative_to((root / "ple").resolve()):
+                        raise ValueError("Unsafe existing Golden PLE asset path")
+                    if not os.path.samefile(archived, original_path):
+                        if archived.stat().st_size != original_path.stat().st_size:
+                            raise ValueError("Existing Golden PLE payload size differs")
+                        with archived.open("rb") as saved_file, original_path.open("rb") as source_file:
+                            while block := source_file.read(16 * 1024 * 1024):
+                                if saved_file.read(len(block)) != block:
+                                    raise ValueError("Existing Golden PLE payload bytes differ")
+        else:
+            entry = copy_ple_resources(root, {"decode": host_ple})["decode"]
+        destination = root / f"step_{step}"
+        for name in host_names:
+            value = input_feed[name].detach().cpu()
+            if value.dtype == torch.bfloat16:
+                value = value.float()
+            np.save(destination / f"{name}.npy", value.numpy(), allow_pickle=False)
+        record_ple_sample(root, entry, "decode", int(step), destination, host_ple.last_indices)
+    summary_path = Path(golden_dir) / f"step_{step}" / "qwen4_exp_runtime_summary.json"
+    _write_json(
+        summary_path,
+        {
+            "hmonnx_path": str(Path(hmonnx_path).resolve()),
+            "inputs": [_tensor_manifest(name, value) for name, value in input_feed.items()],
+            "outputs": [_tensor_manifest(name, value) for name, value in output_map.items()],
+        },
+    )
+    return output_map
+
+def _tensor_manifest(name: str, tensor: torch.Tensor) -> dict[str, Any]:
+    return {
+        "name": name,
+        "shape": list(tensor.shape),
+        "dtype": str(tensor.dtype).removeprefix("torch."),
+    }
+
+def _write_json(path: Path, data: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(data), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+
+@torch.no_grad()
+def _validate_hmonnx_runtime_parity(
+    hmonnx_path: str | Path,
+    sample_inputs: tuple[torch.Tensor, ...],
+    reference_model: torch.nn.Module,
+    *,
+    device: str | torch.device,
+    reference_device: str | torch.device,
+) -> list[dict[str, Any]]:
+    """Prove that the serialized HMONNX graph matches its XH2 export graph."""
+
+    from xhquant.api import HMONNXGoldenInference
+    from xhquant.core.cache_tensor import CacheTensor
+
+    session = HMONNXGoldenInference(str(hmonnx_path))
+    session.exec_device = torch.device(device)
+    session.save_golden = False
+    session.initialize()
+    input_names = session.get_input_names()
+    if len(input_names) != len(sample_inputs):
+        raise RuntimeError(
+            f"Qwen4-Exp HMONNX parity input count mismatch: expected {len(input_names)}, got {len(sample_inputs)}"
+        )
+    runtime_feed = {
+        name: (
+            CacheTensor(value.detach().clone()).to(device=session.exec_device, dtype=session.get_input(name).dtype)
+            if isinstance(value, CacheTensor)
+            else value.detach().to(device=session.exec_device, dtype=session.get_input(name).dtype)
+        )
+        for name, value in zip(input_names, sample_inputs, strict=True)
+    }
+    runtime_outputs = session.run(runtime_feed)
+    if not isinstance(runtime_outputs, (tuple, list)):
+        runtime_outputs = (runtime_outputs,)
+    reference_inputs = tuple(
+        CacheTensor(value.detach().clone()).to(device=reference_device, dtype=session.get_input(name).dtype)
+        if isinstance(value, CacheTensor)
+        else value.detach().to(device=reference_device, dtype=session.get_input(name).dtype)
+        for name, value in zip(input_names, sample_inputs, strict=True)
+    )
+    reference_outputs = reference_model(*reference_inputs)
+    if not isinstance(reference_outputs, (tuple, list)):
+        reference_outputs = (reference_outputs,)
+    output_names = session.get_output_names()
+    if len(runtime_outputs) != len(reference_outputs) or len(output_names) != len(runtime_outputs):
+        raise RuntimeError(
+            "Qwen4-Exp HMONNX parity output count mismatch: "
+            f"runtime={len(runtime_outputs)}, reference={len(reference_outputs)}, names={len(output_names)}"
+        )
+
+    parity: list[dict[str, Any]] = []
+    for name, actual, expected in zip(output_names, runtime_outputs, reference_outputs, strict=True):
+        if actual.shape != expected.shape:
+            raise RuntimeError(
+                f"Qwen4-Exp HMONNX output {name!r} shape mismatch: "
+                f"runtime={tuple(actual.shape)}, reference={tuple(expected.shape)}"
+            )
+        if actual.is_floating_point() or expected.is_floating_point():
+            actual_float = actual.float()
+            expected_float = expected.float().to(actual_float.device)
+            if not torch.isfinite(actual_float).all() or not torch.isfinite(expected_float).all():
+                raise RuntimeError(f"Qwen4-Exp HMONNX output {name!r} contains non-finite values")
+            max_abs_error = float((actual_float - expected_float).abs().max()) if actual.numel() else 0.0
+            torch.testing.assert_close(actual_float, expected_float, atol=1e-3, rtol=1e-3)
+        else:
+            expected = expected.to(actual.device)
+            max_abs_error = (
+                float((actual.to(torch.int64) - expected.to(torch.int64)).abs().max()) if actual.numel() else 0.0
+            )
+            torch.testing.assert_close(actual, expected)
+        parity.append(
+            {
+                "name": name,
+                "shape": list(actual.shape),
+                "dtype": str(actual.dtype).removeprefix("torch."),
+                "max_abs_error": max_abs_error,
+            }
+        )
+    return parity

@@ -5,7 +5,9 @@
       "id": "qwen4-exp-serving-graph-adaptation",
       "patterns": [
         "xhmodel_merak/xh_llm/models/qwen4_exp/serving_graph.py",
-        "xhmodel_merak/xh_llm/models/qwen4_exp/hmonnx_export.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/checkpoint.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/static_export.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/golden_runtime.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/xhquant_extensions.py",
         "benchmark_test/ci_test_transformer5.16.0/test_qwen4_exp_serving_graph.py",
         "xhmodel_merak/exec_backends/factory.py",

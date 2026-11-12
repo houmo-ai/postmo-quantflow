@@ -1,398 +1,554 @@
-"""Adapt existing Qwen4 text graphs without re-exporting their weight tensors."""
+"""Publish Qwen4's explicit cache ABI and package-local external resources."""
 
 from __future__ import annotations
 
+import copy
 import os
-import tempfile
 from pathlib import Path
+from typing import Any
 
 
-def rewrite_gather_index_normalization(model, *, external_data_dir=None) -> int:
-    """Keep SDK GatherElements negative-index normalization in its INT32 ABI.
+def convert_qwen4_exp_kv_to_llm_cache(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    context_length: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> str:
+    """Publish SDK-standard KVcache nodes with explicit in-place K/V storage.
 
-    Match the complete closed SDK decomposition, not arbitrary INT64 arithmetic.
-    Negative INT32 indices plus a positive INT32 axis size cannot overflow. The
-    positive branch's unused addition may overflow, but only the original index
-    reaches the gather in that branch. Invalid negative indices retain the same
-    out-of-bounds sentinel (axis size).
+    The runtime class and existing ABI remain named LLMCache; XH2 HMONNX
+    uses KVcache, matching the SDK exporter and DeepSeek graphs.
+    In-place updates are enabled on the SDK runtime, not by an ONNX attribute.
+    A negative attention limit selects full storage rather than a sliding view.
     """
+    import re
+
+    import onnx
+    from onnx import helper
+
+    source, destination = Path(input_path), Path(output_path)
+    model = onnx.load(str(source), load_external_data=False)
+    if any(node.op_type == "PageKVCache" for node in model.graph.node):
+        raise ValueError("explicit LLMCache conversion requires the raw graph, not PageKVCache")
+    pattern = re.compile(r"^past_(key|value)_cache_(\d+)$")
+    indexer_pattern = re.compile(r"^qsa_indexer_(?:key|pool)_cache_\d+$")
+    graph_inputs = {value.name: value for value in model.graph.input}
+    producers = {name: node for node in model.graph.node for name in node.output}
+    writers: dict[tuple[str, int], Any] = {}
+    indexer_writers: set[str] = set()
+    for node in model.graph.node:
+        if node.op_type not in {"KVcache", "LLMCache"} or len(node.input) < 4:
+            continue
+        name = node.input[3]
+        visited: set[str] = set()
+        while name not in graph_inputs and name not in visited:
+            visited.add(name)
+            alias = producers.get(name)
+            if alias is None or alias.op_type not in {"Identity", "HMIdentity"}:
+                break
+            name = alias.input[0]
+        if indexer_pattern.fullmatch(name):
+            attrs = {attr.name: helper.get_attribute_value(attr) for attr in node.attribute}
+            if name not in graph_inputs or attrs.get("axis", 2) != 2 or attrs.get("only_handle_old_cache", 0):
+                raise ValueError(f"Qwen4 indexer cache {name} must have an axis-2 cache writer")
+            if name in indexer_writers:
+                raise ValueError(f"duplicate Qwen4 indexer cache writer {name}")
+            node.input[3] = name
+            indexer_writers.add(name)
+            continue
+        match = pattern.fullmatch(name)
+        if match is None:
+            continue
+        kind, ordinal = match.groups()
+        key = (kind, int(ordinal))
+        if key in writers:
+            raise ValueError(f"duplicate Qwen4 {kind} cache writer {ordinal}")
+        value = graph_inputs.get(name)
+        shape = [] if value is None else [dim.dim_value for dim in value.type.tensor_type.shape.dim]
+        if shape != [1, num_kv_heads, context_length, head_dim]:
+            raise ValueError(f"Qwen4 cache {name} has incompatible shape {shape}")
+        attrs = {attr.name: helper.get_attribute_value(attr) for attr in node.attribute}
+        if attrs.get("axis", 2) != 2 or attrs.get("only_handle_old_cache", 0):
+            raise ValueError(f"Qwen4 cache {name} must be an axis-2 K/V writer")
+        node.op_type = "KVcache"
+        node.input[3] = name
+        del node.attribute[:]
+        node.attribute.extend([helper.make_attribute("axis", 2), helper.make_attribute("attention_max_length", -1)])
+        writers[key] = node
+    keys = {ordinal for kind, ordinal in writers if kind == "key"}
+    values = {ordinal for kind, ordinal in writers if kind == "value"}
+    expected = {name for name in graph_inputs if pattern.fullmatch(name)}
+    if not keys or keys != values or len(writers) != len(expected):
+        raise ValueError("Qwen4 explicit LLMCache conversion requires all paired K/V writers")
+    if indexer_writers != {name for name in graph_inputs if indexer_pattern.fullmatch(name)}:
+        raise ValueError("Qwen4 explicit LLMCache conversion requires all indexer cache writers")
+    for ordinal in keys:
+        if list(writers[("key", ordinal)].input[1:3]) != list(writers[("value", ordinal)].input[1:3]):
+            raise ValueError(f"Qwen4 K/V cache lengths differ for ordinal {ordinal}")
+    # Normalize legacy indexer/state cache aliases too, preserving their ports
+    # and attributes. The SDK parses both names with the same cache semantics.
+    for node in model.graph.node:
+        if node.domain == "XH2a" and node.op_type == "LLMCache":
+            node.op_type = "KVcache"
+    # K/V and indexer storage belongs to the caller and is updated in place.
+    # Keep writer outputs inside the attention graph, but do not expose redundant
+    # functional-cache ports at the serving boundary.
+    removed_outputs = {f"present_{name}" for name in expected | indexer_writers}
+    # The in-place serving ABI removes cache aliases from the public graph
+    # boundary, but cache writers can still feed downstream attention nodes.
+    # Preserve their type information as internal value_info so ONNX frontends
+    # can build single-op diagnostics and lower KVcache/SelectKV together.
+    known_value_info = {value.name for value in (*model.graph.input, *model.graph.value_info)}
+    for value in model.graph.output:
+        if value.name in removed_outputs and value.name not in known_value_info and value.type.ByteSize() > 0:
+            model.graph.value_info.append(copy.deepcopy(value))
+            known_value_info.add(value.name)
+    outputs = [value for value in model.graph.output if value.name not in removed_outputs]
+    del model.graph.output[:]
+    model.graph.output.extend(outputs)
+    # Drop only now-unused aliases of those ports. Never run general DCE here:
+    # cache writers have observable mutations even without a public output.
+    pending = set(removed_outputs)
+    while pending:
+        name = pending.pop()
+        alias = producers.get(name)
+        if (
+            alias is None
+            or alias.op_type not in {"Identity", "HMIdentity"}
+            or alias.domain not in {"", "XH2a", "ai.houmo.xh2a"}
+            or len(alias.input) != 1
+            or list(alias.output) != [name]
+            or any(name in node.input for node in model.graph.node)
+            or any(value.name == name for value in model.graph.output)
+            or any(
+                attr.type in {onnx.AttributeProto.GRAPH, onnx.AttributeProto.GRAPHS}
+                for node in model.graph.node
+                for attr in node.attribute
+            )
+        ):
+            continue
+        source_name = alias.input[0]
+        model.graph.node.remove(alias)
+        pending.add(source_name)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    onnx.save_model(model, str(destination), save_as_external_data=False)
+    _link_qwen4_exp_external_data(model, source=source, destination=destination)
+    onnx.checker.check_model(str(destination))
+    return str(destination)
+
+
+def convert_qwen4_exp_kv_to_page_cache(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    context_length: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> str:
+    """Replace Qwen4 K/V writers with PageKVCache while retaining QSA computation."""
+
+    import re
+
+    import onnx
+    from onnx import helper
+
+    source = Path(input_path)
+    destination = Path(output_path)
+    model = onnx.load(str(source), load_external_data=False)
+    cache_pattern = re.compile(r"^past_(key|value)_cache_(\d+)$")
+    producers = {output: node for node in model.graph.node for output in node.output if output}
+
+    def resolve_transparent_source(value_name: str) -> str:
+        visited: set[str] = set()
+        while value_name not in visited:
+            visited.add(value_name)
+            producer = producers.get(value_name)
+            if (
+                producer is None
+                or producer.op_type not in {"Cast", "HMIdentity", "Identity"}
+                or len(producer.input) != 1
+            ):
+                break
+            value_name = producer.input[0]
+        return value_name
+
+    key_nodes: dict[int, tuple[int, Any]] = {}
+    value_nodes: dict[int, tuple[int, Any]] = {}
+    for node_index, node in enumerate(model.graph.node):
+        if node.op_type not in {"KVcache", "LLMCache"} or len(node.input) < 4:
+            continue
+        match = cache_pattern.fullmatch(resolve_transparent_source(node.input[3]))
+        if match is None:
+            continue
+        kind, ordinal_text = match.groups()
+        ordinal = int(ordinal_text)
+        target = key_nodes if kind == "key" else value_nodes
+        if ordinal in target:
+            raise ValueError(f"duplicate Qwen4 {kind} cache writer {ordinal}")
+        target[ordinal] = (node_index, node)
+    if set(key_nodes) != set(value_nodes) or not key_nodes:
+        raise ValueError(
+            "Qwen4 PageKVCache conversion requires paired K/V writers; "
+            f"key={sorted(key_nodes)}, value={sorted(value_nodes)}"
+        )
+
+    replacement_by_index: dict[int, Any] = {}
+    removed_indices: set[int] = set()
+    for ordinal in sorted(key_nodes):
+        key_index, key_node = key_nodes[ordinal]
+        value_index, value_node = value_nodes[ordinal]
+        if list(key_node.input[1:3]) != list(value_node.input[1:3]):
+            raise ValueError(f"Qwen4 K/V cache lengths differ for ordinal {ordinal}")
+        insertion_index = max(key_index, value_index)
+        replacement_by_index[insertion_index] = helper.make_node(
+            "PageKVCache",
+            inputs=[
+                key_node.input[0],
+                value_node.input[0],
+                key_node.input[1],
+                key_node.input[2],
+            ],
+            outputs=[key_node.output[0], value_node.output[0]],
+            name=f"page_kv_cache_{ordinal}",
+            domain=key_node.domain or "ai.houmo.xh2a",
+            layer_idx=ordinal,
+            cache_index=ordinal,
+            attention_kind="sliding_attention",
+            sliding_window=int(context_length),
+            output_sequence_length=int(context_length),
+            num_kv_heads=int(num_kv_heads),
+            head_size=int(head_dim),
+        )
+        removed_indices.update((key_index, value_index))
+
+    nodes = []
+    for node_index, node in enumerate(model.graph.node):
+        if node_index in removed_indices:
+            replacement = replacement_by_index.get(node_index)
+            if replacement is not None:
+                nodes.append(replacement)
+            continue
+        nodes.append(node)
+    del model.graph.node[:]
+    model.graph.node.extend(nodes)
+
+    cache_outputs = re.compile(r"^present_past_(?:key|value)_cache_\d+$")
+    outputs = [value for value in model.graph.output if cache_outputs.fullmatch(value.name) is None]
+    del model.graph.output[:]
+    model.graph.output.extend(outputs)
+
+    required_values = {value.name for value in model.graph.output}
+    retained_nodes = []
+    for node in reversed(model.graph.node):
+        if not required_values.intersection(node.output):
+            continue
+        retained_nodes.append(node)
+        required_values.update(name for name in node.input if name)
+    retained_nodes.reverse()
+    del model.graph.node[:]
+    model.graph.node.extend(retained_nodes)
+    graph_inputs = [
+        value for value in model.graph.input if value.name in required_values or not cache_pattern.fullmatch(value.name)
+    ]
+    del model.graph.input[:]
+    model.graph.input.extend(graph_inputs)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    onnx.save_model(model, str(destination), save_as_external_data=False)
+    _link_qwen4_exp_external_data(model, source=source, destination=destination)
+    onnx.checker.check_model(str(destination))
+    return str(destination)
+
+
+def _link_qwen4_exp_external_data(model: Any, *, source: Path, destination: Path) -> None:
+    """Keep large HMONNX weights zero-copy when writing a sibling graph."""
+
+    from onnx import TensorProto, external_data_helper
+
+    locations: set[str] = set()
+    for tensor in external_data_helper._get_all_tensors(model):
+        if tensor.data_location != TensorProto.EXTERNAL:
+            continue
+        location = next((item.value for item in tensor.external_data if item.key == "location"), None)
+        if location:
+            locations.add(location)
+    from .ple_export import _metadata_specs
+
+    for spec in _metadata_specs(model, source.parent):
+        for key in ("packed", "exponent"):
+            locations.add(spec[key]["path"])
+    for location in locations:
+        relative = Path(location)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"unsafe Qwen4 HMONNX external-data location: {location!r}")
+        source_data = source.parent / relative
+        destination_data = destination.parent / relative
+        if not source_data.is_file():
+            raise FileNotFoundError(f"Qwen4 HMONNX external data is missing: {source_data}")
+        destination_data.parent.mkdir(parents=True, exist_ok=True)
+        if destination_data.exists():
+            if not os.path.samefile(source_data, destination_data):
+                raise FileExistsError(f"refusing to replace external data at {destination_data}")
+            continue
+        os.link(source_data, destination_data)
+
+
+def publish_qwen4_exp_qsa_layout_resources(
+    path: str | Path,
+    *,
+    batch_size: int,
+    input_sequence_length: int,
+    num_attention_heads: int,
+    num_key_value_heads: int,
+    head_dim: int,
+) -> dict[str, int]:
+    """Publish QSA's static layout plan after the standard SDK export.
+
+    Layout fusion can leave a view's dimension tensor unreferenced. Preserve
+    the complete selected-KV layout plan, including its two degenerate views,
+    as part of Qwen4's published graph contract. Existing computation, tensor
+    storage and SDK diagnostics stay intact. Only small INT64 shape ranges
+    are read; packed model weights are never materialized.
+    """
+    import tempfile
+
     import numpy as np
     import onnx
+    from onnx import helper, numpy_helper
 
-    if any(a.type in {onnx.AttributeProto.GRAPH, onnx.AttributeProto.GRAPHS}
-           for n in model.graph.node for a in n.attribute):
-        return 0
-    nodes = list(model.graph.node)
-    producers = {o: n for n in nodes for o in n.output}
-    users = {}
+    geometry = (batch_size, input_sequence_length, num_attention_heads, num_key_value_heads, head_dim)
+    if any(type(value) is not int or value < 1 for value in geometry):
+        raise ValueError("Qwen4 QSA layout geometry must contain positive integers")
+    if batch_size != 1 or num_attention_heads % num_key_value_heads:
+        raise ValueError("Qwen4 QSA layouts require batch one and divisible query/KV heads")
+    path = Path(path)
+    model = onnx.load(path, load_external_data=False)
+    graph = model.graph
+    nodes = list(graph.node)
+    selectors = [node for node in nodes if node.op_type == "SparseAttentionSelectKV"]
+    counts = {"qsa_count": len(selectors), "layout_constants_added": 0, "layout_views_added": 0}
+    if not selectors:
+        return counts
+    if graph.sparse_initializer or any(
+        attr.type in {onnx.AttributeProto.GRAPH, onnx.AttributeProto.GRAPHS}
+        for node in nodes
+        for attr in node.attribute
+    ):
+        raise ValueError("Qwen4 QSA layout publication requires a flat dense graph")
+    producers = {value: node for node in nodes for value in node.output}
+    users: dict[str, list[tuple[Any, int]]] = {}
     for node in nodes:
-        for index, name in enumerate(node.input):
-            users.setdefault(name, []).append((node, index))
-    infos = {v.name: v for v in (*model.graph.input, *model.graph.value_info, *model.graph.output)}
-    tensors = {t.name: t for t in model.graph.initializer}
-    graph_inputs = {v.name for v in model.graph.input}
-    public = {v.name for v in (*model.graph.input, *model.graph.output)}
-    reserved = set(producers) | set(infos) | set(tensors)
-    removals = set()
-    constants = {}
-    rewritten = 0
-
-    def op(name, kind, arity):
-        node = producers.get(name)
-        if (node is None or node.op_type != kind or node.domain not in {"", "ai.onnx"}
-                or len(node.input) != arity or len(node.output) != 1):
-            return None
-        return node
-
-    def scalar(name):
-        tensor = tensors.get(name)
-        if name in graph_inputs or tensor is None or tensor.data_type != onnx.TensorProto.INT64 or tensor.dims:
-            return None
+        for port, value in enumerate(node.input):
+            users.setdefault(value, []).append((node, port))
+    reserved = {value for node in nodes for value in (*node.input, *node.output)}
+    reserved.update(tensor.name for tensor in graph.initializer)
+    reserved.update(node.name for node in nodes)
+    reserved.update(value.name for value in (*graph.input, *graph.output, *graph.value_info))
+    value_types = {value.name: value.type.tensor_type for value in (*graph.input, *graph.output, *graph.value_info)}
+    shape_values: dict[str, tuple[int, ...]] = {}
+    shapes: dict[tuple[str, tuple[int, ...]], list[str]] = {}
+    for tensor in graph.initializer:
+        if tensor.data_type != onnx.TensorProto.INT64 or len(tensor.dims) != 1 or not 1 <= tensor.dims[0] <= 4:
+            continue
         if tensor.data_location == onnx.TensorProto.EXTERNAL:
-            fields = {f.key: f.value for f in tensor.external_data}
-            if external_data_dir is None or not {"location", "offset", "length"} <= fields.keys():
-                return None
-            base = Path(external_data_dir).resolve()
-            path = (base / fields["location"]).resolve()
-            offset, length = int(fields["offset"]), int(fields["length"])
-            if not path.is_relative_to(base) or offset < 0 or length != 8:
-                return None
-            with path.open("rb") as stream:
+            fields = {entry.key: entry.value for entry in tensor.external_data}
+            location = Path(fields.get("location", ""))
+            offset, length = int(fields.get("offset", "0")), int(fields.get("length", "0"))
+            if location.is_absolute() or ".." in location.parts or offset < 0 or length != tensor.dims[0] * 8:
+                raise ValueError(f"Invalid Qwen4 shape tensor external range: {tensor.name}")
+            with (path.parent / location).open("rb") as stream:
                 stream.seek(offset)
                 data = stream.read(length)
-            return int(np.frombuffer(data, dtype="<i8")[0]) if len(data) == 8 else None
-        return int(onnx.numpy_helper.to_array(tensor))
+            if len(data) != length:
+                raise ValueError(f"Truncated Qwen4 shape tensor: {tensor.name}")
+            values = tuple(int(value) for value in np.frombuffer(data, dtype="<i8"))
+        else:
+            values = tuple(int(value) for value in numpy_helper.to_array(tensor))
+        shape_values[tensor.name] = values
+        namespace = tensor.name.rpartition("/")[0]
+        shapes.setdefault((namespace, values), []).append(tensor.name)
 
-    def shape(name):
-        value = infos.get(name)
-        if value is None:
-            tensor = tensors.get(name)
-            if tensor is not None and name not in graph_inputs and all(d > 0 for d in tensor.dims):
-                return tuple(tensor.dims), tensor.data_type
-            return None
-        if not value.type.HasField("tensor_type"):
-            return None
-        tensor = value.type.tensor_type
-        if not tensor.HasField("shape") or any(not d.HasField("dim_value") or d.dim_value <= 0
-                                               for d in tensor.shape.dim):
-            return None
-        return tuple(d.dim_value for d in tensor.shape.dim), tensor.elem_type
+    def unique_name(stem: str) -> str:
+        candidate, suffix = stem, 0
+        while candidate in reserved:
+            suffix += 1
+            candidate = f"{stem}_{suffix}"
+        reserved.add(candidate)
+        return candidate
 
-    for final in nodes:
-        if not final.output or op(final.output[0], "Where", 3) is not final:
-            continue
-        negative = op(final.input[0], "Less", 2)
-        first = op(final.input[2], "Where", 3)
-        size = scalar(final.input[1])
-        if negative is None or first is None or size is None or not 0 < size <= 2**31 - 1:
-            continue
-        if list(negative.input) != [first.output[0], negative.input[1]] or scalar(negative.input[1]) != 0:
-            continue
-        less = op(first.input[0], "Less", 2)
-        add = op(first.input[1], "Add", 2)
-        cast = op(first.input[2], "Cast", 1)
-        if less is None or add is None or cast is None:
-            continue
-        attrs = {a.name: onnx.helper.get_attribute_value(a) for a in cast.attribute}
-        if attrs != {"to": onnx.TensorProto.INT64}:
-            continue
-        source = shape(cast.input[0])
-        if source is None or source[1] != onnx.TensorProto.INT32:
-            continue
-        value = cast.output[0]
-        if (list(less.input) != [value, less.input[1]] or scalar(less.input[1]) != 0
-                or list(add.input) != [value, add.input[1]] or scalar(add.input[1]) != size):
-            continue
-        chain = [cast, less, add, first, negative, final]
-        if any(n.attribute for n in chain[1:]) or any(n.output[0] in public for n in chain):
-            continue
-        expected = {
-            value: [(less, 0), (add, 0), (first, 2)],
-            less.output[0]: [(first, 0)], add.output[0]: [(first, 1)],
-            first.output[0]: [(negative, 0), (final, 2)], negative.output[0]: [(final, 0)],
-        }
-        if any({(id(n), i) for n, i in users.get(name, [])} != {(id(n), i) for n, i in uses}
-               for name, uses in expected.items()):
-            continue
-        gathers = users.get(final.output[0], [])
-        if not gathers:
-            continue
-        valid = True
-        for gather, slot in gathers:
-            data = shape(gather.input[0])
-            attrs = {a.name: onnx.helper.get_attribute_value(a) for a in gather.attribute}
-            axis = attrs.get("axis", 0)
-            if (gather.op_type != "GatherElements" or gather.domain not in {"", "ai.onnx"}
-                    or slot != 1 or len(gather.input) != 2 or set(attrs) - {"axis"}
-                    or data is None or not -len(data[0]) <= axis < len(data[0])
-                    or data[0][axis] != size):
-                valid = False
-                break
-        if not valid:
-            continue
-        for old, number in [(less.input[1], 0), (negative.input[1], 0),
-                            (add.input[1], size), (final.input[1], size)]:
-            if old in constants:
+    def shape_tensor(namespace: str, values: tuple[int, ...]) -> str:
+        matches = shapes.get((namespace, values), [])
+        if len(matches) > 1:
+            raise ValueError(f"Ambiguous Qwen4 QSA layout shape {values} in {namespace!r}")
+        if matches:
+            return matches[0]
+        prefix = namespace + "/" if namespace else ""
+        name = unique_name(prefix + "qsa_layout_shape_" + "_".join(map(str, values)))
+        graph.initializer.append(numpy_helper.from_array(np.asarray(values, dtype=np.int64), name=name))
+        shapes[(namespace, values)] = [name]
+        counts["layout_constants_added"] += 1
+        return name
+
+    def boundary(value: str) -> Any:
+        found, pending, visited = [], [value], set()
+        while pending:
+            current = pending.pop()
+            if current in visited:
                 continue
-            name = old + "_gather_int32"
-            suffix = 0
-            while name in reserved:
-                suffix += 1
-                name = old + f"_gather_int32_{suffix}"
-            reserved.add(name)
-            constants[old] = name
-            model.graph.initializer.append(onnx.numpy_helper.from_array(np.array(number, dtype=np.int32), name))
-        for node in chain[1:]:
-            for index, name in enumerate(node.input):
-                if name == value:
-                    node.input[index] = cast.input[0]
-                elif name in constants:
-                    node.input[index] = constants[name]
-        for node in [add, first, final]:
-            if node.output[0] in infos:
-                infos[node.output[0]].type.tensor_type.elem_type = onnx.TensorProto.INT32
-        removals.add(id(cast))
-        rewritten += 1
-    if removals:
-        removed_outputs = {o for n in nodes if id(n) in removals for o in n.output}
-        kept_info = [v for v in model.graph.value_info if v.name not in removed_outputs]
-        del model.graph.node[:]
-        model.graph.node.extend(n for n in nodes if id(n) not in removals)
-        del model.graph.value_info[:]
-        model.graph.value_info.extend(kept_info)
-    return rewritten
+            visited.add(current)
+            for node, port in users.get(current, []):
+                if node.op_type == "MatMul" and port == 1:
+                    found.append(node)
+                elif node.op_type in {"Concat", "Reshape", "Transpose"}:
+                    pending.extend(node.output)
+        if len(found) != 1:
+            raise ValueError("Qwen4 SelectKV must have unique key/value MatMul boundaries")
+        return found[0]
 
-
-def normalize_gather_index_graph(path) -> int:
-    """Atomically lower only proven closed INT32-origin gather index chains."""
-    import onnx
-
-    path = Path(path)
-    model = onnx.load(path, load_external_data=False)
-    count = rewrite_gather_index_normalization(model, external_data_dir=path.parent)
-    if count:
-        handle, temporary = tempfile.mkstemp(prefix=".qwen4-gather-", suffix=".onnx", dir=path.parent)
+    for selector in selectors:
+        if selector.domain != "ai.houmo.xh2a" or len(selector.output) != 2:
+            raise ValueError("Qwen4 SelectKV must expose ordered key/value outputs")
+        score, output = (boundary(value) for value in selector.output)
+        softmax = producers.get(output.input[0])
+        if softmax is None or softmax.op_type != "Softmax":
+            raise ValueError("Qwen4 QSA value MatMul must be fed by Softmax")
+        pending, ancestors = list(softmax.input), set()
+        while pending:
+            value = pending.pop()
+            if value in ancestors:
+                continue
+            ancestors.add(value)
+            node = producers.get(value)
+            if node is not None and node.op_type in {"Add", "Mul", "Cast"}:
+                pending.extend(node.input)
+        if score.output[0] not in ancestors:
+            raise ValueError("Qwen4 SelectKV key/value paths must form the same attention")
+        key_transpose = producers.get(score.input[1])
+        key_layout = None if key_transpose is None else producers.get(key_transpose.input[0])
+        if (
+            key_transpose is None
+            or key_transpose.op_type != "Transpose"
+            or key_layout is None
+            or key_layout.op_type != "Reshape"
+            or len(key_layout.input) != 2
+        ):
+            raise ValueError("Qwen4 selected keys must use the configured packed head layout")
+        # Placeholder assembly owns independent initializer namespaces. Reuse
+        # shapes inside this actual key-layout owner, never merge block pools.
+        namespace = key_layout.input[1].rpartition("/")[0]
+        attributes = {attr.name: helper.get_attribute_value(attr) for attr in selector.attribute}
+        width = int(attributes["candidate_topk"]) * 4 + 3
+        packed = (batch_size * input_sequence_length, num_attention_heads, 1, head_dim)
+        outer = (batch_size, input_sequence_length, num_attention_heads, head_dim)
+        grouped = (
+            batch_size * input_sequence_length,
+            num_key_value_heads,
+            num_attention_heads // num_key_value_heads,
+            head_dim,
+        )
+        key_shape = (batch_size * input_sequence_length, num_key_value_heads, width, head_dim)
+        if key_layout.input[1] not in shapes.get((namespace, key_shape), []):
+            raise ValueError("Qwen4 selected-key shape disagrees with the model geometry")
+        query = producers.get(score.input[0])
+        tensor_type = value_types.get(score.input[0])
+        query_shape = None if tensor_type is None else tuple(dim.dim_value for dim in tensor_type.shape.dim)
+        if query is not None and query.op_type == "Reshape":
+            query_shape = shape_values.get(query.input[1])
+        if query_shape is not None:
+            if query_shape != grouped:
+                raise ValueError("Qwen4 query shape disagrees with the configured query heads")
+        else:
+            # A single-query/single-KV-head wrapper omits its identity view.
+            # Check the real projected query width, or its typed graph input.
+            pending, seen, widths = [score.input[0]], set(), set()
+            while pending:
+                value = pending.pop()
+                if value in seen:
+                    continue
+                seen.add(value)
+                node = producers.get(value)
+                if node is None:
+                    tensor_type = value_types.get(value)
+                    if tensor_type is not None:
+                        dimensions = tuple(dim.dim_value for dim in tensor_type.shape.dim)
+                        if dimensions == (batch_size, num_attention_heads, input_sequence_length, head_dim):
+                            widths.add(2 * num_attention_heads * head_dim)
+                elif node.op_type == "Linear":
+                    attrs = {attr.name: helper.get_attribute_value(attr) for attr in node.attribute}
+                    widths.add(int(attrs.get("out_features", -1)))
+                elif node.op_type == "Concat":
+                    pending.extend(node.input)
+                elif node.op_type in {"Rope", "RMSNorm", "Reshape", "Transpose", "Slice", "Cast"}:
+                    pending.append(node.input[0])
+            if widths != {2 * num_attention_heads * head_dim}:
+                raise ValueError("Qwen4 query projection disagrees with the configured query heads")
+        pending, seen, output_widths = [output.output[0]], set(), set()
+        while pending:
+            value = pending.pop()
+            if value in seen:
+                continue
+            seen.add(value)
+            tensor_type = value_types.get(value)
+            if tensor_type is not None:
+                dimensions = tuple(dim.dim_value for dim in tensor_type.shape.dim)
+                if len(dimensions) == 3 and dimensions[:2] == (batch_size, input_sequence_length):
+                    output_widths.add(dimensions[2])
+            for node, _ in users.get(value, []):
+                if node.op_type == "Linear":
+                    attrs = {attr.name: helper.get_attribute_value(attr) for attr in node.attribute}
+                    output_widths.add(int(attrs.get("in_features", -1)))
+                elif node.op_type in {"Reshape", "Transpose", "Mul", "Cast"}:
+                    pending.extend(node.output)
+        if output_widths != {num_attention_heads * head_dim}:
+            raise ValueError("Qwen4 attention output width disagrees with the configured query heads")
+        for dimensions in (packed, outer, grouped, key_shape, (batch_size * input_sequence_length, 1, 1, width)):
+            shape_tensor(namespace, dimensions)
+        if outer != grouped or packed == grouped:
+            continue
+        if (
+            query is None
+            or query.op_type != "Transpose"
+            or {attr.name: helper.get_attribute_value(attr) for attr in query.attribute} != {"perm": [0, 2, 1, 3]}
+        ):
+            raise ValueError("Qwen4 degenerate grouped-query identity must be lowered in the wrapper")
+        target = shape_tensor(namespace, packed)
+        for source, domain, allowzero, role in (
+            (score.input[0], "ai.houmo.xh2a", 0, "packed_query"),
+            (output.output[0], "", 1, "packed_output"),
+        ):
+            existing = [
+                node
+                for node in nodes
+                if node.op_type == "Reshape"
+                and node.domain == domain
+                and list(node.input) == [source, target]
+                and {attr.name: helper.get_attribute_value(attr) for attr in node.attribute} == {"allowzero": allowzero}
+            ]
+            if len(existing) > 1:
+                raise ValueError(f"Ambiguous Qwen4 QSA {role} publication view")
+            if not existing:
+                prefix = namespace + "/" if namespace else ""
+                node = helper.make_node(
+                    "Reshape",
+                    [source, target],
+                    [unique_name(prefix + "qsa_layout_" + role + "_value")],
+                    name=unique_name(prefix + "qsa_layout_" + role),
+                    domain=domain,
+                    allowzero=allowzero,
+                )
+                nodes.insert(nodes.index(producers[source]) + 1, node)
+                counts["layout_views_added"] += 1
+    if counts["layout_constants_added"] or counts["layout_views_added"]:
+        del graph.node[:]
+        graph.node.extend(nodes)
+        handle, temporary = tempfile.mkstemp(prefix=".qwen4-qsa-layout-", suffix=".onnx", dir=path.parent)
         os.close(handle)
         try:
-            onnx.save_model(model, temporary)
+            onnx.save_model(model, temporary, save_as_external_data=False)
             onnx.checker.check_model(temporary)
             os.replace(temporary, path)
         finally:
             Path(temporary).unlink(missing_ok=True)
-    return count
-
-
-def simplify_qwen4_static_layouts(model, *, external_data_dir=None) -> tuple[str, ...]:
-    """Remove proven static view identities and reuse exact boolean mask casts.
-
-    Work on the complete exported graph before serving slices are extracted.
-    Public names, subgraph captures and cache aliases are deliberately excluded.
-    """
-    import math
-
-    import numpy as np
-    import onnx
-
-    if any(attr.type in {onnx.AttributeProto.GRAPH, onnx.AttributeProto.GRAPHS}
-           for node in model.graph.node for attr in node.attribute):
-        return ()
-    infos = {v.name: v for v in (*model.graph.input, *model.graph.value_info, *model.graph.output)}
-    tensors = {v.name: v for v in model.graph.initializer}
-    public = {v.name for v in (*model.graph.input, *model.graph.output)}
-    nodes = list(model.graph.node)
-    removed = []
-    orphan_candidates = set()
-
-    def info(name):
-        value = infos.get(name)
-        if value is None or not value.type.HasField("tensor_type"):
-            return None
-        tensor = value.type.tensor_type
-        if not tensor.HasField("shape") or any(not d.HasField("dim_value") or d.dim_value <= 0
-                                               for d in tensor.shape.dim):
-            return None
-        return tuple(d.dim_value for d in tensor.shape.dim), tensor.elem_type
-
-    def attributes(node, allowed):
-        domains = {"", "ai.onnx"}
-        if node.op_type in {"Reshape", "Cast"}:
-            domains.add("ai.houmo.xh2a")
-        if node.domain not in domains or set(a.name for a in node.attribute) - allowed:
-            return None
-        return {a.name: onnx.helper.get_attribute_value(a) for a in node.attribute}
-
-    def integers(name):
-        tensor = tensors.get(name)
-        if (name in public or tensor is None or tensor.data_type != onnx.TensorProto.INT64
-                or len(tensor.dims) != 1):
-            return None
-        count = tensor.dims[0]
-        if not 1 <= count <= 8:
-            return None
-        if tensor.data_location == onnx.TensorProto.EXTERNAL:
-            fields = {f.key: f.value for f in tensor.external_data}
-            if external_data_dir is None or not {"location", "offset", "length"} <= fields.keys():
-                return None
-            base = Path(external_data_dir).resolve()
-            location = (base / fields["location"]).resolve()
-            offset, length = int(fields["offset"]), int(fields["length"])
-            if not location.is_relative_to(base) or offset < 0 or length != count * 8:
-                return None
-            with location.open("rb") as stream:
-                stream.seek(offset)
-                raw = stream.read(length)
-            if len(raw) != length:
-                return None
-            return tuple(int(x) for x in np.frombuffer(raw, dtype="<i8"))
-        return tuple(int(x) for x in onnx.numpy_helper.to_array(tensor))
-
-    def reshape(node):
-        attrs = attributes(node, {"allowzero"})
-        if (attrs is None or attrs.get("allowzero", 0) not in {0, 1} or node.op_type != "Reshape"
-                or len(node.input) != 2 or len(node.output) != 1):
-            return False
-        source, result, shape = info(node.input[0]), info(node.output[0]), integers(node.input[1])
-        if source is None or result is None or source[1] != result[1] or shape is None:
-            return False
-        resolved = []
-        for axis, size in enumerate(shape):
-            if size == 0 and attrs.get("allowzero", 0) == 0:
-                if axis >= len(source[0]):
-                    return False
-                size = source[0][axis]
-            resolved.append(size)
-        if any(size < -1 or size == 0 for size in resolved) or resolved.count(-1) > 1:
-            return False
-        elements = math.prod(source[0])
-        if -1 in resolved:
-            known = -math.prod(resolved)
-            if elements % known:
-                return False
-            resolved[resolved.index(-1)] = elements // known
-        return tuple(resolved) == result[0] and math.prod(resolved) == elements
-
-    def protected(node):
-        return (len(node.output) != 1 or node.output[0] in public
-                or any(other.op_type.lower() in {"kvcache", "llmcache", "pagekvcache",
-                                                 "gdrrecurrentscan", "gdrchunkscan"}
-                       for other in nodes if node.output[0] in other.input))
-
-    def replace(node, replacement):
-        if protected(node):
-            return False
-        output = node.output[0]
-        users = [other for other in nodes if output in other.input]
-        for other in users:
-            for index, name in enumerate(other.input):
-                if name == output:
-                    other.input[index] = replacement
-        orphan_candidates.update(node.input)
-        nodes.remove(node)
-        removed.append(node.name)
-        return True
-
-    for node in list(nodes):
-        if protected(node):
-            continue
-        producers = {output: other for other in nodes for output in other.output}
-        if reshape(node):
-            source = node.input[0]
-            previous = producers.get(source)
-            if info(source) == info(node.output[0]):
-                replace(node, source)
-            elif previous is not None and reshape(previous):
-                # The original view may have other users; only bypass it on
-                # this branch and remove it later if it becomes unused.
-                if (info(previous.input[0]) != info(node.output[0])
-                        and (previous.output[0] in public
-                             or sum(previous.output[0] in other.input for other in nodes) != 1)):
-                    continue
-                original = node.input[0]
-                node.input[0] = previous.input[0]
-                if not reshape(node):
-                    node.input[0] = original
-                elif info(node.input[0]) == info(node.output[0]):
-                    replace(node, node.input[0])
-                else:
-                    orphan_candidates.add(previous.output[0])
-        elif node.op_type == "Transpose" and len(node.input) == len(node.output) == 1:
-            attrs = attributes(node, {"perm"})
-            previous = producers.get(node.input[0])
-            old_attrs = attributes(previous, {"perm"}) if previous is not None else None
-            if (attrs is not None and previous is not None and previous.op_type == "Transpose"
-                    and old_attrs is not None and len(previous.input) == len(previous.output) == 1):
-                source = info(previous.input[0])
-                rank = len(source[0]) if source is not None else 0
-                first, second = old_attrs.get("perm", ()), attrs.get("perm", ())
-                if (rank and sorted(first) == sorted(second) == list(range(rank))
-                        and [first[i] for i in second] == list(range(rank))
-                        and info(node.output[0]) == source):
-                    replace(node, previous.input[0])
-        elif node.op_type == "Cast" and len(node.input) == len(node.output) == 1:
-            attrs = attributes(node, {"to", "round_mode"})
-            unsqueeze = producers.get(node.input[0])
-            if (attrs is None or attrs.get("to") != onnx.TensorProto.FLOAT16
-                    or attrs.get("round_mode", b"NONE") not in {b"NONE", b"RNE", b"RTZ", b"RTP", b"RTN"}
-                    or unsqueeze is None
-                    or unsqueeze.op_type != "Unsqueeze" or attributes(unsqueeze, set()) is None
-                    or len(unsqueeze.input) != 2 or len(unsqueeze.output) != 1):
-                continue
-            mask_info = info(unsqueeze.input[0])
-            axes = integers(unsqueeze.input[1])
-            if mask_info is None or mask_info[1] != onnx.TensorProto.BOOL or axes is None:
-                continue
-            for earlier in nodes[:nodes.index(node)]:
-                if earlier.op_type != "Unsqueeze" or len(earlier.input) != 2 or len(earlier.output) != 1:
-                    continue
-                cast = producers.get(earlier.input[0])
-                cast_attrs = attributes(cast, {"to", "round_mode"}) if cast is not None else None
-                if (attributes(earlier, set()) is not None and integers(earlier.input[1]) == axes
-                        and cast is not None and cast.op_type == "Cast" and cast_attrs is not None
-                        and cast_attrs.get("round_mode", b"NONE") in {b"NONE", b"RNE", b"RTZ", b"RTP", b"RTN"}
-                        and cast_attrs.get("to") == onnx.TensorProto.FLOAT16
-                        and list(cast.input) == [unsqueeze.input[0]]
-                        and info(earlier.output[0]) == info(node.output[0])):
-                    replace(node, earlier.output[0])
-                    break
-    # Only remove newly orphaned layout nodes; cache/state operators are never
-    # subject to generic dead-code elimination.
-    while True:
-        used = public | {name for node in nodes for name in node.input}
-        dead = [node for node in nodes if node.op_type in {"Reshape", "Transpose", "Unsqueeze"}
-                and attributes(node, {"allowzero", "perm"}) is not None
-                and len(node.output) == 1 and node.output[0] in orphan_candidates and node.output[0] not in used]
-        if not dead:
-            break
-        for node in dead:
-            orphan_candidates.update(node.input)
-            nodes.remove(node)
-            removed.append(node.name)
-    if removed:
-        retained = {name for node in nodes for name in (*node.input, *node.output)} | public
-        values = [value for value in model.graph.value_info if value.name in retained]
-        del model.graph.node[:]
-        model.graph.node.extend(nodes)
-        del model.graph.value_info[:]
-        model.graph.value_info.extend(values)
-    return tuple(removed)
-
-
-def normalize_qwen4_static_layout_graph(path) -> tuple[str, ...]:
-    """Apply the model's bounded layout cleanup atomically, retaining sidecars."""
-    import onnx
-
-    path = Path(path)
-    model = onnx.load(path, load_external_data=False)
-    removed = ()
-    while changed := simplify_qwen4_static_layouts(model, external_data_dir=path.parent):
-        removed += changed
-    if removed:
-        handle, temporary = tempfile.mkstemp(prefix=".qwen4-layout-", suffix=".onnx", dir=path.parent)
-        os.close(handle)
-        try:
-            onnx.save_model(model, temporary)
-            onnx.checker.check_model(temporary)
-            os.replace(temporary, path)
-        finally:
-            Path(temporary).unlink(missing_ok=True)
-    return removed
+    return counts

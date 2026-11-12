@@ -137,144 +137,117 @@ def _tiny_stateful_model():
     return Qwen4ExpForCausalLM(config).eval()
 
 
-def _run_wrapper(model, samples, capacity):
+def test_static_prefill_decode_retains_real_gdr_qsa_ple_states():
+    import copy
+
+    from xhmodel_merak.xh_llm.models.qwen4_exp.cache_contract import Qwen4ExpCacheContract
     from xhmodel_merak.xh_llm.models.qwen4_exp.modeling import (
         Qwen4ExpExportableAttention,
         build_qwen4_exp_text_export_wrapper,
     )
-    from xhmodel_merak.xh_llm.models.qwen4_exp.qsa_host_controls import build_qsa_host_controls
-    from xhquant.core.cache_tensor import CacheTensor
-
-    wrapper = build_qwen4_exp_text_export_wrapper(
-        model, input_sequence_length=samples[0].shape[1], cache_length=capacity,
-    ).eval()
-    cloned = [value.detach().clone() for value in samples]
-    for index, spec in enumerate(wrapper.cache_contract.tensors, start=10):
-        if spec.state_kind in {"kv_key", "kv_value", "qsa_indexer_key"}:
-            cloned[index] = CacheTensor(cloned[index])
-    qsa = next(module for module in wrapper.modules() if isinstance(module, Qwen4ExpExportableAttention))
-    cloned.extend(build_qsa_host_controls(
-        int(samples[1].item()), int(samples[2].item()), samples[0].shape[1], capacity,
-        qsa.packed_qsa.candidate_topk, device=samples[0].device, dtype=samples[0].dtype,
-    ))
-    with torch.no_grad():
-        return wrapper(*cloned)
-
-
-def test_decode_sample_retains_real_gdr_qsa_ple_prefill_states():
-    import copy
-
-    from xhmodel_merak.xh_llm.models.qwen4_exp.hmonnx_export import (
-        build_qwen4_exp_decode_sample_inputs,
-        build_qwen4_exp_serving_sample_inputs,
-    )
+    from xhmodel_merak.xh_llm.models.qwen4_exp.static_runtime import Qwen4ExpCacheMixin, Qwen4ExpDataPreprocess
 
     torch.manual_seed(31)
-    model = _tiny_stateful_model()
-    reference = copy.deepcopy(model)
+    native = _tiny_stateful_model()
+    decode_source, whole_source = copy.deepcopy(native), copy.deepcopy(native)
+    contract = Qwen4ExpCacheContract.from_text_config(native.config)
+    cache = Qwen4ExpCacheMixin(contract, batch_size=1, context_length=8, dtype=torch.float32)
     prompt, token = torch.tensor([[2, 7, 11, 8, 9]]), torch.tensor([[13]])
-    _, config, decode = build_qwen4_exp_decode_sample_inputs(
-        model, prefill_ids=prompt, decode_ids=token, context_length=8,
-    )
-    from xhmodel_merak.xh_llm.models.qwen4_exp.cache_contract import Qwen4ExpCacheContract
 
-    contract = Qwen4ExpCacheContract.from_text_config(config)
-    warm = dict(zip(contract.expected_keys(), decode[10:], strict=True))
-    assert int(decode[1].item()) == prompt.shape[1]
+    def stage(source, width, state, ids, past):
+        embedding = source.model.embed_tokens
+        wrapper = build_qwen4_exp_text_export_wrapper(source, input_sequence_length=width, cache_length=8).eval()
+        qsa = next(m for m in wrapper.modules() if isinstance(m, Qwen4ExpExportableAttention))
+        processor = Qwen4ExpDataPreprocess(token_embedding=embedding, input_sequence_length=width,
+                                         cache_mixin=state, pad_token_id=0, qsa_topk=qsa.packed_qsa.candidate_topk)
+        with torch.no_grad():
+            return wrapper(*processor({"input_ids": ids, "past_seq_length": past}))
+
+    prefill = stage(native, 5, cache, prompt, 0)
+    names = ["logits", *(f"present_{spec.name}" for spec in contract.tensors)]
+    cache.commit(prefill, names)
     for spec in contract.tensors:
-        assert torch.count_nonzero(warm[spec.name]) > 0, spec.name
+        assert torch.count_nonzero(cache.tensors[spec.name]) > 0, spec.name
         if "cache_length" in spec.shape:
-            assert warm[spec.name].shape[spec.shape.index("cache_length")] == 8
-    actual = _run_wrapper(model, decode, 8)
-    ids = torch.cat((prompt, token), dim=-1)
-    _, _, initial = build_qwen4_exp_serving_sample_inputs(reference, input_sequence_length=6, context_length=8)
-    whole = (reference.model.embed_tokens(ids), *initial[1:3], ids.int(), *initial[4:])
-    expected = _run_wrapper(reference, whole, 8)
+            assert cache.tensors[spec.name].shape[spec.shape.index("cache_length")] == 8
+    actual = stage(decode_source, 1, cache, token, 5)
+    cold = Qwen4ExpCacheMixin(contract, batch_size=1, context_length=8, dtype=torch.float32)
+    expected = stage(whole_source, 6, cold, torch.cat((prompt, token), dim=-1), 0)
     torch.testing.assert_close(actual[0], expected[0][:, -1:], rtol=2e-4, atol=2e-5)
     for observed, target in zip(actual[1:], expected[1:], strict=True):
         torch.testing.assert_close(observed, target, rtol=2e-4, atol=2e-5)
-    _, _, cold = build_qwen4_exp_decode_sample_inputs(model, decode_ids=token, context_length=8)
-    cleared = _run_wrapper(model, (*decode[:10], *cold[10:]), 8)
-    assert not torch.allclose(actual[0], cleared[0], rtol=2e-4, atol=2e-5)
 
 
 @pytest.mark.parametrize("capacity", [0, 5])
-def test_decode_sample_rejects_invalid_capacity_before_prefill(capacity):
-    from xhmodel_merak.xh_llm.models.qwen4_exp.hmonnx_export import build_qwen4_exp_decode_sample_inputs
+def test_static_decode_rejects_exhausted_context_before_cache_allocation(capacity):
+    from xhmodel_merak.xh_llm.models.qwen4_exp.cache_contract import Qwen4ExpCacheContract
+    from xhmodel_merak.xh_llm.models.qwen4_exp.static_runtime import Qwen4ExpCacheMixin, Qwen4ExpDataPreprocess
+    native = _tiny_stateful_model()
+    state = Qwen4ExpCacheMixin(Qwen4ExpCacheContract.from_text_config(native.config),
+                               batch_size=1, context_length=capacity, dtype=torch.float32)
+    processor = Qwen4ExpDataPreprocess(token_embedding=native.model.embed_tokens, input_sequence_length=1,
+                                      cache_mixin=state, pad_token_id=0)
+    with pytest.raises(ValueError, match="context capacity"):
+        processor({"input_ids": torch.tensor([[13]]), "past_seq_length": 5})
+    assert not state._cache_initialized
 
-    with pytest.raises(ValueError, match="context length|sample exceeds"):
-        build_qwen4_exp_decode_sample_inputs(
-            _tiny_stateful_model(), prefill_ids=torch.tensor([[2, 7, 11, 8, 9]]), context_length=capacity,
-        )
 
-
-def test_qwen4_exp_workflow_exports_hmonnx_and_golden(monkeypatch, tmp_path):
+@pytest.mark.parametrize("export_mode", ["static", "serving"])
+def test_ordinary_workflow_uses_real_model_entry_and_root_metadata(monkeypatch, tmp_path, export_mode):
     import json
 
-    from xhmodel_merak.xh_llm.models.qwen4_exp import hmonnx_export
+    from xhmodel_merak.xh_llm.models.qwen4_exp.configuration_qwen4_exp import XHQwen4ExpModelConfig
+    from xhmodel_merak.xh_llm.models.qwen4_exp.qwen4_exp_model import XHQwen4ExpModel
 
-    torch.manual_seed(47)
-    model = _tiny_stateful_model()
-    model_dir, output_dir = tmp_path / "model", tmp_path / "export"
-    model_dir.mkdir()
-    # Checkpoint/tokenizer IO and SDK publication are outside this workflow
-    # contract. Prompt execution, state construction and logits remain real.
-    monkeypatch.setattr(hmonnx_export, "load_qwen4_exp_model_for_export", lambda *args, **kwargs: model)
-    observed = {}
-
-    def publish(model, directory, **kwargs):
-        assert kwargs["cache_length"] == 8
-        assert kwargs["sample_inputs"][3].shape[-1] == 1
-        observed.update(kwargs)
-        # Exercise the frontend's in-place-input boundary: Golden must retain
-        # the original prompt state even when capture writes to sample caches.
-        observed["prefill_state"] = tuple(value.detach().clone() for value in kwargs["sample_inputs"][4:])
-        for value in kwargs["sample_inputs"][4:]:
-            value.zero_()
-        return SimpleNamespace(
-            hmonnx_path=str(directory / "model.onnx"),
-            preflight_path=str(directory / "preflight.json"), io_manifest_path=str(directory / "io.json"),
-        )
-
-    monkeypatch.setattr(hmonnx_export, "export_qwen4_exp_hmonnx", publish)
-
-    def run_graph(path, sample_inputs, golden_dir, **kwargs):
-        golden_dir.mkdir(parents=True)
-        for actual, saved in zip(sample_inputs[4:], observed["prefill_state"], strict=True):
-            torch.testing.assert_close(actual, saved, rtol=0, atol=0)
-        outputs = _run_wrapper(model, sample_inputs, observed["cache_length"])
-        observed["logits"] = outputs[0]
-        return {"logits": outputs[0]}
-
-    monkeypatch.setattr(hmonnx_export, "run_qwen4_exp_hmonnx_golden", run_graph)
-    workflow = Qwen4ExpWorkflow.__new__(Qwen4ExpWorkflow)
-    workflow.model_dir = str(model_dir)
-    workflow.workflow_config = WorkflowConfig.from_file(str(CONFIG))
-    workflow.workflow_config.export["model"]["context_max_length"] = 8
-    workflow.debug, workflow.seed = False, 42
-    workflow._build_validation_decode = lambda *args: (
-        SimpleNamespace(decode=lambda ids, **kwargs: "测试回复"),
-        "rendered prompt", torch.tensor([[2, 7, 11, 8, 9]]),
+    native = _tiny_stateful_model()
+    source, checkpoint, output = (tmp_path / name for name in ("source", "checkpoint", "export"))
+    source.mkdir()
+    checkpoint.mkdir()
+    native.config.save_pretrained(source)
+    native.config.save_pretrained(checkpoint)
+    workflow = Qwen4ExpWorkflow.from_config(str(source), str(CONFIG))
+    workflow.workflow_config.export["model"].update(
+        context_max_length=8, prefill_chunk_length=4, visual_config=None, export_mode=export_mode,
     )
-    head_calls = []
-    hook = model.lm_head.register_forward_hook(lambda module, args, output: head_calls.append(tuple(output.shape)))
-    try:
-        result = workflow.export(QuantResult(raw_model_dir=str(model_dir), skipped=True), str(output_dir), "cpu")
-    finally:
-        hook.remove()
-    assert head_calls == [(1, 5, 32), (1, 1, 32)]
-    report = json.loads(Path(result.meta["conversation_report"]).read_text())
-    assert report["prefill_state_source"] == "native_explicit_cache_wrapper"
-    assert report["prefill_state_tensor_count"] == len(observed["prefill_state"])
-    assert report["cache_length"] == 8
-    assert report["generated_token_ids"] == [
-        observed["sample_inputs"][3].item(), observed["logits"][:, -1].argmax(dim=-1).item(),
-    ]
-    assert result.meta["golden_outputs"] == ["logits"]
-    assert Path(result.meta["golden_dir"]).is_dir()
-    assert (output_dir / "golden_meta_info.json").is_file()
-    assert workflow.dump_golden(result, "cpu", "你好") == result.meta["conversation_report"]
+    observed = []
 
+    def publish(model, directory):
+        # Expensive SDK publication is the injection boundary. Shared workflow
+        # must resolve and instantiate the actual Qwen4 model/config itself,
+        # choosing the supplied checkpoint rather than the raw source.
+        assert isinstance(model, XHQwen4ExpModel)
+        assert isinstance(model.config, XHQwen4ExpModelConfig)
+        assert Path(model.hf_model_dir) == checkpoint
+        assert model.config.context_max_length == 8
+        assert model.config.prefill_chunk_length == 4
+        assert model.config.ple_quant_type == "sefp4"
+        observed.append(model)
+        metadata = {"model_config": model.config.to_dict(), "qwen4_exp_serving": {}}
+        Path(directory, "golden_meta_info.json").write_text(json.dumps(metadata))
+        Path(directory, "merak_config.json").write_text(json.dumps({"disable_prefix_caching": True}))
+        return metadata
+
+    monkeypatch.setattr(XHQwen4ExpModel, "export_hmonnx", publish)
+    result = workflow.export(
+        QuantResult(raw_model_dir=str(source), quanted_model_dir=str(checkpoint)), str(output), "cpu",
+    )
+    assert len(observed) == 1
+    assert Path(result.work_dir) == output
+    assert Path(result.config_file).is_file()
+    assert json.loads((output / "golden_meta_info.json").read_text()) == result.meta
+    assert json.loads((output / "merak_config.json").read_text())["disable_prefix_caching"] is True
+    assert not list(output.glob("hmquant*"))
+    assert not (output / "golden").exists()
+
+
+def test_removed_decode_validation_mode_fails_without_creating_output(tmp_path):
+    source, output = tmp_path / "source", tmp_path / "export"
+    source.mkdir()
+    workflow = Qwen4ExpWorkflow.from_config(str(source), str(CONFIG))
+    workflow.workflow_config.export["model"]["export_mode"] = "decode_validation"
+    with pytest.raises(ValueError, match="Unknown.*decode_validation"):
+        workflow.export(QuantResult(raw_model_dir=str(source), skipped=True), str(output), "cpu")
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("algorithm, method", [

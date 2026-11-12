@@ -27,12 +27,16 @@ class _Qwen4ExpAdapter:
         normalized = validate_inputs(recipe, inputs)
         image = normalized.get("image")
         image_path = str(require_local_file(recipe, "image", image)) if image is not None else None
+        video = normalized.get("video")
+        video_path = str(require_local_file(recipe, "video", video)) if video is not None else None
         with scoped_environment({"ENABLE_HMINFERENCE_V2": "1", "XHQUANT_PACKED_W4": "1"}):
             from xhmodel_merak.xh_llm.models.qwen4_exp.generation import run_text_generation
 
             kwargs = {}
             if image_path is not None:
                 kwargs["image"] = image_path
+            if video_path is not None:
+                kwargs["video"] = video_path
             if selected_golden:
                 import time
 

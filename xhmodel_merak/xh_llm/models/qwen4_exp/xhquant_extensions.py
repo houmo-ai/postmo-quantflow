@@ -33,9 +33,9 @@ def register_qwen4_exp_xhquant_extensions() -> None:
         return
 
     _register(_binary, operator.mod, torch.remainder, Tensor.remainder, norm_op=xhnn.Mod)
-    _register(_binary, operator.and_, torch.logical_and, Tensor.logical_and, norm_op=xhnn.And)
+    _register(_binary, operator.and_, torch.logical_and, Tensor.logical_and, Tensor.__and__, norm_op=xhnn.And)
     _register(_binary, operator.eq, torch.eq, Tensor.__eq__, norm_op=xhnn.Equal)
-    _register(_binary, operator.lt, torch.lt, Tensor.__lt__, norm_op=xhnn.Less)
+    _register(_binary, operator.lt, torch.lt, Tensor.__lt__, Tensor.lt, norm_op=xhnn.Less)
     _register(_binary, operator.le, torch.le, Tensor.__le__, norm_op=xhnn.LessOrEqual)
     _register(_binary, operator.gt, torch.gt, Tensor.__gt__, norm_op=xhnn.Greater)
     _register(_binary, operator.ge, torch.ge, Tensor.__ge__, norm_op=xhnn.GreaterOrEqual)
@@ -225,7 +225,7 @@ def _selected_kv(_: Any, node: Node, __: Graph, norm_op: type[torch.nn.Module]):
 
 
 def _selected_kv_gqa(_: Any, node: Node, __: Graph, norm_op: type[torch.nn.Module]):
-    # Newer Dynamo preserves the ".gqa" overload name. It is not a dotted
+    # The frontend preserves the ".gqa" overload name. It is not a dotted
     # GraphModule path for the SDK's generated module-name resolver.
     if not hasattr(node, "module_name") and "." in node.target.__name__:
         node.module_name = node.name

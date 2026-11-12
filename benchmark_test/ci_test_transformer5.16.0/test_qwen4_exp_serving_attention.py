@@ -24,6 +24,77 @@ def _initial_tail(cache, past):
     return torch.nn.functional.pad(previous, (0, 0, 3 - previous.shape[2], 0))
 
 
+@pytest.mark.parametrize("partial_factor", [0.375, 0.5], ids=["odd-raw-width", "even-raw-width"])
+def test_static_rotary_width_matches_native_frequency_channels(partial_factor):
+    from transformers import Qwen4ExpTextConfig
+    from transformers.models.qwen4_exp.modeling_qwen4_exp import (
+        Qwen4ExpTextAttention,
+        Qwen4ExpTextRotaryEmbedding,
+        apply_rotary_pos_emb,
+    )
+
+    from xhmodel_merak.xh_llm.models.qwen4_exp.modeling import Qwen4ExpExportableAttention, _apply_rotary
+    from xhmodel_merak.xh_llm.models.qwen4_exp.xhquant_extensions import qwen4_exp_xhquant_extension_scope
+    from xhquant.api import FrontendType, to_frontend_graph
+
+    config = Qwen4ExpTextConfig(
+        hidden_size=16, num_attention_heads=2, num_key_value_heads=1, head_dim=8,
+        indexer_n_heads=2, indexer_kv_heads=1, indexer_head_dim=8,
+        indexer_budget=4, indexer_compress_ratio=4,
+        rope_parameters={"rope_type": "default", "partial_rotary_factor": partial_factor},
+    )
+    rotary = Qwen4ExpTextRotaryEmbedding(config)
+    attention = Qwen4ExpExportableAttention(Qwen4ExpTextAttention(config, layer_idx=0), cache_length=8,
+                                           sequence_length=4)
+    assert attention.rotary_dim == attention.indexer.rotary_dim == rotary.inv_freq.numel() * 2
+    values = torch.randn(1, 2, 4, 8)
+    positions = torch.arange(4).view(1, 1, 4).repeat(3, 1, 1)
+    cos, sin = rotary(values, positions)
+
+    class Rotation(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rope = attention.rope
+
+        def forward(self, tensor, cosine, sine):
+            return _apply_rotary(tensor, cosine, sine, unsqueeze_dim=1, rope=self.rope,
+                                 rotary_dim=attention.rotary_dim)
+
+    expected = apply_rotary_pos_emb(values, cos=cos, sin=sin)
+    with qwen4_exp_xhquant_extension_scope():
+        frontend = to_frontend_graph(Rotation().eval(), FrontendType.TorchFX, (values, cos, sin))
+    torch.testing.assert_close(frontend(values, cos, sin), expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("length", [4, 1], ids=["prefill", "decode"])
+@pytest.mark.parametrize("kv_heads", [1, 2])
+def test_flat_selected_output_preserves_attention_and_both_tail_states(length, kv_heads):
+    from xhmodel_merak.xh_llm.models.qwen4_exp.qsa_host_controls import build_qsa_host_controls
+    from xhmodel_merak.xh_llm.models.qwen4_exp.selected_kv_attention import Qwen4ExpSelectedKVAttention
+
+    torch.manual_seed(71)
+    past, capacity, heads, dim = 3, 9, 4, 8
+    module = Qwen4ExpSelectedKVAttention(
+        Qwen4ExpQSAConfig(num_heads=heads, num_kv_heads=kv_heads, head_dim=dim),
+        candidate_topk=2, index_head_dim=dim, input_length=length,
+    ).eval()
+    key, value = (torch.randn(1, kv_heads, capacity, dim).half() for _ in range(2))
+    controls = build_qsa_host_controls(past, length, length, capacity, 2, device="cpu", dtype=key.dtype)
+    args = (
+        torch.randn(1, heads, length, dim).half(), torch.randn(1, 2, length, dim).half(),
+        torch.randn(1, 1, capacity // 4, dim).half(), key, value,
+        key[:, :, past:past + length], value[:, :, past:past + length],
+        _initial_tail(key, past), _initial_tail(value, past), controls[4],
+        torch.tensor([past], dtype=torch.int32), torch.tensor([length], dtype=torch.int32),
+    )
+    expected, key_tail, value_tail = module(*args)
+    module.flatten_output = True
+    actual, flat_key_tail, flat_value_tail = module(*args)
+    torch.testing.assert_close(actual, expected.transpose(1, 2).flatten(-2), rtol=0, atol=0)
+    torch.testing.assert_close(flat_key_tail, key_tail, rtol=0, atol=0)
+    torch.testing.assert_close(flat_value_tail, value_tail, rtol=0, atol=0)
+
+
 def test_shared_mrope_matches_native_at_long_multiaxis_positions():
     from transformers import Qwen4ExpTextConfig
     from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextRotaryEmbedding
@@ -227,13 +298,6 @@ def test_selected_kv_export_uses_tail_state_and_local_attention_precision(tmp_pa
     import onnx
 
     import xhquant.nn as xhnn
-    from xhmodel_merak.xh_llm.models.qwen4_exp.hmonnx_export import (
-        _align_graph_constants_with_consumers,
-        _dynamo_export_compatibility_scope,
-        _export_qwen4_exp_hmonnx_program,
-        _normalize_frontend_gather_overloads,
-        sanitize_qwen4_exp_frontend_graph,
-    )
     from xhmodel_merak.xh_llm.models.qwen4_exp.qsa_host_controls import build_qsa_host_controls
     from xhmodel_merak.xh_llm.models.qwen4_exp.selected_kv_attention import Qwen4ExpSelectedKVAttention
     from xhmodel_merak.xh_llm.models.qwen4_exp.xhquant_extensions import qwen4_exp_xhquant_extension_scope
@@ -243,6 +307,7 @@ def test_selected_kv_export_uses_tail_state_and_local_attention_precision(tmp_pa
         PrecisionMode,
         ptq_quantize,
         to_export_graph,
+        to_export_hmonnx_v2,
         to_frontend_graph,
         to_quant_graph,
     )
@@ -259,20 +324,18 @@ def test_selected_kv_export_uses_tail_state_and_local_attention_precision(tmp_pa
             torch.randn(1, 2, 2, 8).half(), torch.randn(1, 2, 3, 8).half(),
             torch.randn(1, 2, 3, 8).half(), controls[4],
             torch.tensor([3], dtype=torch.int32), torch.tensor([1], dtype=torch.int32))
-    with qwen4_exp_xhquant_extension_scope(), _dynamo_export_compatibility_scope():
-        frontend = to_frontend_graph(module, FrontendType.DynamoFX, args, enable_fuse=False)
-        _normalize_frontend_gather_overloads(frontend)
-        sanitize_qwen4_exp_frontend_graph(frontend)
+    with qwen4_exp_xhquant_extension_scope():
+        frontend = to_frontend_graph(module, FrontendType.TorchFX, args)
         assert sum(isinstance(child, xhnn.MaskedAdd) for child in frontend.modules()) == 1
         quant = to_quant_graph(frontend, 'xh2a', ConfigDict({'quant_type': 'w8a8_sefp'}))
         ptq_quantize(quant, [list(args)], PrecisionMode.ALIGNED, ['cpu'], infer_shape=False)
         quant.fixed()
-        _align_graph_constants_with_consumers(quant)
         exported = to_export_graph(quant, list(args))
         path = tmp_path / 'selected.onnx'
-        _export_qwen4_exp_hmonnx_program(exported, args, path,
-                                        input_names=tuple(f'input_{i}' for i in range(len(args))),
-                                        output_names=('output', 'next_key_tail', 'next_value_tail'))
+        to_export_hmonnx_v2(exported, args, str(path),
+                            cfg=ConfigDict(input_names=tuple(f'input_{i}' for i in range(len(args))),
+                                           output_names=('output', 'next_key_tail', 'next_value_tail')),
+                            save_as_external_data=True)
     graph = onnx.load(path, load_external_data=False)
     infos = {value.name: value for value in graph.graph.value_info}
     assert not any(node.op_type == 'FlashAttention' for node in graph.graph.node)
@@ -296,6 +359,10 @@ def test_selected_kv_export_uses_tail_state_and_local_attention_precision(tmp_pa
     selector, = [node for node in graph.graph.node if node.op_type == 'SparseAttentionSelectKV']
     assert len(selector.output) == 2
     producers = {output: node for node in graph.graph.node for output in node.output}
+    output_view, = [node for node in graph.graph.node if matmuls[-1].output[0] in node.input]
+    assert output_view.op_type == 'Reshape'
+    assert output_view.domain == ''
+    assert {attr.name: onnx.helper.get_attribute_value(attr) for attr in output_view.attribute} == {'allowzero': 1}
 
     def cache_source(name):
         while name in producers and producers[name].op_type in {'Cast', 'Identity', 'HMIdentity'}:

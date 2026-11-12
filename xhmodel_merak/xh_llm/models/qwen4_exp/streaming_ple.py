@@ -122,7 +122,7 @@ def set_streamed_ple_inputs(layer, specs, values, *, cache=None):
     inputs = {int(spec["layer_idx"]): value for spec, value in zip(specs, values, strict=True)}
     if cache is not None:
         # Cache is created inside the captured forward. Keeping tensor bindings
-        # there avoids mutating a module attribute during strict Dynamo export.
+        # there keeps streamed inputs explicit in the static wrapper boundary.
         cache._streamed_ple_embeddings = inputs
         return
     for module in layer.modules():

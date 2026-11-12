@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import gc
 import json
 import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import torch
-
+from ...workflows.base import BaseLLMWorkflow
 from ...workflows.result import ExportResult, QuantResult
 from ..qwen3_5.workflow import Qwen35Workflow
 from .quant_adapter import quantize_with_qwen4_exp_api, resolve_quant_method_options
@@ -85,22 +83,19 @@ class Qwen4ExpWorkflow(Qwen35Workflow):
         device: str,
         config_overrides: Mapping[str, Any] | None = None,
     ) -> ExportResult:
-        from .hmonnx_export import (
-            build_qwen4_exp_decode_sample_inputs,
-            export_qwen4_exp_hmonnx,
-            load_qwen4_exp_model_for_export,
-            run_qwen4_exp_hmonnx_golden,
-        )
-
         if quant_result is None:
             raise ValueError("quant_result can't be None")
         workflow_config = self.workflow_config.with_overrides(config_overrides)
         model_dir = self._resolve_export_model_dir(quant_result)
-        export_mode = workflow_config.export["model"].get("export_mode", "decode_validation")
-        if export_mode == "serving":
+        # Ordinary exports use the model lifecycle. Explicit MTP packages
+        # add verify/draft phases through the same static wrapper exporter.
+        export_mode = workflow_config.export["model"].get("export_mode", "static")
+        model_cfg = workflow_config.export["model"]
+        if export_mode == "serving" and (
+            model_cfg.get("spec_decode_mode") == "mtp" or model_cfg.get("cache_abi") == "page_kv_v1"
+        ):
             from .serving_workflow import export_qwen4_exp_serving_package
 
-            model_cfg = workflow_config.export["model"]
             export_qwen4_exp_serving_package(
                 model_dir=model_dir,
                 output_dir=output_dir,
@@ -113,106 +108,15 @@ class Qwen4ExpWorkflow(Qwen35Workflow):
             workflow_config.dump(str(config_file))
             meta = json.loads((Path(output_dir) / "golden_meta_info.json").read_text(encoding="utf-8"))
             return ExportResult(work_dir=str(output_dir), config_file=str(config_file), meta=meta)
-        if export_mode != "decode_validation":
-            raise ValueError(f"Unknown Qwen4-Exp export_mode: {export_mode!r}")
-        work_dir = Path(output_dir)
-        if work_dir.exists():
-            raise FileExistsError(f"{work_dir} already exists")
-        work_dir.mkdir(parents=True)
-        config_file = work_dir / f"{workflow_config.name}.yaml"
-        workflow_config.dump(str(config_file))
-
-        model_cfg = workflow_config.export["model"]
-        device_map = model_cfg.get("device_map")
-        model = load_qwen4_exp_model_for_export(
-            model_dir,
-            device=device,
-            device_map=device_map,
-        )
-        try:
-            validation_prompt = str(model_cfg.get("validation_prompt") or "你好，请简要介绍一下你自己。")
-            tokenizer, rendered_prompt, prefill_ids = self._build_validation_decode(
-                model,
-                model_dir,
-                validation_prompt,
-            )
-            context_length = int(model_cfg.get("context_max_length", 262144))
-            text_model, text_config, sample_inputs = build_qwen4_exp_decode_sample_inputs(
-                model,
-                prefill_ids=prefill_ids,
-                context_length=context_length,
-            )
-            first_token_id = sample_inputs[3]
-            export_result = export_qwen4_exp_hmonnx(
-                text_model,
-                work_dir / "text_decode",
-                text_config=text_config,
-                # Frontend/PTQ may execute in-place cache writers. Golden must
-                # still start from the untouched prompt state built above.
-                sample_inputs=tuple(value.detach().clone() for value in sample_inputs),
-                quant_config=model_cfg.get("quant_scheme"),
-                ple_quant_type=model_cfg.get("ple_quant_type", "sefp4"),
-                batch_size=sample_inputs[0].shape[0],
-                cache_length=context_length,
-                quant_device=sample_inputs[0].device,
-            )
-            golden_dir = work_dir / "golden"
-            golden_outputs = run_qwen4_exp_hmonnx_golden(
-                export_result.hmonnx_path,
-                sample_inputs,
-                golden_dir,
+        if export_mode in {"static", "serving"}:
+            return BaseLLMWorkflow.export(
+                self,
+                quant_result=quant_result,
+                output_dir=output_dir,
                 device=device,
+                config_overrides=config_overrides,
             )
-            # The exported wrapper already applies lm_head and returns logits.
-            hmonnx_token_id = golden_outputs["logits"][:, -1, :].argmax(dim=-1, keepdim=True)
-            generated_token_ids = [int(first_token_id.item()), int(hmonnx_token_id.item())]
-            conversation_report = work_dir / "qwen4_exp_hmonnx_conversation.json"
-            conversation_report.write_text(
-                json.dumps(
-                    {
-                        "prompt": validation_prompt,
-                        "rendered_prompt": rendered_prompt,
-                        "prompt_token_count": int(prefill_ids.shape[-1]),
-                        "prompt_token_ids": prefill_ids.detach().cpu().tolist()[0],
-                        "generated_token_ids": generated_token_ids,
-                        "generated_text": tokenizer.decode(generated_token_ids, skip_special_tokens=True),
-                        "native_seed_tokens": 1,
-                        "hmonnx_decode_tokens": 1,
-                        "prefill_state_source": "native_explicit_cache_wrapper",
-                        "prefill_state_tensor_count": len(sample_inputs) - 4,
-                        "cache_length": context_length,
-                        "hmonnx_runtime_outputs": list(golden_outputs),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-        finally:
-            del model
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-        meta = {
-            "model_type": "qwen4_exp",
-            "model_name": model_cfg.get("model_name", "qwen3_8_flash_next"),
-            "source_model": model_dir,
-            "hmonnx": export_result.hmonnx_path,
-            "preflight": export_result.preflight_path,
-            "io_manifest": export_result.io_manifest_path,
-            "golden_dir": str(golden_dir),
-            "golden_outputs": list(golden_outputs),
-            "conversation_report": str(conversation_report),
-            "precision_profile": (
-                "W4A8 routed experts; W8A8 packed attention/shared; W8A8 graph default; "
-                f"PLE {model_cfg.get('ple_quant_type', 'sefp4')} lookup"
-            ),
-        }
-        meta_path = work_dir / "golden_meta_info.json"
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        return ExportResult(work_dir=str(work_dir), config_file=str(config_file), meta=meta)
+        raise ValueError(f"Unknown Qwen4-Exp export_mode: {export_mode!r}")
 
     def dump_golden(
         self,
@@ -236,7 +140,7 @@ class Qwen4ExpWorkflow(Qwen35Workflow):
                 else:
                     raise ValueError("Qwen4 serving Golden expects text or a prompt/image mapping")
                 components = ["prefill", "decode"]
-                if serving_meta.get("visual_config"):
+                if serving_meta.get("qwen4_exp_vision") or serving_meta.get("visual_config"):
                     components.append("visual")
                 if serving_meta.get("spec_decode", {}).get("mode") == "mtp":
                     components.append("mtp")
@@ -263,35 +167,6 @@ class Qwen4ExpWorkflow(Qwen35Workflow):
         if not conversation_report or not Path(conversation_report).is_file():
             raise FileNotFoundError("Qwen4-Exp export did not produce a conversation validation report")
         return str(conversation_report)
-
-    @staticmethod
-    @torch.no_grad()
-    def _build_validation_decode(
-        model: torch.nn.Module,
-        model_dir: str,
-        prompt: str,
-    ) -> tuple[Any, str, torch.Tensor]:
-        from transformers import AutoTokenizer
-
-        from .modeling import extract_qwen4_exp_text_model
-
-        tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=False)
-        messages = [{"role": "user", "content": prompt}]
-        template_kwargs = {
-            "tokenize": False,
-            "add_generation_prompt": True,
-            "enable_thinking": False,
-        }
-        try:
-            rendered_prompt = tokenizer.apply_chat_template(messages, **template_kwargs)
-        except TypeError:
-            template_kwargs.pop("enable_thinking")
-            rendered_prompt = tokenizer.apply_chat_template(messages, **template_kwargs)
-        prefill_ids = tokenizer([rendered_prompt], return_tensors="pt", truncation=True).input_ids
-        text_model = extract_qwen4_exp_text_model(model)
-        embedding_device = text_model.embed_tokens.weight.device
-        prefill_ids = prefill_ids.to(embedding_device)
-        return tokenizer, rendered_prompt, prefill_ids
 
     def _quant_autoround_api(
         self,

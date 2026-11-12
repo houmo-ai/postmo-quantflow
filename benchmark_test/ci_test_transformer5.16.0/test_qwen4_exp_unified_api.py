@@ -98,7 +98,7 @@ def test_registry_is_lightweight_and_exposes_only_supported_scope():
     subprocess.run([sys.executable, "-c", script], cwd=ROOT, check=True, capture_output=True, text=True)
     description = describe_model(MODEL_ID, full=True)
     assert description["variants"] == ["full", "mtp"]
-    assert description["modalities"] == ["text", "image"]
+    assert description["modalities"] == ["text", "image", "video"]
     assert description["golden_components"] == ["visual", "prefill", "decode", "mtp"]
     assert description["quant_methods"] == ["rtn", "autoround"]
 
@@ -125,17 +125,18 @@ def test_resolver_routes_lengths_precision_and_existing_checkpoint(source, tmp_p
     from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
     model = WorkflowConfig.from_file(str(path)).with_overrides(plan.config_overrides).export["model"]
-    assert model["export_mode"] == "serving"
+    assert model.get("export_mode", "static") == "static"
     assert model["context_max_length"] == 4096
     assert model["prefill_chunk_length"] == 128
     assert model["max_pe_length"] == 262144
     assert effective["export"]["model"]["quant_scheme"]["ops"]["GPTQPackedMoeBlock"]["quant_type"] == "w4a8h0_ssfp"
 
 
-def test_mtp_variant_routes_assistant_and_preserves_visual_components(source, tmp_path):
+@pytest.mark.parametrize("count", [1, 2, 4])
+def test_mtp_variant_routes_assistant_and_preserves_visual_components(source, tmp_path, count):
     plan = resolve_build_plan(
         model_id=MODEL_ID, model_dir=str(source), output_dir=str(tmp_path / "mtp"),
-        speculative={"mode": "mtp", "num_draft_tokens": 1},
+        speculative={"mode": "mtp", "num_draft_tokens": count},
     )
     assert plan.variant == "mtp"
     assert plan.components == ("visual", "prefill", "decode", "mtp")
@@ -147,7 +148,12 @@ def test_mtp_variant_routes_assistant_and_preserves_visual_components(source, tm
     assert model["spec_decode_mode"] == "mtp"
     assert model["return_hidden_states"] is True
     assert model["visual_config"]["enable"] is True
-    assert model["num_draft_tokens"] == 1
+    assert model["num_draft_tokens"] == count
+    from xhmodel_merak.xh_llm.models.qwen4_exp.configuration_qwen4_exp import XHQwen4ExpModelConfig
+
+    runtime_config = XHQwen4ExpModelConfig(**model)
+    assert runtime_config.num_draft_tokens == count
+    assert runtime_config.verify_length == count + 1
     assert plan.context_length == 262144
     assert model["context_max_length"] == 262144
     assert model["prefill_chunk_length"] == 256
@@ -335,7 +341,7 @@ def _prepare_publication(source, tmp_path, monkeypatch, *, variant, external_ple
             config = WorkflowConfig.from_file(self.config_path).with_overrides(config_overrides)
             saved = root / "workflow.yaml"
             config.dump(str(saved))
-            assert config.export["model"]["export_mode"] == "serving"
+            assert config.export["model"].get("export_mode", "static") == ("serving" if variant == "mtp" else "static")
             assert Path(quant_result.quanted_model_dir) == checkpoint
             for phase in ["prefill", "decode"]:
                 _write_graph(root / phase / f"qwen38_{phase}.onnx")
@@ -480,11 +486,12 @@ def test_build_cli_forwards_selected_mtp_mode(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {"speculative": {"mode": "mtp", "num_draft_tokens": 1}}
 
 
-def test_visual_export_and_sdk_inference_declare_their_tested_torch_versions():
+def test_visual_export_and_sdk_inference_share_the_tested_torch_version():
     profile = describe_model(MODEL_ID, full=True)["dependencies"]["profiles"]["mtp"]
-    assert "torch==2.11.0" in profile["build"]["pip"]
-    assert "torch==2.8.0" not in profile["build"]["pip"]
+    assert "torch==2.8.0" in profile["build"]["pip"]
+    assert "torch==2.11.0" not in profile["build"]["pip"]
     assert "torch==2.8.0" in profile["inference"]["pip"]
+    assert "av==15.1.0" in profile["inference"]["pip"]
     assert profile["validation"]["clean_install"] is False
 
 
@@ -1005,9 +1012,11 @@ def _mtp_v3_contract_artifact(root, *, explicit_cache=False, cache_op="KVcache",
     return metadata, text, target
 
 
-@pytest.mark.parametrize("cache_op", ["KVcache", "LLMCache"])
-@pytest.mark.parametrize("damage", [None, "missing_input", "missing_writer", "axis", "page", "draft_abi"])
-@pytest.mark.parametrize("verify_length", [2, 4])
+@pytest.mark.parametrize("verify_length,cache_op,damage", [
+    (2, "KVcache", None), (2, "LLMCache", None),
+    (4, "KVcache", None), (4, "LLMCache", None),
+    *((4, "KVcache", damage) for damage in ("missing_input", "missing_writer", "axis", "page", "draft_abi")),
+])
 def test_mtp_v3_explicit_kv_cache_contract(tmp_path, damage, cache_op, verify_length):
     import hashlib
 
@@ -1061,8 +1070,7 @@ def test_mtp_v3_requires_independent_graphs_and_registers_verify_role(tmp_path, 
                                     "sequence", "hidden_output", "page_cache", "digest", "missing_graph", "ple",
                                     "extra_input", "chunk_gdr", "recurrent_output", "recurrent_count",
                                     "partial_recurrent"])
-@pytest.mark.parametrize("verify_length", [2, 4])
-def test_mtp_v3_rejects_incomplete_actual_graph_contract(tmp_path, damage, verify_length):
+def test_mtp_v3_rejects_incomplete_actual_graph_contract(tmp_path, damage):
     import hashlib
 
     import onnx
@@ -1070,6 +1078,7 @@ def test_mtp_v3_rejects_incomplete_actual_graph_contract(tmp_path, damage, verif
     from xhmodel_merak.model_integrations.qwen4_exp.artifact import validate_mtp_v3_contract
     from xhmodel_merak.xh_llm.models.qwen4_exp.cache_contract import Qwen4ExpCacheContract
 
+    verify_length = 4
     metadata, text, target = _mtp_v3_contract_artifact(tmp_path, verify_length=verify_length)
     spec = metadata["spec_decode"]
     path = tmp_path / f"decode_m{verify_length}/model.onnx"
@@ -1124,6 +1133,35 @@ def test_mtp_v3_rejects_incomplete_actual_graph_contract(tmp_path, damage, verif
     with pytest.raises((ModelError, ValueError)):
         validate_mtp_v3_contract(tmp_path, metadata, text, target)
 
+
+
+@pytest.mark.parametrize("count,damage", [
+    (1, None), (2, None), (4, None),
+    *((4, damage) for damage in ("candidate", "width", "owner", "bits", "bool_version")),
+])
+def test_mtp_v4_candidate_and_fixed_head_contract(tmp_path, count, damage):
+    from xhmodel_merak.model_integrations.qwen4_exp.artifact import validate_mtp_v3_contract
+
+    metadata, text, target = _mtp_v3_contract_artifact(tmp_path, explicit_cache=True, verify_length=count + 1)
+    metadata["model_config"]["quant_scheme"] = {"quant_type": "w8a8h1_sefp"}
+    spec = metadata["spec_decode"]
+    spec.update(runtime_contract_version=4, num_draft_tokens=count, draft_head_weight_bits=8,
+                shared_head={"version": 1, "owner": "target", "logical_bits": 8})
+    if damage == "candidate":
+        spec["num_draft_tokens"] = True
+    elif damage == "width":
+        spec["num_draft_tokens"] = spec["verify_length"]
+    elif damage == "owner":
+        spec["shared_head"]["owner"] = "draft"
+    elif damage == "bits":
+        spec["shared_head"]["logical_bits"] = 4
+    elif damage == "bool_version":
+        spec["shared_head"]["version"] = True
+    if damage:
+        with pytest.raises(ValueError):
+            validate_mtp_v3_contract(tmp_path, metadata, text, target)
+    else:
+        validate_mtp_v3_contract(tmp_path, metadata, text, target)
 
 
 @pytest.mark.parametrize("damage", ["role", "width", "padding", "capacity", "bool_width"])

@@ -72,6 +72,49 @@ def verify_draft_transaction(
         raise
 
 
+def _copy_mtp_graph(graph):
+    """Copy parser-owned shells without materializing/copying pooled weights."""
+    import numpy as np
+    import onnx_graphsurgeon as gs
+
+    tensors = {}
+    for name, tensor in graph.tensors().items():
+        if isinstance(tensor, gs.Constant):
+            # GS Constant.copy only accepts NumPy/LazyValues at construction;
+            # SDK pooling also stores SharedTensor here. Its values setter is
+            # the same boundary used by the loader and does not materialize it.
+            clone = gs.Constant(
+                name, np.empty(0, dtype=np.uint8), data_location=tensor.data_location, export_dtype=tensor.export_dtype
+            )
+            clone.values = tensor._values
+        else:
+            clone = tensor.copy()
+            clone.type = tensor.type
+        tensors[name] = clone
+
+    def copied(value):
+        return tensors[value.name] if value.name else gs.Variable.empty()
+
+    nodes = [
+        node.copy(
+            inputs=[copied(value) for value in node.inputs],
+            outputs=[copied(value) for value in node.outputs],
+            tensor_map=tensors,
+        )
+        for node in graph.nodes
+    ]
+    return gs.Graph(
+        nodes=nodes,
+        inputs=[tensors[value.name] for value in graph.inputs],
+        outputs=[tensors[value.name] for value in graph.outputs],
+        name=graph.name,
+        doc_string=graph.doc_string,
+        opset=graph.opset,
+        import_domains=graph.import_domains,
+        functions=graph.functions,
+    )
+
+
 class MTPGraphRuntime:
     """Draft prefill/decode sessions sharing independent PageKV/QSA state.
 
@@ -108,6 +151,11 @@ class MTPGraphRuntime:
         if onnx_graph is None:
             loader = MultiHMONNXLoader({"draft": str(onnx_path)})
             onnx_graph = loader.graphs.pop("draft")
+        else:
+            # SDK parsing releases Constant.values after their last use. Copy
+            # graph/tensor shells so a model-owned template can open later
+            # requests, retaining pooled/offloaded initializer storage.
+            onnx_graph = _copy_mtp_graph(onnx_graph)
         with qwen4_exp_xhquant_extension_scope():
             self.session = Qwen4ExpHostPLEInferenceV2.from_onnx_graph(str(onnx_path), onnx_graph, config)
             self.session.initialize()
@@ -149,6 +197,8 @@ class MTPGraphRuntime:
             if prefill_graph is None:
                 loader = MultiHMONNXLoader({"draft_prefill": str(prefill_path)})
                 prefill_graph = loader.graphs.pop("draft_prefill")
+            else:
+                prefill_graph = _copy_mtp_graph(prefill_graph)
             with qwen4_exp_xhquant_extension_scope():
                 self.prefill_session = Qwen4ExpHostPLEInferenceV2.from_onnx_graph(
                     str(prefill_path), prefill_graph, config,
@@ -240,6 +290,16 @@ class MTPGraphRuntime:
         return self._run(next_token_embedding, target_hidden, position_ids=position_ids, capture=capture)
 
     def _run(self, next_token_embedding, target_hidden, *, position_ids, capture=None, prefill=False):
+        width = self.prefill_chunk_length if prefill else 1
+        before = self.snapshot(write_length=width)
+        try:
+            return self._run_step(next_token_embedding, target_hidden, position_ids=position_ids,
+                                  capture=capture, prefill=prefill)
+        except BaseException:
+            self.restore(before)
+            raise
+
+    def _run_step(self, next_token_embedding, target_hidden, *, position_ids, capture=None, prefill=False):
         from xhquant.xhonnxruntime.parsers.page_attention import PageAttentionContext
 
         session = self.prefill_session if prefill else self.session
@@ -258,7 +318,6 @@ class MTPGraphRuntime:
         current_positions, pool_positions, next_group_start = prepare_mrope_position_inputs(
             self.group_start_position, position_ids, self.past_length, width, valid,
         )
-        self.group_start_position.copy_(next_group_start)
         slots = torch.full((width,), -1, dtype=torch.int64, device=self.device)
         slots[:valid] = torch.arange(self.past_length, total, device=self.device)
         blocks = torch.arange((total + 63) // 64, dtype=torch.int64, device=self.device)
@@ -293,17 +352,28 @@ class MTPGraphRuntime:
             )
             feed.update(zip(QSA_HOST_CONTROL_NAMES, controls, strict=True))
         runtime_state = ChainMap(
-            ({**{f"page_kv_{i}": cache for i, cache in enumerate(self.page_caches)},
-              "block_ids": blocks, "slot_mapping": slots} if self.page_caches else {}), self.states
+            {"group_start_position": self.group_start_position,
+             **({**{f"page_kv_{i}": cache for i, cache in enumerate(self.page_caches)},
+                 "block_ids": blocks, "slot_mapping": slots} if self.page_caches else {})}, self.states,
         )
         scope = capture.step(
             "mtp", session, graph_name="mtp_prefill" if prefill else "mtp_decode", runtime_state=runtime_state,
         ) if capture is not None else nullcontext()
         with scope:
             outputs = session.run(feed)
-        values = dict(zip(session.get_output_names(), outputs, strict=True))
-        for name, spec in qwen4_exp_cache_input_specs(self.contract).items():
-            if spec.state_kind in {"qsa_indexer_tail", "qsa_key_tail", "qsa_value_tail"} and name in self.states:
-                self.states[name].copy_(values[f"present_{name}"])
-        self.past_length = total
-        return values["logits"][:, :valid], values["mtp_hidden_states"][:, :valid]
+            values = dict(zip(session.get_output_names(), outputs, strict=True))
+            updates = []
+            for name, spec in qwen4_exp_cache_input_specs(self.contract).items():
+                if spec.state_kind in {"qsa_indexer_tail", "qsa_key_tail", "qsa_value_tail"} and name in self.states:
+                    value = values[f"present_{name}"]
+                    if value.shape != self.states[name].shape or value.dtype != self.states[name].dtype:
+                        raise ValueError(f"Qwen4 MTP returned an incompatible state: {name}")
+                    updates.append((self.states[name], value))
+            logits, hidden = values["logits"], values["mtp_hidden_states"]
+            if logits.ndim != 3 or hidden.ndim != 3 or logits.shape[:2] != (1, width) or hidden.shape[:2] != (1, width):
+                raise ValueError("Qwen4 MTP returned incompatible logits or HC states")
+            for target, value in updates:
+                target.copy_(value)
+            self.group_start_position.copy_(next_group_start)
+            self.past_length = total
+        return logits[:, :valid], hidden[:, :valid]

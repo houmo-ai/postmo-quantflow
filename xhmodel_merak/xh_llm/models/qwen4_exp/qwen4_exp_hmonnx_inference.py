@@ -239,7 +239,7 @@ class Qwen4ExpServingDataPreprocess(BaseLLMInputProcessor):
             self.state.group_start_position, positions, past_seq_length, self.input_sequence_length,
             current_input_length,
         )
-        self.state.group_start_position.copy_(next_group_start)
+        self.next_group_start_position = next_group_start
         qsa_controls = ()
         if self.qsa_control_spec is not None:
             from .qsa_host_controls import build_qsa_host_controls
@@ -279,6 +279,8 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
         self._qwen4_spec = getattr(meta_info, "spec_decode", None)
         self._qwen4_mtp_graph = None
         self._qwen4_mtp_prefill_graph = None
+        self._qwen4_mtp_runtime = None
+        self.last_mtp_stats = None
         self._verify_active = False
         self.verify_model = None
         super().__init__(meta_info, **kwargs)
@@ -315,12 +317,31 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
                     raise ValueError("Qwen4 explicit cache graph lacks paired K/V inputs")
                 enable_qwen4_exp_inplace_kv(session, required)
         self._data_processor = None
+        self._processor = None
+        self.vision_encoder = None
+        visual = getattr(meta_info, "qwen4_exp_vision", None) or getattr(meta_info, "visual_config", None)
+        if visual is not None:
+            from pathlib import Path
+
+            from .vision import load_qwen4_exp_vision
+
+            root = Path(getattr(meta_info, "_meta_path_", Path(meta_info.hf_config).parent / "meta.json")).parent
+            self.vision_encoder = load_qwen4_exp_vision(visual, root, device=self.device)
+
+    def get_processor(self):
+        if self._processor is None:
+            from .multimodal import create_qwen4_exp_processor
+
+            capacity = self.vision_encoder.max_image_tokens if self.vision_encoder is not None else 1536
+            self._processor = create_qwen4_exp_processor(self.hf_model_dir, capacity)
+        return self._processor
 
     @torch.inference_mode()
     def generate(
         self, input_ids, max_new_tokens=20, do_sample=False, pad_token_id=None,
         eos_token_id=None, streamer=None, attention_mask=None, inputs_embeds=None,
-        position_ids=None, **kwargs,
+        position_ids=None, pixel_values=None, image_grid_thw=None, pixel_values_videos=None,
+        video_grid_thw=None, mm_token_type_ids=None, rope_deltas=None, _capture=None, **kwargs,
     ):
         """Generate one unpadded greedy request using the serving cache ABI."""
         from contextlib import nullcontext
@@ -328,6 +349,9 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
         from .generation import create_mtp_runtime, generate_token_ids, resolve_eos_token_ids
 
         draft = None
+        self.last_mtp_stats = None
+        encoder = getattr(self, "vision_encoder", None)
+        previous_capture = getattr(encoder, "capture", None)
         try:
             if kwargs:
                 raise ValueError(f"Unsupported Qwen4 generation arguments: {sorted(kwargs)}")
@@ -345,12 +369,38 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
                 inputs_embeds.ndim != 3 or inputs_embeds.shape[:2] != input_ids.shape
             ):
                 raise ValueError("inputs_embeds must match the input_ids batch and sequence")
+            media = any(value is not None for value in (
+                pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw,
+            ))
+            if media and inputs_embeds is not None:
+                raise ValueError("raw visual inputs and inputs_embeds are mutually exclusive")
+            if media:
+                from transformers import AutoConfig
+
+                from .multimodal import fuse_multimodal_embeddings, multimodal_rope_positions
+
+                config = AutoConfig.from_pretrained(self.hf_model_dir)
+                native_positions, _ = multimodal_rope_positions(
+                    config, input_ids, image_grid_thw=image_grid_thw, video_grid_thw=video_grid_thw,
+                    mm_token_type_ids=mm_token_type_ids, attention_mask=attention_mask,
+                )
+                if (position_ids is not None
+                        and not torch.equal(position_ids.to(native_positions.device), native_positions)):
+                    raise ValueError("position_ids disagree with native visual positions")
+                position_ids = native_positions
+                if self.vision_encoder is not None:
+                    self.vision_encoder.capture = _capture
+                inputs_embeds = fuse_multimodal_embeddings(
+                    input_ids, self.embed_tokens, self.vision_encoder, config,
+                    pixel_values=pixel_values, image_grid_thw=image_grid_thw,
+                    pixel_values_videos=pixel_values_videos, video_grid_thw=video_grid_thw,
+                )
             # pad_token_id is accepted for caller compatibility; padding is never
             # inferred from token values because pad and EOS can share an ID.
             eos_ids = resolve_eos_token_ids(self, eos_token_id)
             context = torch.cuda.device(self.device) if torch.device(self.device).type == "cuda" else nullcontext()
             with context:
-                draft = create_mtp_runtime(self)
+                draft = create_mtp_runtime(self, capture=_capture)
                 if streamer is not None:
                     streamer.put(input_ids.detach().cpu())
                 output = generate_token_ids(
@@ -358,19 +408,28 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
                     max_new_tokens=max_new_tokens, eos_token_ids=eos_ids,
                     inputs_embeds=None if inputs_embeds is None else inputs_embeds.to(self.device),
                     position_ids=None if position_ids is None else position_ids.to(self.device),
-                    mtp_runtime=draft,
+                    mtp_runtime=draft, capture=_capture,
                 )
                 generated = input_ids.new_tensor(output).reshape(1, -1)
                 if streamer is not None and generated.numel():
                     streamer.put(generated.detach().cpu())
                 return torch.cat((input_ids, generated), dim=1)
         finally:
+            if encoder is not None:
+                encoder.capture = previous_capture
             try:
                 if draft is not None:
-                    draft.close()
+                    draft.reset()
             finally:
                 if streamer is not None:
                     streamer.end()
+
+    def close(self):
+        """Release the model-owned draft sessions; repeated calls are harmless."""
+        draft = getattr(self, "_qwen4_mtp_runtime", None)
+        self._qwen4_mtp_runtime = None
+        if draft is not None:
+            draft.close()
 
     def _load_hmonnx_graphs(self, prefill_hmonnx, decode_hmonnx):
         self._backend = qwen4_exp_execution_backend(self._backend)
@@ -397,8 +456,10 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
             root = Path(prefill_hmonnx).parent.parent
             paths["mtp_prefill"] = str(root / spec["draft"]["prefill_hmonnx"])
             self._qwen4_verify_path = str(root / spec["target"]["verify_hmonnx"])
+            default_count = 1 if spec.get("runtime_contract_version", 2) <= 3 else 4
             self._qwen4_verify_length = resolve_mtp_verify_length(
-                {"verify_length": spec["target"]["verify_chunk_length"]}
+                {"verify_length": spec["target"]["verify_chunk_length"],
+                 "num_draft_tokens": spec.get("num_draft_tokens", default_count)}
             )
             self._qwen4_verify_phase = spec.get("target_verify_graph", mtp_verify_phase(self._qwen4_verify_length))
             if self._qwen4_verify_phase != mtp_verify_phase(self._qwen4_verify_length):
@@ -451,6 +512,8 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
 
     def reset_internal_state(self) -> None:
         self.reset_qwen4_exp_state()
+        self._data_processor = None
+        self._verify_active = False
 
     @staticmethod
     def _prepare_hmonnx_paths(
@@ -526,9 +589,15 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
         )
 
     def _set_device(self, device):
+        draft = getattr(self, "_qwen4_mtp_runtime", None)
+        if draft is not None and torch.device(device) != draft.device:
+            raise ValueError(f"Qwen4 MTP sessions are fixed on device {draft.device}; reload to change device")
         super()._set_device(device)
         if hasattr(self, "_qwen4_state"):
             self._qwen4_state.to(device=device)
+        encoder = getattr(self, "vision_encoder", None)
+        if encoder is not None:
+            encoder.to(device)
         return self
 
     def _set_dtype(self, dtype):
@@ -545,7 +614,13 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
         output_names = tuple(session.get_output_names())
         if "target_hidden_states" in output_names:
             self.last_hidden_states = outputs[output_names.index("target_hidden_states")]
-        return self._qwen4_state.commit_outputs(outputs, output_names)
+        logits = self._qwen4_state.commit_outputs(outputs, output_names)
+        processor = getattr(self, "_data_processor", None)
+        pending = getattr(processor, "next_group_start_position", None)
+        if pending is not None:
+            self._qwen4_state.group_start_position.copy_(pending)
+            processor.next_group_start_position = None
+        return logits
 
 
 __all__ = [

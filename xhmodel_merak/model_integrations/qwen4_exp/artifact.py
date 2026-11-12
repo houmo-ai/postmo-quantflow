@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -16,12 +17,34 @@ from xhmodel_merak.model_integrations.autoregressive.artifact import (
 )
 
 
+def validate_component_vision(
+    root: Path, metadata: Mapping[str, Any], *, image_token_gears=(),
+) -> dict[str, Any] | None:
+    """Own Qwen4's streamed vision contract alongside its text/cache ABI."""
+    if "qwen4_exp_vision" not in metadata:
+        return None
+    try:
+        from xhmodel_merak.xh_llm.models.qwen4_exp.vision_contract import validate_qwen4_exp_vision
+
+        if metadata.get("visual_config"):
+            raise ValueError("Qwen4 must declare one vision ABI, not both component and legacy graphs")
+        config_path = confined_file(root.resolve(), metadata["hf_config"] + "/config.json", "hf_config")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        return validate_qwen4_exp_vision(
+            metadata["qwen4_exp_vision"], root,
+            image_token_gears=image_token_gears or None, vision_config=config["vision_config"],
+        )
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, f"Invalid Qwen4 component vision: {exc}") from exc
+
+
 def validate_serving_contract(root: Path, metadata: Mapping[str, Any]) -> None:
     from xhmodel_merak.xh_llm.models.qwen4_exp.cache_contract import (
         QWEN4_EXP_LLM_CACHE_ABI,
         resolve_qwen4_exp_cache_abi,
     )
 
+    validate_component_vision(root, metadata)
     try:
         validate_external_ple_contract(root, metadata)
         config_path = confined_file(root.resolve(), metadata["hf_config"] + "/config.json", "hf_config")
@@ -167,8 +190,13 @@ def validate_artifact(
     meta_file: Path,
     recipe: ModelRecipe,
 ) -> None:
-    validate_autoregressive_artifact(root, manifest, meta_file, recipe)
     metadata = json.loads(meta_file.read_text(encoding="utf-8"))
+    component_vision = validate_component_vision(root, metadata, image_token_gears=recipe.vision_gears)
+    # Component vision has its own tensor ABI; the shared vision validator
+    # describes Qwen3.5's single-graph gears. Keep every shared text, source,
+    # resource and manifest check, and validate all vision components above.
+    text_recipe = replace(recipe, vision_gears=(), vision_profile=None) if component_vision else recipe
+    validate_autoregressive_artifact(root, manifest, meta_file, text_recipe)
     validate_serving_contract(root, metadata)
     for entry in {**validate_external_ple_contract(root, metadata), **mtp_v3_graph_entries(metadata)}.values():
         artifact_file(root.resolve(), manifest, entry["path"], "qwen4_exp_ple.resource")
@@ -182,7 +210,7 @@ def validate_external_ple_contract(root: Path, metadata: Mapping[str, Any]) -> d
     declared = metadata.get("qwen4_exp_ple")
     phases = {"prefill": metadata["prefill_hmonnx"], "decode": metadata["decode_hmonnx"]}
     spec = metadata.get("spec_decode")
-    if isinstance(spec, Mapping) and spec.get("runtime_contract_version") == 3:
+    if isinstance(spec, Mapping) and spec.get("runtime_contract_version") in (3, 4):
         verify_role = spec.get("target_verify_graph", "decode_m2")
         phases[verify_role] = metadata.get(f"{verify_role}_hmonnx")
     if declared is not None and (not isinstance(declared, Mapping) or set(declared) != set(phases)):
@@ -304,7 +332,7 @@ def validate_external_ple_contract(root: Path, metadata: Mapping[str, Any]) -> d
 
 def mtp_v3_graph_entries(metadata: Mapping[str, Any]) -> dict[str, Any]:
     spec = metadata.get("spec_decode")
-    if not isinstance(spec, Mapping) or spec.get("runtime_contract_version") != 3:
+    if not isinstance(spec, Mapping) or spec.get("runtime_contract_version") not in (3, 4):
         return {}
     return {"target_verify": {"path": spec["target"]["verify_hmonnx"], "type": "decode"}}
 
@@ -326,11 +354,23 @@ def validate_mtp_v3_contract(root, metadata, text, target_contract):
     version = spec.get("runtime_contract_version") if isinstance(spec, Mapping) else None
     if version == 2:
         return  # The existing version-2 build checks retain their original contract.
-    if version != 3 or spec.get("mode") != "mtp":
+    if version not in (3, 4) or spec.get("mode") != "mtp":
         raise ValueError("Unsupported Qwen4 speculative runtime contract")
-    if (type(spec.get("num_draft_tokens")) is not int or spec["num_draft_tokens"] != 1
-            or type(spec.get("verify_length")) is not int or spec["verify_length"] < 2):
-        raise ValueError("Qwen4 MTP v3 requires one draft token and verify length >= 2")
+    count = spec.get("num_draft_tokens")
+    if (type(count) is not int or count < 1 or (version == 3 and count != 1)
+            or type(spec.get("verify_length")) is not int or spec["verify_length"] < count + 1):
+        raise ValueError("Qwen4 MTP requires positive draft count and verify length >= num_draft_tokens + 1")
+    if version == 4:
+        from xhmodel_merak.xh_llm.shared_head import resolve_shared_head_bits
+
+        bits = resolve_shared_head_bits(metadata["model_config"].get("quant_scheme"))
+        shared = spec.get("shared_head")
+        if (not isinstance(shared, Mapping) or type(shared.get("version")) is not int
+                or type(shared.get("logical_bits")) is not int
+                or shared != {"version": 1, "owner": "target", "logical_bits": bits}
+                or type(spec.get("draft_head_weight_bits")) is not int
+                or spec["draft_head_weight_bits"] != bits):
+            raise ValueError("Qwen4 MTP shared head must declare the target's logical precision")
     verify_length = spec["verify_length"]
     verify_role = f"decode_m{verify_length}"
     target, draft = spec.get("target"), spec.get("draft")

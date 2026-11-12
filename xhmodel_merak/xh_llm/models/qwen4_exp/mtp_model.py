@@ -67,18 +67,24 @@ class Qwen4ExpMTPModel(Qwen4ExpPreTrainedModel):
         self.hyper_connection_mixer = Qwen4ExpTextGatedResidual(c, use_combine=False)
         self.post_init()
 
-    def fuse(self, next_token_embedding, target_hidden):
+    def fuse(self, next_token_embedding, target_hidden, *, grouped_output=False):
         c = self.config
         embedding = self.fc_embedding(self.pre_fc_norm_embedding(next_token_embedding))
-        hidden = self.pre_fc_norm_hidden(target_hidden).unflatten(-1, (c.hc_count, c.hidden_size))
-        return (self.fc_hidden(hidden) + embedding.unsqueeze(-2)).flatten(-2)
+        hidden = self.pre_fc_norm_hidden(target_hidden).reshape(
+            target_hidden.shape[0], target_hidden.shape[1], c.hc_count, c.hidden_size,
+        )
+        result = self.fc_hidden(hidden) + embedding.unsqueeze(-2)
+        return result if grouped_output else result.flatten(-2)
 
     def forward(self, inputs_embeds, attention_mask, position_ids, past_key_values, **kwargs):
         # The outer wrapper supplies current and C4 group-start T/H/W positions.
         c = self.config
         embedding = inputs_embeds[..., : c.hidden_size]
         target_hidden = inputs_embeds[..., c.hidden_size :]
-        hidden = self.fuse(embedding, target_hidden)
+        hidden = self.fuse(
+            embedding, target_hidden,
+            grouped_output=getattr(self.layers[0].attn_hyper_connection.hc_norm, "input_is_grouped", False),
+        )
         rotary = self.rotary_emb(embedding, *position_ids)
         for layer in self.layers:
             hidden = layer(
@@ -144,21 +150,22 @@ class Qwen4ExpMTPExportWrapper(nn.Module):
             cache_length=cache_length,
             return_native_hidden_states=True,
         )
+        assistant.layers[0].attn_hyper_connection.hc_norm.input_is_grouped = True
         self.lm_head = lm_head
         self.cache_contract = self.core.cache_contract
 
     def forward(
         self, next_token_embedding, target_hidden, past_seq_length, current_input_length,
         time_position_ids, height_position_ids, width_position_ids,
-        pool_time_position_ids, pool_height_position_ids, pool_width_position_ids, *cache,
+        pool_time_position_ids, pool_height_position_ids, pool_width_position_ids, states,
     ):
         outputs = self.core(
             torch.cat((next_token_embedding, target_hidden), dim=-1),
             past_seq_length,
             current_input_length,
-            torch.zeros(next_token_embedding.shape[:2], dtype=torch.int32, device=next_token_embedding.device),
+            torch.zeros_like(time_position_ids),
             time_position_ids, height_position_ids, width_position_ids,
             pool_time_position_ids, pool_height_position_ids, pool_width_position_ids,
-            *cache,
+            states,
         )
         return self.lm_head(outputs[0]), *outputs[1:]

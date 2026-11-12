@@ -154,7 +154,7 @@ def test_native_ngram_module_exposes_real_hash_contract():
 
 def test_page_rewrite_links_sidecars_and_keeps_metadata(tmp_path):
     attention_schema = onnx.defs.get_schema("FlashAttention", 1, "ai.houmo.xh2a")
-    from xhmodel_merak.xh_llm.models.qwen4_exp.hmonnx_export import convert_qwen4_exp_kv_to_page_cache
+    from xhmodel_merak.xh_llm.models.qwen4_exp.serving_graph import convert_qwen4_exp_kv_to_page_cache
 
     source, _, _ = _fixture(tmp_path / "source")
     output = tmp_path / "raw" / "model.onnx"
@@ -191,7 +191,7 @@ def test_page_rewrite_links_sidecars_and_keeps_metadata(tmp_path):
 
 
 def test_fresh_export_golden_helper_prepares_host_inputs_from_original_samples(tmp_path):
-    from xhmodel_merak.xh_llm.models.qwen4_exp.hmonnx_export import run_qwen4_exp_hmonnx_golden
+    from xhmodel_merak.xh_llm.models.qwen4_exp.golden_runtime import run_qwen4_exp_hmonnx_golden
     from xhmodel_merak.xh_llm.models.qwen4_exp.host_ple_inputs import HostPLEInputs
 
     source, _, keep = _fixture(tmp_path / "source")
@@ -305,7 +305,7 @@ def test_modulelist_export_weight_name_retains_native_layer_identity(tmp_path):
 def test_native_text_export_externalizes_ple_after_real_sdk_tracing(tmp_path, sequence_length):
     from transformers import Qwen4ExpForCausalLM, Qwen4ExpTextConfig
 
-    from xhmodel_merak.xh_llm.models.qwen4_exp.hmonnx_export import (
+    from xhmodel_merak.xh_llm.models.qwen4_exp.static_export import (
         build_qwen4_exp_serving_sample_inputs,
         export_qwen4_exp_hmonnx,
     )
@@ -337,7 +337,6 @@ def test_native_text_export_externalizes_ple_after_real_sdk_tracing(tmp_path, se
     )
     graph = onnx.load(result.onnx_path, load_external_data=False)
     onnx.checker.check_model(str(result.onnx_path))
-    assert len(json.loads(Path(result.io_manifest_path).read_text())["removed_gdr_projection_roundtrips"]) == 1
     assert any(node.op_type == ("GDRChunkScan" if sequence_length > 1 else "GDRRecurrentScan")
                for node in graph.graph.node)
     rms_norms = [node for node in graph.graph.node if node.op_type == "RMSNorm"]

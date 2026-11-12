@@ -74,8 +74,7 @@ export:
         quant_type: w8a8h1_sefp
     use_fused_gdr: true
     spec_decode_mode: mtp
-    num_draft_tokens: 1
-    verify_length: 4
+    num_draft_tokens: 4
     return_hidden_states: true
     mtp_config:
       quant_scheme:

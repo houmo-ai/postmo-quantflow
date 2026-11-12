@@ -1,8 +1,9 @@
 # Qwen3.8 Flash Next / Qwen4-Exp
 
 统一模型 ID 为 `qwen3.8-flash-next`，原生架构为 `qwen4_exp`。
-支持文本、单张图片、`full` 和 `mtp` 变体。MTP 使用独立的 HC/QSA 草稿模型，
-每次提出一个候选，目标模型验证后提交；拒绝时恢复 K/V、DeltaNet、PLE 和 QSA 状态。
+支持文本、图片、视频、`full` 和 `mtp` 变体。MTP 使用独立的 HC/QSA 草稿模型，
+默认每轮最多提出四个候选，目标模型验证后提交；拒绝时恢复目标与草稿的
+K/V、DeltaNet、PLE、QSA 和位置状态，再重放已接受前缀。
 
 ## 查询与构建
 
@@ -11,7 +12,7 @@
 ```bash
 python -m examples_merak.unified_api.catalog qwen3.8-flash-next --full
 python -m examples_merak.llm.qwen4_exp.build \
-  --speculative '{"mode":"mtp","num_draft_tokens":1}' \
+  --speculative '{"mode":"mtp","num_draft_tokens":4}' \
   --model-dir /path/to/Qwen3.8-Flash-Next \
   --quant-checkpoint /path/to/AutoRound-GPTQModel-HF \
   --output-dir ./work_dirs/qwen38_mtp --device cuda:0
@@ -50,7 +51,8 @@ python -m examples_merak.llm.qwen4_exp.build \
   --low-memory --device cuda:0
 ```
 
-需要 MTP 时增加 `--speculative '{"mode":"mtp","num_draft_tokens":1}'`。
+需要 MTP 时增加 `--speculative '{"mode":"mtp"}'`，默认候选数为 4；
+`num_draft_tokens` 可显式指定正整数，构建时会校验候选数与验证长度、上下文容量的关系。
 Python 入口 `build_qwen4_exp_model(...)` 默认使用相同低内存路径，
 显式 `low_memory=False` 切回普通导出。统一构建按 recipe 选择模式并在执行期间设置环境，
 不依赖调用进程继承的环境变量。
@@ -63,14 +65,27 @@ PLE 原表通过 safetensors 按行读取并压缩到 SEFP4 资源，不随 bloc
 图继续接收 Host 查表反量化后的 `ple_embeddings_N`，保持原有 Golden 和推理接口。
 此模式要求 `ple_quant_type: sefp4`，FP16 PLE 可沿用普通导出。
 
-prefill、decode 和 MTP 的四 token verify 分别导出，保留各自的 recurrent/cache 契约。
-视觉与 MTP 草稿继续顺序导出，草稿仅加载自身权重并复用目标 head；不会重新加载整网。
+prefill、decode 和 MTP 的 verify 分别导出，保留各自的 recurrent/cache 契约；
+默认四候选对应五 token verify。
+视觉在每个档位中按 stem、单个 block、merger 顺序加载、导出并释放权重，
+使用 GLM5.3 同样的 QuantGraph 直接 HMONNX 接口，PTQ 明确使用请求的 CPU/CUDA 设备。
+视觉无需物化整个视觉塔。MTP 草稿仅加载自身权重；目标 head 量化一次，
+prefill、decode、verify 和两张草稿图复用同一固定量化 head，保持权重与 scale 一致。
 分块权重读取降低权重常驻内存，但上下文缓存、单模块 PTQ 和导出器本身仍占用内存；
 256K cache 容量保持原值。该实现没有启用 GPTQModel 量化阶段的 `offload_to_disk`。
 
 `export_manifest.json` 记录 `export_mode`，resume 必须保持原来的导出模式。
-对于新版 Dynamo 内联的 RMSNorm、RoPE 和临时 PlaceHolder，模型导出器恢复对应的
-既有 SDK 模块后再量化；保持融合算子和实际参数，不新增 runtime 算子或修改共享注册表。
+文本模型与 GLM5.3 使用相同的静态 wrap → TorchFX frontend → quant → HMONNX 生命周期。
+普通、分块以及 MTP 导出都捕获模型 wrapper；RMSNorm、RoPE 和缓存更新由 wrapper
+直接表达，不再保留独立 Dynamo 导出器、内联恢复和全局捕获补丁。
+发布时按当前 QSA 的静态几何保留原图的布局常量及退化 view，保持旧产物的完整计算图契约；
+此步骤不读取旧产物、不改变活动计算连接，也不改写 SDK 调试元数据。
+结构回归逐项检查算子域、全部属性、端口连接与共享关系、常量/权重内容和公开输入输出，
+包括未使用的布局资源；内部名称和调试信息的差异单独报告。
+新视觉契约为 `qwen4_exp_vision` ABI 2：每个 `visual_m*` 目录包含
+`stem.onnx`、`block_XX.onnx` 和 `merger.onnx`，根目录 `visual_gears.json` 登记档位及组件。
+发布与加载同时校验组件顺序、摘要、张量 ABI 和原生视觉配置。
+旧单图视觉产物仍可加载，新导出统一使用组件契约。
 
 新导出默认使用 `llm_cache_inplace_v1`：图显式接收 `past_key_cache_N`、
 `past_value_cache_N`，形状为 `[1, KV heads, context, head_dim]`。
@@ -112,33 +127,47 @@ SDK 需要包含 `28d9fdb2` 的 GDRChunkScan 默认属性修复，以省略默�
 `QIdentity` 节点，保留实际类型转换和输入输出顺序。
 模型只保留专属图和状态适配，不要求通用整数 Cast／Clip parser 的新增支持。
 联动变更：[SDK 47747](http://gerrit.houmo.ai/c/houmoquantization/xhquanttool/+/47747)。
-该 SDK 变更未合入时，两笔 Gerrit review 使用同一个 topic `qwen38-sdk-47747`，
-由 Houmo CI 的联合构建逻辑下载两个仓库的当前 patchset。提交信息中的
-`Depends-On` 本身不会触发依赖下载；本仓库 `run.sh` 使用环境中已有的 SDK。
+当前 ModelZoo 与 SDK review 保持无 topic；验证时记录各仓库的实际 revision。
+提交信息中的 `Depends-On` 本身不会触发依赖下载；本仓库 `run.sh` 使用环境中已有的 SDK。
+本地使用新 SDK 通过，不代表未联动该 SDK 的远程流水已经通过。
 仅更新 ModelZoo 而仍使用旧 SDK，不能满足 GQA 双 cache 的 SelectKV 契约。
 
-旧 `decode_validation` 入口保持单张 decode 图布局，但先以固定容量 wrapper 实际执行
-prompt prefill，继承全部 KV、indexer、GDR、PLE 和位置状态，再采集 HMONNX decode Golden。
-首个 token 来自该次 prefill，后续 token 直接读取图输出 `logits`；报告注明这一验证范围。
+普通导出由 `XHQwen4ExpModel` 管理静态 prefill/decode wrapper、缓存、frontend、量化、
+HMONNX 与 metadata；workflow 负责配置和量化权重准备。默认 context 为 262144，
+prefill chunk 为 256，仅生成 `prefill/` 和 `decode/`。低内存模式复用逐层导出和拼装实现；
+仅供捕获使用的输入返回槽在 ONNX 序列化前移除。旧 `decode_validation` workflow 已移除。
+图和 `golden_meta_info.json` 直接写入输出根目录；Golden 通过 `dump_golden` 单独执行。
 
-新构建的 MTP 包使用运行契约 v3：`mtp_prefill/` 是与目标 prefill chunk 等长的独立草稿图，
-`mtp_decode/` 是单 token 草稿图，`decode_m4/` 是默认固定 4 token 的目标 verify 图。
-三图分别按实际序列长度导出。草稿 prefill 按提示词的下一 token embedding 与前一位置的
-目标 HC 对齐，保留全部 hyper-connection 流；prefill 和 decode 共用草稿自己的 K/V、
-QSA 和位置状态。短块按有效长度执行；上下文尾部不足一个静态 prefill 块时改用草稿 decode。
-一次仍只提出一个候选，由 verify 同时处理当前 token 和该候选；四格图中当前两格有效，
-其余两格通过 `current_input_length=2` 屏蔽。`export.model.verify_length` 可显式设为 2，
-继续导出旧的 `decode_m2/` 档位；运行时也兼容已有 m2 包。
+新构建的 MTP 包使用运行契约 v4：`mtp_prefill/` 是与目标 prefill chunk 等长的独立草稿图，
+`mtp_decode/` 是单 token 草稿图，`decode_m5/` 是默认五 token 的目标 verify 图。
+加上目标 prefill/decode，共五张语言图。保留独立 decode1，以便拒绝后按原生 recurrent
+语义重放；Qwen4 的 HC、QSA、PLE、MRoPE 和草稿输入结构保持原生语义。
+
+草稿 prefill 按提示词的下一 token embedding 与前一位置的目标 HC 对齐，保留全部
+hyper-connection 流。目标每完成一个提示词块即预热对应草稿块，只保留跨块所需的最后一个
+HC，不积累整段提示词 HC。prefill 和 decode 共用草稿自己的 K/V、QSA 和位置状态。
+短块按有效长度执行；上下文尾部不足一个静态 prefill 块时改用草稿 decode。
+
+每轮递归生成最多 `num_draft_tokens=N` 个候选；验证图默认宽度为 `N+1`，一次处理
+待提交 token 和所有候选。`export.model.verify_length` 可显式设为大于等于 `N+1` 的值，
+未使用槽由有效长度屏蔽。候选数受剩余输出长度和 EOS 限制；上下文尾部放不下完整
+验证图时切回单 token decode。需要新导出 m2 时同时设置 `num_draft_tokens: 1`；
+运行时继续加载旧 v2 单步草稿包和 v3 单候选 m2/m4 包。
 verify 的 GDR 按 token 串联 recurrent 更新并显式返回状态，使缓存提交遵循单 token decode 的计算路径；
 主 prefill 继续使用 chunk 计算。导出、resume 和产物加载都会校验 verify 的这一约束。
 验证事务只备份本轮静态图宽度可能覆盖的 K/V 和压缩 QSA indexer 缓存区间；
 T/H/W 仅保存未完成 C4 组的组首坐标，并在回退时恢复；
 GDR 循环状态及 PLE 历史完整备份。当前预分配 PageKV 使用固定 identity 页映射，
 按对应物理页槽备份，跨页区间分别保存。拒绝或异常时原地恢复，再以单 token
-decode 重放已提交前缀；备份容量不随历史上下文长度增长。草稿 runtime 的
+decode 重放已提交前缀，并用真实目标 HC 恢复草稿的已提交前缀。全接受后的最后一个
+移位输入也纳入草稿事务范围；备份容量不随历史上下文长度增长。草稿 runtime 的
 `snapshot()` 保留完整快照语义，显式传入静态写入宽度 `write_length` 才使用局部事务。
 运行 metadata 在 `spec_decode.draft` 登记两张草稿图和档位，在 `spec_decode.target`
-登记 verify 图和长度。运行时继续支持旧 v2 的单步草稿图契约。
+登记 verify 图和长度。v4 另登记候选数和共享 head 的目标所有权、量化位宽；
+导出、续导和加载均校验这些契约。续导复用已验证图和固定 head，不重复量化；
+同时核对源 head、草稿权重内容及已完成草稿图和外部权重的摘要，不复用未完成的草稿图。
+固定 head 的私有 checkpoint 只属于导出工作区，不随发布包交付。
+旧导出工作区缺少这些续导记录时需要重新导出，已有 v2/v3 包仍可用于推理。
 MTP 两张草稿图与主模型统一使用 SelectedKV，先选择 K/V 再执行 attention。
 
 目标模型采用 attention/shared expert W8、routed expert W4 的混合权重；
@@ -183,24 +212,47 @@ output_ids = model.generate(
     eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id,
 )
 print(tokenizer.decode(output_ids[0, inputs["input_ids"].shape[1]:], skip_special_tokens=True))
+print(model.last_mtp_stats)
+model.close()
 ```
 
+模型持有视觉 encoder 和原生 processor，图片无需在调用者中手工融合 embedding：
+
+```python
+processor = model.get_processor()
+inputs = processor.apply_chat_template(
+    [{"role": "user", "content": [
+        {"type": "image", "image": "/path/to/image.jpg"},
+        {"type": "text", "text": "描述图片。"},
+    ]}], tokenize=True, add_generation_prompt=True,
+    return_dict=True, return_tensors="pt",
+)
+output_ids = model.generate(**inputs, max_new_tokens=8, do_sample=False)
+```
+
+同一路径接受原生 processor 生成的多图、视频及混合媒体 tensors；
+视频时间戳和三轴 M-RoPE 使用原生 Qwen 语义。统一 CLI 每次接受一个媒体文件，
+视频使用 `--video /path/to/video.mp4`，与 `--image` 互斥。
+
 直接入口返回提示词与生成 token 的拼接，保持 `input_ids` 的设备和整数类型。
+模型持久复用两张草稿图的 SDK 会话，每次请求前后重置草稿状态；`model.close()` 释放草稿会话。
+`model.last_mtp_stats` 提供轮数、候选总数、接受/拒绝数、接受率和每轮接受数；
+统一推理报告在 `stats.mtp` 返回同一统计。统计描述本次生成，不代表整网质量或加速比。
 只接受无 padding 的单条请求；`attention_mask` 如提供须全为 1。
 可传预融合 `inputs_embeds` 和 `[3, 1, prompt_length]` 的 `position_ids`。
 `streamer` 收到提示词和完成后的生成块，结束或异常时调用 `end()`；目前不逐 token 推送。
 
 `full` 变体选择 `visual prefill decode`；普通推理省略 `--golden`。
 Golden 采集实际 SDK 执行的输入、输出、中间张量，以及 K/V、recurrent、PLE 和 QSA 缓冲的执行前后状态。
-v3 的 `--golden mtp` 同时要求实际执行三图，分别保存到 Golden 根目录的
-`mtp_prefill/step_N/`、`mtp_decode/step_N/`、`decode_m4/step_N/`。
+v3/v4 的 `--golden mtp` 同时要求实际执行三图，默认分别保存到 Golden 根目录的
+`mtp_prefill/step_N/`、`mtp_decode/step_N/`、`decode_m5/step_N/`；旧包沿用自身 verify 档位。
 三图的输入、输出及执行前后缓存各自记录，不能用单步草稿结果替代 prefill 或 verify。
-视觉采集全部档位的完整容量基线和本次图片实际选用的档位。
+视觉采集本次媒体实际执行的 stem、block、merger 会话，并保留全部档位的完整容量基线。
 采集目录及完成状态记录在 `qwen4_golden_capture.json`；选定组件未执行时明确失败，
 例如提示词没有可对齐的 token 对，或生成立即遇到 EOS，无法采到所选图时应调整输入后重试。
 Golden 为运行输出，不作为源码提交或自动混入构建产物 Manifest。
 
-产物包含 prefill/decode、visual_m*、可选 mtp_prefill/mtp_decode/decode_m4 图、token embedding、tokenizer/processor、
+产物包含 prefill/decode、visual_m*、可选 mtp_prefill/mtp_decode/decode_m5 图、token embedding、tokenizer/processor、
 运行 metadata 和 `export_meta_info.json`；整体搬移后仍可加载。
 推理当前为 batch=1、greedy，使用 SDK V2；大型目标图启用自动 offload。
 NGram PLE 查表权重在 HMONNX 导出时默认使用 SEFP4：每 64 个元素共享指数，
@@ -209,8 +261,8 @@ NGram PLE 查表权重在 HMONNX 导出时默认使用 SEFP4：每 64 个元素�
 `ple_embeddings_<层号>` 输入接收 `[batch, sequence, ngram_heads, embedding_dim]`。
 NGram 哈希、Gather 和 SEFP4 解包反量化在 host 预处理执行；新图中没有
 `Qwen4PLESEFP4Gather`，也没有 PLE 查表或反量化节点。图内保留 PLE 后续计算和历史状态更新。
-v3 的 verify 图沿用相同 Host PLE 输入契约，根 metadata 的 `qwen4_exp_ple`
-分别登记 `prefill`、`decode`、`decode_m4` 的压缩资源。
+v3/v4 的 verify 图沿用相同 Host PLE 输入契约，根 metadata 的 `qwen4_exp_ple`
+分别登记 `prefill`、`decode` 和实际 verify 档位（默认 `decode_m5`）的压缩资源。
 运行时以 mmap 打开压缩表，先 Gather 压缩行，再仅反量化命中的行，结果传给图。
 Flash Next 的 `[320001536, 160]` 表按 192 列填充后约 30.4 GiB，FP16 原表约 95.37 GiB。
 `export.model.ple_quant_type: fp16` 可用于高精度对比；默认值为 `sefp4`。
@@ -225,7 +277,8 @@ python /path/to/golden/ple_demo.py --manifest /path/to/golden/ple/decode_manifes
 
 可传 `--indices ids.npy --layer 1 --output embeddings.npy` 展示其他索引的查表结果。
 只导出主模型和视觉时省略构建命令的 `--speculative`，Golden 选择 `visual prefill decode`。
-多图片、视频、LoRA 和分层导出未登记为本模型能力。
+公开接口支持单张图片或单个视频；多图和混合媒体通过模型的原生 processor/generate 接口使用。
+LoRA 未登记为本模型能力。文本导出支持 `low_memory` 与 `standard`，视觉始终分组件导出。
 
 Python 构建入口是 `xhmodel_merak.xh_llm.models.qwen4_exp.build_entry.build_qwen4_exp_model`，
 推理仍使用 `xhmodel_merak.model_inference.inference_model`。模型实现位于
@@ -233,14 +286,13 @@ Python 构建入口是 `xhmodel_merak.xh_llm.models.qwen4_exp.build_entry.build_
 `xhmodel_merak/model_integrations/qwen4_exp/`。
 
 独立 workflow 入口仍是 `qwen4_exp_workflow.py`，默认使用 RTN unified YAML，
-其中显式选择 `export.model.export_mode: serving`；历史 AutoRound YAML 保留单步 decode 验证。
+普通配置使用模型静态导出入口；MTP 配置显式选择 `export.model.export_mode: serving`。
+历史 AutoRound YAML 也通过静态模型入口导出 prefill/decode。
 `debug_scripts/export_qwen4_exp_serving_hmonnx.py` 是复用同一 serving 导出的诊断入口。
 
-本机验证环境：vision 完整导出使用 Python 3.12 / PyTorch 2.11；SDK V2 数值运行
-使用 Python 3.10 / PyTorch 2.8 及匹配的 hsum 扩展。当前宿主的 PyTorch 2.8
-在完整视觉 ONNX decomposition 阶段崩溃，因此尚未验证单一环境完成全流程。
-recipe 的 build/inference 依赖分别声明这两个 PyTorch 版本；运行时需使用
-与 Python/PyTorch ABI 匹配的 SDK 扩展，尚未认证干净安装环境。
+构建与推理使用共同的 PyTorch 2.8 依赖；运行时需安装与 Python/PyTorch ABI 匹配的
+hsum 扩展。视频文件依赖现有 PyAV 包。旧视觉 Dynamo 路径的 PyTorch 2.11 限制
+不适用于当前分组件 TorchFX/QuantGraph 导出。干净安装环境仍需独立验证。
 上面的推理命令禁用 torch.compile，适用于本机缺少 C++ 编译器的情况；
 构建/导出命令不能继承 `TORCH_COMPILE_DISABLE=1`。
 完整模型接近 80GB 显存上限；上述推理命令启用可扩展分配器段，避免大张量分配时的显存碎片。

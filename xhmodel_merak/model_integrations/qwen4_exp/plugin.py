@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from xhmodel_merak.model_catalog.contracts import AdapterSpec, ArtifactFormatSpec, ModelRecipe, ResolvedPrecision
 from xhmodel_merak.model_catalog.registry import ModelCatalog
@@ -58,22 +58,9 @@ class Qwen4ExpRecipe(ModelRecipe):
 
 def register(catalog: ModelCatalog) -> None:
     dependencies = runtime_dependencies(
-        common=QWEN_MEDIA,
+        common=(*QWEN_MEDIA, "av==15.1.0"),
         quantization=(("rtn", GPTQ_REQUIREMENTS), ("autoround", AUTOROUND_REQUIREMENTS)),
         checkpoint_build=GPTQ_REQUIREMENTS,
-    )
-    # The full visual Dynamo export requires 2.11 on the tested host. SDK
-    # inference uses its separately built 2.8 hsum extension; keep phase pins
-    # independent rather than declaring the crashing 2.8 visual build tested.
-    dependencies = replace(
-        dependencies,
-        common=tuple(
-            item for item in dependencies.common
-            if not item.startswith(("torch==", "torchvision==", "triton=="))
-        ),
-        build=(*dependencies.build, "torch==2.11.0", "torchvision==0.26.0", "triton==3.6.0"),
-        inference=(*dependencies.inference, "torch==2.8.0", "torchvision==0.23.0", "triton==3.4.0"),
-        unresolved=(*dependencies.unresolved, "Validate matching Python/PyTorch hsum wheels for both execution phases"),
     )
     catalog.register_artifact_format(
         ArtifactFormatSpec(
@@ -108,7 +95,7 @@ def register(catalog: ModelCatalog) -> None:
             family=PROVIDER_ID,
             export_name="qwen3_8_flash_next",
             task="vision-language-generation",
-            modalities=("text", "image"),
+            modalities=("text", "image", "video"),
             variants=(
                 variant(
                     "full",
@@ -140,11 +127,12 @@ def register(catalog: ModelCatalog) -> None:
             build_adapter="qwen4-exp.build",
             inference_adapter="qwen4-exp.inference",
             artifact_format="qwen4-exp",
-            input_schema=text_media_input_schema(("image",)),
+            input_schema=text_media_input_schema(("image", "video")),
             output_schema=text_output_schema(),
             default_context_length=262144,
             default_prefill_chunk_length=256,
             max_pe_length=262144,
+            environment={"ENABLE_HMINFERENCE_V2": "1", "XHQUANT_PACKED_W4": "1"},
             vision_profile="visualm96-196-384-704-1536",
             vision_gears=(96, 196, 384, 704, 1536),
             attention_profiles=("standard",),

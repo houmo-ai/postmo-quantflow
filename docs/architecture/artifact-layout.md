@@ -24,6 +24,11 @@
 不更新 ONNX 引用。尺寸含义和轴顺序由模型 README 说明，不凭目录数字猜测。
 同一组件存在多个部署档位时分别登记；参考浮点图不替代实际运行的 HMONNX。
 
+Qwen4-Exp 视觉 ABI 2 在每个 `visual_m<token档位>/` 中保存 `stem.onnx`、
+`block_XX.onnx` 与 `merger.onnx`。根 metadata 的 `qwen4_exp_vision` 和
+`visual_gears.json` 逐组件登记包内相对路径、摘要与输入输出；公开清单使用
+`visual_m<档位>_<组件>` 键，逐一列出真实 HMONNX 及其外置资源。
+
 Qwen4-Exp 的 MTP 运行契约 v3 使用三张独立图：`mtp_prefill/` 的序列长度与目标
 prefill chunk 一致，`mtp_decode/` 的序列长度为 1，`decode_m2/` 的目标 verify
 长度为 2，对应每轮一个候选。运行 metadata 的 `spec_decode.draft` 声明两张草稿图与

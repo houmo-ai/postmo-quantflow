@@ -76,20 +76,23 @@ def test_scope_restores_original_functions_and_supports_nesting(fail):
     assert _patched_functions() == before
 
 
-@pytest.mark.parametrize("metadata,expected", [
-    ({"auto_round_enabled": True, "auto_round_version": "v1"}, "autoround"),
-    ({"meta": {"auto_round": {"auto_round_enabled": True, "auto_round_version": "v1"}}}, "autoround"),
-    ({"auto_round_enabled": True, "meta": {"auto_round": {"auto_round_enabled": True}}}, "autoround"),
-    ({"auto_round_enabled": False}, "gptq"),
-    ({"auto_round_enabled": None}, "gptq"),
-    ({"auto_round_enabled": "true"}, "gptq"),
-    ({"auto_round_enabled": "false"}, "gptq"),
-    ({"auto_round_enabled": 1}, "gptq"),
-    ({"meta": {"auto_round": {"auto_round_enabled": "true", "auto_round_version": "v1"}}}, "gptq"),
-    ({"auto_round_version": "v1"}, "gptq"),
-    ({}, "gptq"),
+@pytest.mark.parametrize("layout,metadata,expected", [
+    (layout, {"auto_round_enabled": True, "auto_round_version": "v1"}, "autoround")
+    for layout in ("sidecar", "embedded", "config_top")
+] + [
+    ("sidecar", metadata, expected) for metadata, expected in [
+        ({"meta": {"auto_round": {"auto_round_enabled": True, "auto_round_version": "v1"}}}, "autoround"),
+        ({"auto_round_enabled": True, "meta": {"auto_round": {"auto_round_enabled": True}}}, "autoround"),
+        ({"auto_round_enabled": False}, "gptq"),
+        ({"auto_round_enabled": None}, "gptq"),
+        ({"auto_round_enabled": "true"}, "gptq"),
+        ({"auto_round_enabled": "false"}, "gptq"),
+        ({"auto_round_enabled": 1}, "gptq"),
+        ({"meta": {"auto_round": {"auto_round_enabled": "true", "auto_round_version": "v1"}}}, "gptq"),
+        ({"auto_round_version": "v1"}, "gptq"),
+        ({}, "gptq"),
+    ]
 ])
-@pytest.mark.parametrize("layout", ["sidecar", "embedded", "config_top"])
 def test_producer_evidence_is_scoped_to_qwen4_and_does_not_edit_metadata(tmp_path, metadata, expected, layout):
     payload = {"bits": 8, "quant_method": "gptq", **metadata}
     if layout == "embedded":

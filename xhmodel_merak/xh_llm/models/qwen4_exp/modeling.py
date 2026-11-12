@@ -31,7 +31,6 @@ import torch
 import torch.nn as nn
 
 import xhquant.nn as xhnn
-from xhquant.core import CacheTensor
 from xhquant.utils.config import ConfigDict
 
 from ...mrope import StaticMRotaryEmbedding
@@ -43,7 +42,8 @@ try:
 except ImportError:  # pragma: no cover - exercised by the version preflight.
     TransformersDynamicCache = None
 
-from ..qwen3_5._hybrid_gated_delta_net import HybridGatedDeltaNetMixin, HybridRMSNormGatedMixin
+from ..qwen3_5._delta_rule import torch_chunk_gated_delta_rule, torch_recurrent_gated_delta_rule
+from ..qwen3_5._hybrid_gated_delta_net import HybridRMSNormGatedMixin
 from ..qwen3_5_moe.autoround_hybrid import AutoRoundGatedDeltaNetMixin, AutoRoundSparseMoeMixin
 from .cache_contract import (
     FULL_ATTENTION,
@@ -64,6 +64,7 @@ class Qwen4ExpExportableRMSNorm(nn.Module):
         self.weight = native.weight
         self.eps = native.eps
         self.group_size = native.group_size
+        self.input_is_grouped = False
         width = int(self.group_size or self.weight.numel())
         # The checkpoint weight remains zero-centered and retains its key.
         # SDK axis is inferred from weight rank, so its unit scale must be 1-D.
@@ -76,12 +77,31 @@ class Qwen4ExpExportableRMSNorm(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         values = hidden_states.float()
-        if self.group_size is not None:
-            values = values.reshape(*values.shape[:-1], -1, self.group_size)
+        if self.group_size is not None and not self.input_is_grouped:
+            values = values.reshape(hidden_states.shape[0], hidden_states.shape[1], -1, self.group_size)
         normalized = self.norm(values)
         if self.group_size is not None:
             normalized = normalized.flatten(-2)
         return (normalized * (1.0 + self.weight.float())).to(hidden_states.dtype)
+
+
+class Qwen4ExpExportableGatedResidual(nn.Module):
+    """Static hyper-connection mixing over the configured feature width."""
+
+    def forward(self, hyper_input):
+        normalized = self.hc_norm(hyper_input)
+        if self.hc_norm.input_is_grouped:
+            hyper_input = hyper_input.flatten(-2)
+        weights = torch.nn.functional.silu(self.input_mix_weight_down(normalized) / self.hc_count)
+        batch, sequence = hyper_input.shape[0], hyper_input.shape[1]
+        weights = torch.sigmoid(self.input_mix_weight_up(weights)).reshape(
+            batch, sequence, self.hc_count, self.hidden_size,
+        )
+        mixed = (weights * normalized.reshape(batch, sequence, self.hc_count, self.hidden_size)).mean(dim=-2)
+        if self.block_inject_weight is None:
+            return mixed
+        injection = 2 * torch.sigmoid(self.block_inject_weight(normalized) / self.hc_count)
+        return mixed, hyper_input, injection
 
 
 class Qwen4ExpExportableRMSNormGated(HybridRMSNormGatedMixin, nn.Module):
@@ -133,46 +153,6 @@ def adapt_qwen4_exp_rms_norms(model: nn.Module) -> tuple[str, ...]:
     return tuple(replaced)
 
 
-def _torch_is_compiling() -> bool:
-    compiler = getattr(torch, "compiler", None)
-    is_compiling = getattr(compiler, "is_compiling", None)
-    if is_compiling is not None:
-        return bool(is_compiling())
-    dynamo = getattr(torch, "_dynamo", None)
-    dynamo_is_compiling = getattr(dynamo, "is_compiling", None)
-    if dynamo_is_compiling is not None:
-        return bool(dynamo_is_compiling())
-    return False
-
-
-def _module_execution_device(module: nn.Module, fallback: torch.device) -> torch.device:
-    first_non_meta: torch.device | None = None
-    for tensor in (*module.parameters(), *module.buffers()):  # shape: module-specific parameter/buffer
-        if tensor.device.type == "cuda":
-            return tensor.device
-        if tensor.device.type != "meta" and first_non_meta is None:
-            first_non_meta = tensor.device
-    return first_non_meta or fallback
-
-
-def _move_cache_layer_to_device(cache_layer: Any, device: torch.device) -> None:
-    """Keep a sharded decoder layer's mutable cache state on its execution device."""
-
-    for state_name in ("conv_states", "recurrent_states"):
-        states = getattr(cache_layer, state_name, None)  # container: heterogeneous cache tensors
-        if states is None:
-            continue
-        for state_idx, state in enumerate(states):  # state shape: defined by cache contract
-            if torch.is_tensor(state):
-                states[state_idx] = state.to(device)  # same contract-defined shape as state
-    for state_name in ("keys", "values", "indexer_keys", "indexer_tail", "key_tail", "value_tail"):
-        state = getattr(cache_layer, state_name, None)  # shape: [B, heads, L, head_dim]
-        if torch.is_tensor(state):
-            setattr(cache_layer, state_name, state.to(device))
-    if hasattr(cache_layer, "device"):
-        cache_layer.device = device
-
-
 class Qwen4ExpExportUnsupportedError(RuntimeError):
     """Raised when a Qwen4-Exp model cannot be exported by the current path."""
 
@@ -213,7 +193,7 @@ class Qwen4ExpExportCapability:
 class Qwen4ExpExportableQSAIndexer(nn.Module):
     """Build new C4 index keys and retain the pooled cache across steps."""
 
-    def __init__(self, native_indexer: nn.Module, *, sequence_length: int) -> None:
+    def __init__(self, native_indexer: nn.Module, *, sequence_length: int, rotary_dim=None) -> None:
         super().__init__()
         from ..deepseek_v4.static_cache import FixedCapacityCacheWriter
 
@@ -224,6 +204,7 @@ class Qwen4ExpExportableQSAIndexer(nn.Module):
         self.token_budget = int(native_indexer.token_budget)  # scalar T=2048
         self.compress_ratio = int(native_indexer.compress_ratio)  # scalar C=4
         self.block_topk = int(native_indexer.block_topk)  # scalar KB<=512
+        self.rotary_dim = rotary_dim
         self.index_qk_proj = native_indexer.index_qk_proj  # Linear: H -> (IQ+IK)*DI = 640
         self.q_layernorm = native_indexer.q_layernorm  # RMSNorm: [...,DI] -> [...,DI]
         self.k_layernorm = native_indexer.k_layernorm  # RMSNorm: [...,DI] -> [...,DI]
@@ -235,6 +216,7 @@ class Qwen4ExpExportableQSAIndexer(nn.Module):
         self.set_sequence_length(sequence_length)
 
     def set_sequence_length(self, sequence_length: int) -> None:
+        self.input_sequence_length = int(sequence_length)
         self.pool_groups = (int(sequence_length) + 3) // 4
         self.pool_candidate = xhnn.DynamicSlice([self.pool_groups * 4], [1], [1])
         self.pool_tail = xhnn.DynamicSlice([4], [1], [1])
@@ -247,7 +229,7 @@ class Qwen4ExpExportableQSAIndexer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return index queries and pooled block keys for SelectedKV."""
 
-        batch_size, seq_length, _ = hidden_states.shape  # scalars B,S,H
+        batch_size, seq_length = 1, self.input_sequence_length
         hidden_shape = (batch_size, seq_length, -1, self.index_head_dim)  # tuple [B,S,heads,DI]
         cos, sin = position_embeddings  # each [B,S + pool_groups,R]
         if past_key_values is None:
@@ -263,7 +245,8 @@ class Qwen4ExpExportableQSAIndexer(nn.Module):
         q = q.reshape(*hidden_shape)  # [B,S,IQ,DI]
         raw_keys = token_k.reshape(*hidden_shape).squeeze(2)  # [B,S,DI], because IK=1
         q = self.q_layernorm(q)  # [B,S,IQ,DI]
-        q = _apply_rotary(q, current_cos, current_sin, unsqueeze_dim=2, rope=self.rope)  # [B,S,IQ,DI]
+        q = _apply_rotary(q, current_cos, current_sin, unsqueeze_dim=2, rope=self.rope,
+                          rotary_dim=self.rotary_dim)  # [B,S,IQ,DI]
         cache_layer = past_key_values.layers[self.layer_idx]
         pool_offset, pool_count, pool_start = past_key_values.qsa_host_controls[:3]
         keys = torch.cat((cache_layer.indexer_tail, raw_keys), dim=1)
@@ -276,6 +259,7 @@ class Qwen4ExpExportableQSAIndexer(nn.Module):
             sin[:, seq_length : seq_length + self.pool_groups],
             unsqueeze_dim=1,
             rope=self.rope,
+            rotary_dim=self.rotary_dim,
         ).squeeze(1)
         cache_layer.indexer_keys = self.pool_writer(cache_layer.indexer_keys, block_keys, pool_start, pool_count)
         cache_layer.indexer_tail = self.pool_tail(keys, past_key_values.current_input_length)
@@ -283,7 +267,7 @@ class Qwen4ExpExportableQSAIndexer(nn.Module):
 
 
 class Qwen4ExpExportableAttention(nn.Module):
-    """QSA attention with a stable DynamoFX-friendly tensor program."""
+    """QSA attention with a static tensor boundary."""
 
     def __init__(self, native_attention: nn.Module, *, cache_length: int, sequence_length: int) -> None:
         super().__init__()
@@ -292,6 +276,10 @@ class Qwen4ExpExportableAttention(nn.Module):
         self.head_dim = int(native_attention.head_dim)  # scalar DH=256
         self.num_key_value_groups = int(native_attention.num_key_value_groups)  # scalar NQ/NKV=12
         self.scaling = float(native_attention.scaling)  # scalar 1/sqrt(DH)
+        self.input_sequence_length = int(sequence_length)
+        raw_rotary_dim = int(self.head_dim * self.config.rope_parameters.get("partial_rotary_factor", 1.0))
+        # HF builds arange(0, raw_dim, 2), then concatenates the frequencies twice.
+        self.rotary_dim = 2 * ((raw_rotary_dim + 1) // 2)
         self.q_proj = native_attention.q_proj  # Linear: H -> NQ*(2*DH)
         self.k_proj = native_attention.k_proj  # Linear: H -> NKV*DH
         self.v_proj = native_attention.v_proj  # Linear: H -> NKV*DH
@@ -299,7 +287,9 @@ class Qwen4ExpExportableAttention(nn.Module):
         self.q_norm = native_attention.q_norm  # RMSNorm: [...,DH] -> [...,DH]
         self.k_norm = native_attention.k_norm  # RMSNorm: [...,DH] -> [...,DH]
         self.rope = xhnn.Rope()
-        self.indexer = Qwen4ExpExportableQSAIndexer(native_attention.indexer, sequence_length=sequence_length)
+        self.indexer = Qwen4ExpExportableQSAIndexer(
+            native_attention.indexer, sequence_length=sequence_length, rotary_dim=self.rotary_dim,
+        )
         self.k_cache = xhnn.LLMCacheV2(axis=2, attention_max_length=-1)
         self.v_cache = xhnn.LLMCacheV2(axis=2, attention_max_length=-1)
         if cache_length < 4 or self.indexer.compress_ratio != 4:
@@ -314,6 +304,7 @@ class Qwen4ExpExportableAttention(nn.Module):
             candidate_topk=min(self.indexer.block_topk, cache_length // 4),
             index_head_dim=self.indexer.index_head_dim,
             input_length=sequence_length,
+            flatten_output=True,
         )
 
     def forward(
@@ -335,19 +326,19 @@ class Qwen4ExpExportableAttention(nn.Module):
         )
 
         rotary_cos, rotary_sin = position_embeddings
-        cos = rotary_cos[:, : hidden_states.shape[1]]
-        sin = rotary_sin[:, : hidden_states.shape[1]]
-        input_shape = hidden_states.shape[:-1]  # tuple [B,S]
+        cos = rotary_cos[:, : self.input_sequence_length]
+        sin = rotary_sin[:, : self.input_sequence_length]
+        input_shape = (1, self.input_sequence_length)
         hidden_shape = (*input_shape, -1, self.head_dim)  # tuple [B,S,heads,DH]
         projected = self.q_proj(hidden_states).view(*input_shape, -1, self.head_dim * 2)  # [B,S,NQ,2*DH]
         query_states = projected[..., : self.head_dim]  # [B,S,NQ,DH]
         gate = projected[..., self.head_dim :]  # [B,S,NQ,DH]
         gate = gate.reshape(*input_shape, -1)  # [B,S,NQ*DH]
-        query_states = self.q_norm(query_states.view(hidden_shape)).transpose(1, 2)  # [B,NQ,S,DH]
+        query_states = self.q_norm(query_states).transpose(1, 2)  # [B,NQ,S,DH]
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)  # [B,NKV,S,DH]
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)  # [B,NKV,S,DH]
         query_states, key_states = _apply_rotary_pair(
-            query_states, key_states, cos, sin, rope=self.rope
+            query_states, key_states, cos, sin, rope=self.rope, rotary_dim=self.rotary_dim,
         )  # q [B,NQ,S,DH], k [B,NKV,S,DH]
         current_key, current_value = key_states, value_states
         cache_layer = past_key_values.layers[self.layer_idx]  # container: layer-local cache
@@ -384,9 +375,6 @@ class Qwen4ExpExportableAttention(nn.Module):
             past_key_values.past_seq_length,
             past_key_values.current_input_length,
         )
-        attn_output = attn_output.transpose(1, 2)
-
-        attn_output = attn_output.reshape(*input_shape, -1)  # [B,S,NQ*DH]
         attn_output = attn_output * torch.sigmoid(gate)  # [B,S,NQ*DH]
         output = self.o_proj(attn_output) * query_valid.unsqueeze(-1).to(attn_output.dtype)
         return output, None  # [B,S,H], None
@@ -575,6 +563,8 @@ class Qwen4ExpExportableGatedDeltaNet(AutoRoundGatedDeltaNetMixin, nn.Module):
                 }
             )
         )
+        mask_dtype = native_gated_delta_net._input_projection_dtype()
+        native_gated_delta_net.mask_cast = xhnn.Cast(mask_dtype).to(dtype=mask_dtype)
         return native_gated_delta_net
 
     def enable_fused_gdr(
@@ -629,31 +619,70 @@ class Qwen4ExpExportableGatedDeltaNet(AutoRoundGatedDeltaNetMixin, nn.Module):
         cache_layer = cache_params.layers[self.layer_idx]  # container: layer-local cache
         conv_cache = cache_layer.conv_states[0]  # [B,CD,KD]
         recurrent_state = cache_layer.recurrent_states[0]  # [B,NV,DK,DV]
-        chunk_state_is_cache = bool(getattr(getattr(self, "chunk_scan_op", None), "state_is_cache", False))
-        if (
-            chunk_state_is_cache
-            and self.linear_attention_mode != "recurrent"
-            and not isinstance(recurrent_state, CacheTensor)
-            and not _torch_is_compiling()
-        ):
-            recurrent_state = CacheTensor(recurrent_state)
-            cache_layer.recurrent_states[0] = recurrent_state
         if attention_mask is None:
             attention_mask = hidden_states.new_ones(hidden_states.shape[:2])  # [B,S]
-        output, conv_cache_out, recurrent_state_out = HybridGatedDeltaNetMixin.forward(
-            self,
-            hidden_states,
-            conv_cache=conv_cache,
-            recurrent_state=recurrent_state,
-            linear_attn_mask=attention_mask,
-            current_input_length=cache_params.current_input_length,
-        )  # output [B,S,H], conv [B,CD,KD], recurrent [B,NV,DK,DV]
+        output, conv_cache_out, recurrent_state_out = self._forward_merged(
+            hidden_states, conv_cache, recurrent_state, attention_mask, cache_params.current_input_length,
+        )
         cache_layer.conv_states[0] = conv_cache_out  # [B,CD,KD]
         # xh::GDRChunkScan owns recurrent-state mutation through its cache
         # input and reports no separate state output.  Keep the explicit Qwen4
         # cache ABI populated by reusing the existing state tensor in that case.
         cache_layer.recurrent_states[0] = recurrent_state if recurrent_state_out is None else recurrent_state_out
         return output  # [B,S,H]
+
+    def _forward_merged(self, hidden, conv, recurrent, valid, current):
+        """Keep the checkpoint's merged QKV projection merged through convolution."""
+        batch, length = self.batch_size, self.input_sequence_length
+        valid = self.mask_cast(valid)
+        mask = valid.unsqueeze(-1)
+        channel_mask = valid.unsqueeze(1)
+        state_mask = mask.unsqueeze(-1)
+        mixed = self.in_proj_qkv(hidden).transpose(1, 2)
+        z = self.in_proj_z(hidden).reshape(batch, length, -1, self.head_v_dim)
+        b, a = self.in_proj_b(hidden), self.in_proj_a(hidden)
+        extended = torch.cat((conv, mixed), dim=-1).to(self.conv1d.weight.dtype)
+        next_conv = self.conv_cache_slice(extended, current)
+        mixed = torch.nn.functional.silu(
+            self.conv1d(extended)[:, :, self.conv_kernel_size:self.conv_kernel_size + length],
+        ).to(mixed.dtype) * channel_mask
+        query, key, value = torch.split(
+            mixed.transpose(1, 2), (self.key_dim, self.key_dim, self.value_dim), dim=-1,
+        )
+        query = query.reshape(batch, length, -1, self.head_k_dim)
+        key = key.reshape(batch, length, -1, self.head_k_dim)
+        value = value.reshape(batch, length, -1, self.head_v_dim) * state_mask
+        beta = b.sigmoid() * mask
+        g = (self.A_log_exp * torch.nn.functional.softplus(a + self.dt_bias)) * mask
+        if self.num_v_heads // self.num_k_heads > 1:
+            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
+        common = dict(
+            g=g, beta=beta, mask_qkv=state_mask, initial_state=recurrent,
+            output_final_state=self.use_cache, use_qk_l2norm_in_kernel=True,
+            num_heads=self.chunk_num_heads, k_head_dim=self.chunk_k_head_dim,
+            v_head_dim=self.chunk_v_head_dim, batch_size=batch, scale=self.chunk_scale,
+        )
+        recurrent_mode = self.linear_attention_mode == "recurrent"
+        if recurrent_mode:
+            core, next_state = torch_recurrent_gated_delta_rule(
+                query, key, value, **common, sequence_length=length, recurrent_scan_op=self.recurrent_scan_op,
+            )
+        else:
+            core, next_state = torch_chunk_gated_delta_rule(
+                query, key, value, **common, chunk_size=self.linear_chunk_size,
+                chunk_mask_incl=self.chunk_mask_incl, chunk_mask_strict=self.chunk_mask_strict,
+                chunk_eye_matrix=self.chunk_eye_matrix, chunk_eye_8_batched=self.chunk_eye_8_batched,
+                cumsum_matrix=self.chunk_cumsum_matrix, input_sequence_length=length,
+                chunk_row_masks=self.chunk_row_masks, cumsum_matmul=self.cumsum_matmul,
+                block_tri_inverse_op=self.block_tri_inverse_op, chunk_scan_op=self.chunk_scan_op,
+            )
+        if not recurrent_mode and (
+            self.suppress_recurrent_state_outputs or getattr(self.chunk_scan_op, "state_is_cache", False)
+        ):
+            next_state = None
+        output = self.norm(core, z).reshape(batch, length, -1).to(self.out_proj.weight.dtype)
+        return self.out_proj(output) * mask, next_conv, next_state
 
     # SDK tracing replaces forward with graph_forward. Keep the native cache
     # adapter instead of inheriting the shared mixin's flat-tensor graph ABI.
@@ -699,6 +728,27 @@ class Qwen4ExpTextExportWrapper(nn.Module):
         self.input_sequence_length = int(input_sequence_length)
         self.cache_length = int(cache_length)
         self.cache_contract = Qwen4ExpCacheContract.from_text_config(text_config)
+        self.cache_keys = self.cache_contract.expected_keys()
+        self.qsa_control_count = 5 if any(
+            layer.layer_type in {FULL_ATTENTION, QWEN_SPARSE_ATTENTION}
+            for layer in self.cache_contract.layers
+        ) else 0
+        if self.qsa_control_count and self.batch_size != 1:
+            raise ValueError("Qwen4 SelectedKV export requires batch_size=1")
+        self.register_buffer(
+            "query_offsets", torch.arange(self.input_sequence_length, dtype=torch.int32).view(1, -1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "key_positions", torch.arange(self.cache_length, dtype=torch.int32).view(1, 1, 1, -1),
+            persistent=False,
+        )
+        eos_token_id = getattr(self.text_config, "eos_token_id", 0)
+        if eos_token_id is None:
+            eos_token_id = 0
+        if isinstance(eos_token_id, (list, tuple)):
+            eos_token_id = eos_token_id[0]
+        self.register_buffer("ple_eos_token", torch.tensor(int(eos_token_id), dtype=torch.int32), persistent=False)
         has_device_hooks = any(
             hasattr(module, "_hf_hook")
             for owner in (self.native_text_model, self.lm_head)
@@ -707,27 +757,12 @@ class Qwen4ExpTextExportWrapper(nn.Module):
         )
         if return_native_hidden_states and (return_hidden_states or has_device_hooks):
             raise ValueError("Native hidden-state output requires an unsharded model")
-        self._explicit_device_forward = not return_native_hidden_states
-        if self._explicit_device_forward:
+        if not return_native_hidden_states:
             from accelerate.hooks import remove_hook_from_module
 
             remove_hook_from_module(self.native_text_model, recurse=True)
             if self.lm_head is not None:
                 remove_hook_from_module(self.lm_head, recurse=True)
-            fallback_device = _module_execution_device(
-                self.native_text_model.embed_tokens, torch.device("cpu")
-            )  # device scalar; embedding weight [V,H]
-            self._layer_execution_devices = tuple(
-                _module_execution_device(layer, fallback_device)
-                for layer in self.native_text_model.layers[: int(self.text_config.num_hidden_layers)]
-            )
-            self._rotary_execution_device = _module_execution_device(self.native_text_model.rotary_emb, fallback_device)
-            self._mixer_execution_device = _module_execution_device(
-                self.native_text_model.hyper_connection_mixer, fallback_device
-            )
-            self._lm_head_execution_device = (
-                _module_execution_device(self.lm_head, fallback_device) if self.lm_head is not None else fallback_device
-            )
         self.capability = inspect_qwen4_exp_export_capability(
             text_config,
             model=native_text_model,
@@ -773,34 +808,28 @@ class Qwen4ExpTextExportWrapper(nn.Module):
         pool_time_position_ids: torch.Tensor,
         pool_height_position_ids: torch.Tensor,
         pool_width_position_ids: torch.Tensor,
-        *cache_tensors: torch.Tensor,
+        states,
     ) -> tuple[torch.Tensor, ...]:
         """Shapes: embeds [B,S,H], lengths [1], PLE ids [B,S], logits [B,S,V]."""
 
-        expected_cache_keys = self.cache_contract.expected_keys()  # list[num_cache_tensors]
-        qsa_controls = None
-        if len(cache_tensors) == len(expected_cache_keys) + 5:
-            cache_tensors, qsa_controls = cache_tensors[:-5], cache_tensors[-5:]
-        if len(cache_tensors) != len(expected_cache_keys):
-            raise ValueError(
-                "Qwen4ExpTextExportWrapper.forward expects flattened cache tensors in "
-                "cache_contract.expected_keys() order."
-            )
-        cache_map = dict(zip(expected_cache_keys, cache_tensors, strict=True))  # name -> contract-shaped tensor
-        self.cache_contract.validate_cache_shapes(cache_map)
+        # FX represents the final nested tuple as one Proxy. Its arity belongs
+        # to the static model contract, so index it without iterating the Proxy.
+        cache_map = {name: states[index] for index, name in enumerate(self.cache_keys)}
+        qsa_controls = tuple(
+            states[len(self.cache_keys) + index] for index in range(self.qsa_control_count)
+        ) if self.qsa_control_count else None
         dynamic_cache = self._build_dynamic_cache(cache_map)  # container: heterogeneous cache tensors
         dynamic_cache.past_seq_length = past_seq_length  # [1]
         dynamic_cache.current_input_length = current_input_length  # [1]
         dynamic_cache.qsa_host_controls = qsa_controls
 
-        query_capacity = inputs_embeds.shape[1]  # scalar S
-        query_offsets = torch.arange(
-            query_capacity,
-            dtype=torch.int32,
-            device=inputs_embeds.device,
-        ).view(1, -1)  # [1,S]
-        current_positions = past_seq_length.to(torch.int32).reshape(1, 1) + query_offsets  # [1,S]
-        current_positions = current_positions.expand(inputs_embeds.shape[0], -1)  # [B,S]
+        query_capacity = self.input_sequence_length
+        query_offsets = self.query_offsets
+        needs_causal_mask = getattr(self, "needs_causal_attention_mask", True)
+        current_positions = None
+        if getattr(self, "needs_current_position_indices", True) or needs_causal_mask:
+            current_positions = past_seq_length.to(torch.int32).reshape(1, 1) + query_offsets  # [1,S]
+            current_positions = current_positions.expand(self.batch_size, -1)  # [B,S]
         dynamic_cache.current_position_indices = current_positions  # [B,S]
 
         rope_positions = tuple(torch.cat((current, pooled), dim=-1) for current, pooled in zip(
@@ -808,28 +837,26 @@ class Qwen4ExpTextExportWrapper(nn.Module):
             (pool_time_position_ids, pool_height_position_ids, pool_width_position_ids), strict=True,
         ))
 
-        key_positions = torch.arange(
-            self.cache_length,
-            dtype=torch.int32,
-            device=inputs_embeds.device,
-        ).view(1, 1, 1, -1)  # [1,1,1,L]
-        query_positions = current_positions.view(inputs_embeds.shape[0], 1, query_capacity, 1)  # [B,1,S,1]
         valid_query = query_offsets < current_input_length.to(torch.int32).reshape(1, 1)  # [1,S]
-        visible = key_positions <= query_positions  # [B,1,S,L]
-        visible = visible & (
-            key_positions
-            < (
-                past_seq_length.to(torch.int32).reshape(1, 1, 1, 1)
-                + current_input_length.to(torch.int32).reshape(1, 1, 1, 1)
-            )
-        )  # [B,1,S,L]
-        visible = visible & valid_query.view(inputs_embeds.shape[0], 1, query_capacity, 1)  # [B,1,S,L]
+        visible = None
+        if needs_causal_mask:
+            key_positions = self.key_positions
+            query_positions = current_positions.view(self.batch_size, 1, query_capacity, 1)  # [B,1,S,1]
+            visible = key_positions <= query_positions  # [B,1,S,L]
+            visible = visible & (
+                key_positions
+                < (
+                    past_seq_length.to(torch.int32).reshape(1, 1, 1, 1)
+                    + current_input_length.to(torch.int32).reshape(1, 1, 1, 1)
+                )
+            )  # [B,1,S,L]
+            visible = visible & valid_query.view(self.batch_size, 1, query_capacity, 1)  # [B,1,S,L]
         causal_mask_mapping = {
             "full_attention": visible,  # [B,1,S,L]
             "linear_attention": valid_query,  # [1,S] for the serving B=1 ABI
         }  # mapping: layer type -> bool mask
-        if self._explicit_device_forward:
-            hidden_states = self._forward_text_model_explicit_devices(
+        if not self.return_native_hidden_states:
+            hidden_states = self._forward_text_model(
                 inputs_embeds=inputs_embeds,
                 causal_mask_mapping=causal_mask_mapping,
                 position_ids=rope_positions,
@@ -853,13 +880,11 @@ class Qwen4ExpTextExportWrapper(nn.Module):
         if self.lm_head is None:
             logits = hidden_states  # [B,S,H]
         else:
-            if self._explicit_device_forward:
-                hidden_states = hidden_states.to(self._lm_head_execution_device)  # [B,S,H]
             logits = self.lm_head(hidden_states)  # [B,S,V]
         auxiliary = (target_hidden_states,) if self.return_hidden_states or self.return_native_hidden_states else ()
         return (logits, *auxiliary, *self._flatten_dynamic_cache(dynamic_cache))  # ([B,S,V or H], *cache tensors)
 
-    def _forward_text_model_explicit_devices(
+    def _forward_text_model(
         self,
         *,
         inputs_embeds: torch.Tensor,
@@ -868,46 +893,26 @@ class Qwen4ExpTextExportWrapper(nn.Module):
         ple_input_ids: torch.Tensor,
         past_key_values: Any,
     ) -> torch.Tensor:
-        """Run an Accelerate-sharded model without untraceable device hooks."""
+        """Execute the configured decoder stack on the wrapper's device."""
 
         conv_mask = causal_mask_mapping.get("linear_attention")  # [1,S] or None
         if getattr(self.text_config, "ple_layer_ids", ()) and conv_mask is not None:
-            eos_token_id = getattr(self.text_config, "eos_token_id", 0)
-            if isinstance(eos_token_id, (list, tuple)):
-                eos_token_id = eos_token_id[0]
-            ple_input_ids = torch.where(conv_mask.to(torch.bool), ple_input_ids, int(eos_token_id))  # [B,S]
+            ple_input_ids = torch.where(
+                conv_mask.to(torch.bool), ple_input_ids, self.ple_eos_token,
+            )
 
-        rotary_device = self._rotary_execution_device  # device scalar
-        position_embeddings = self.native_text_model.rotary_emb(
-            inputs_embeds.to(rotary_device),  # [B,S,H], used for dtype/device
-            *(axis.to(rotary_device) for axis in position_ids),
-        )  # tuple(cos,sin), each [B,L,R]
+        position_embeddings = self.native_text_model.rotary_emb(inputs_embeds, *position_ids)
         hidden_states = inputs_embeds.repeat(1, 1, int(self.text_config.hc_count))  # [B,S,HC*H]
         full_attention_mask = causal_mask_mapping["full_attention"]  # [B,1,S,L]
-        for layer_idx, decoder_layer in enumerate(
-            self.native_text_model.layers[: int(self.text_config.num_hidden_layers)]
-        ):
-            layer_device = self._layer_execution_devices[layer_idx]  # device scalar
-            past_key_values.past_seq_length = past_key_values.past_seq_length.to(layer_device)  # [1]
-            past_key_values.current_input_length = past_key_values.current_input_length.to(layer_device)  # [1]
-            past_key_values.current_position_indices = past_key_values.current_position_indices.to(
-                layer_device
-            )  # [B,S]
-            if past_key_values.qsa_host_controls is not None:
-                past_key_values.qsa_host_controls = tuple(
-                    value.to(layer_device) for value in past_key_values.qsa_host_controls
-                )
-            _move_cache_layer_to_device(past_key_values.layers[layer_idx], layer_device)
+        for decoder_layer in self.native_text_model.layers[: int(self.text_config.num_hidden_layers)]:
             hidden_states = decoder_layer(
-                hidden_states.to(layer_device),  # [B,S,HC*H]
-                position_embeddings=tuple(value.to(layer_device) for value in position_embeddings),  # each [B,L,R]
-                attention_mask=full_attention_mask.to(layer_device),  # [B,1,S,L]
-                conv_mask=None if conv_mask is None else conv_mask.to(layer_device),  # [1,S] or None
+                hidden_states,
+                position_embeddings=position_embeddings,
+                attention_mask=full_attention_mask,
+                conv_mask=conv_mask,
                 past_key_values=past_key_values,
-                ple_input_ids=ple_input_ids.to(layer_device),  # [B,S]
+                ple_input_ids=ple_input_ids,
             )  # [B,S,HC*H]
-        mixer_device = self._mixer_execution_device  # device scalar
-        hidden_states = hidden_states.to(mixer_device)
         collapsed = self.native_text_model.hyper_connection_mixer(hidden_states)
         return (collapsed, hidden_states) if self.return_hidden_states else collapsed  # [B,S,H]
 
@@ -1115,15 +1120,15 @@ def _apply_rotary(
     *,
     unsqueeze_dim: int | None,
     rope: nn.Module,
+    rotary_dim: int | None = None,
 ) -> torch.Tensor:
     """Rotate tensor [...,D] with cos/sin [B,S,R], preserving the final D-R channels."""
 
     if unsqueeze_dim is not None:
         cos = cos.unsqueeze(unsqueeze_dim)  # [B,1,S,R] or [B,S,1,R]
         sin = sin.unsqueeze(unsqueeze_dim)  # [B,1,S,R] or [B,S,1,R]
-    rotary_dim = cos.shape[-1]  # scalar R
-    if rotary_dim == tensor.shape[-1]:
-        return rope(tensor, cos, sin)
+    if rotary_dim is None:
+        rotary_dim = cos.shape[-1]
     rotary, passthrough = tensor[..., :rotary_dim], tensor[..., rotary_dim:]  # [...,R], [...,D-R]
     return torch.cat((rope(rotary, cos, sin), passthrough), dim=-1)  # [...,D]
 
@@ -1135,10 +1140,11 @@ def _apply_rotary_pair(
     sin: torch.Tensor,
     *,
     rope: nn.Module,
+    rotary_dim: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return (
-        _apply_rotary(query, cos, sin, unsqueeze_dim=1, rope=rope),  # query [B,NQ,S,DH]
-        _apply_rotary(key, cos, sin, unsqueeze_dim=1, rope=rope),  # key [B,NKV,S,DH]
+        _apply_rotary(query, cos, sin, unsqueeze_dim=1, rope=rope, rotary_dim=rotary_dim),
+        _apply_rotary(key, cos, sin, unsqueeze_dim=1, rope=rope, rotary_dim=rotary_dim),
     )  # ([B,NQ,S,DH], [B,NKV,S,DH])
 
 
@@ -1161,11 +1167,11 @@ def _shift_right_ignore_eos_exportable(module: nn.Module, token_ids: torch.Tenso
     if shift == 0:
         return token_ids  # [B,SH]
     shifted = torch.nn.functional.pad(token_ids[:, :-shift], (shift, 0), value=module.eos_token_id)  # [B,SH]
-    positions = torch.arange(token_ids.shape[1], device=token_ids.device, dtype=torch.int32)  # [SH]
+    positions = module.export_history_positions
     valid = positions.view(1, -1) >= shift  # [1,SH]
     for offset in range(1, shift + 1):
         preceding = torch.nn.functional.pad(token_ids[:, :-offset], (offset, 0), value=module.eos_token_id)  # [B,SH]
-        valid = valid & torch.eq(preceding, module.eos_token_id).logical_not()  # [B,SH]
+        valid = valid & torch.eq(preceding, module.export_eos_token).logical_not()  # [B,SH]
     return torch.where(valid, shifted, torch.zeros_like(shifted) + module.eos_token_id)  # [B,SH]
 
 
@@ -1179,6 +1185,7 @@ def _multiply_base64_exportable(
     multiplier_limbs: torch.Tensor,
     token_limb_table: torch.Tensor,
     div64_table: torch.Tensor,
+    base: torch.Tensor,
 ) -> torch.Tensor:
     """Multiply non-negative int63 values without overflowing XH2 int32."""
 
@@ -1193,7 +1200,7 @@ def _multiply_base64_exportable(
             total = (
                 total + value_limbs[..., value_index] * multiplier_limbs[output_index - value_index]
             )  # [B,SH]; multiplier limb is scalar
-        product_limbs.append(torch.remainder(total, _NGRAM_LIMB_BASE))  # append [B,SH]
+        product_limbs.append(torch.remainder(total, base))  # append [B,SH]
         carry = torch.nn.functional.embedding(total.to(torch.long), div64_table).squeeze(
             -1
         )  # [B,SH], div64_table [65536,1]
@@ -1205,6 +1212,7 @@ def _xor_base64_exportable(
     right_limbs: torch.Tensor,
     limb_bit_table: torch.Tensor,
     bit_values: torch.Tensor,
+    two: torch.Tensor,
 ) -> torch.Tensor:
     """Exact XOR for base-64 limbs using only small int32 arithmetic."""
 
@@ -1212,7 +1220,7 @@ def _xor_base64_exportable(
         left_limbs.to(torch.long), limb_bit_table
     )  # [B,SH,NL,6], limb_bit_table [64,6]
     right_bits = torch.nn.functional.embedding(right_limbs.to(torch.long), limb_bit_table)  # [B,SH,NL,6]
-    return (torch.remainder(left_bits + right_bits, 2) * bit_values).sum(dim=-1)  # [B,SH,NL]
+    return (torch.remainder(left_bits + right_bits, two) * bit_values).sum(dim=-1)  # [B,SH,NL]
 
 
 def _base64_limbs_mod_exportable(
@@ -1221,9 +1229,7 @@ def _base64_limbs_mod_exportable(
 ) -> torch.Tensor:
     """Reduce base-64 limbs modulo every PLE head vocabulary in int32."""
 
-    remainder = torch.zeros_like(limbs[..., :1]).expand(
-        *limbs.shape[:-1], moduli.shape[0]
-    )  # [B,SH,GN], limbs [B,SH,NL], moduli [GN]
+    remainder = torch.zeros_like(limbs[..., :1]) + torch.zeros_like(moduli).view(1, 1, -1)
     for limb_index in range(_NGRAM_LIMB_COUNT - 1, -1, -1):
         remainder = torch.remainder(
             remainder * _NGRAM_LIMB_BASE + limbs[..., limb_index].unsqueeze(-1),
@@ -1262,6 +1268,7 @@ def _ngram_embedding_forward_exportable(
             module.export_multiplier_limbs[0],  # [NL]
             module.export_token_limb_table,  # [U,NL]
             module.export_div64_table,  # [65536,1]
+            module.export_limb_base,
         )  # [B,SH,NL]
         for position in range(1, ngram):
             mixed_limbs = _xor_base64_exportable(
@@ -1271,22 +1278,35 @@ def _ngram_embedding_forward_exportable(
                     module.export_multiplier_limbs[position],  # [NL]
                     module.export_token_limb_table,  # [U,NL]
                     module.export_div64_table,  # [65536,1]
+                    module.export_limb_base,
                 ),  # [B,SH,NL]
                 module.export_limb_bit_table,  # [64,6]
                 module.export_limb_bit_values,  # [6]
+                module.export_two,
             )  # [B,SH,NL]
         head_vocab_sizes = module.export_head_vocab_sizes[start_idx:end_idx]  # [GN]
         head_offsets = module.export_head_offsets[start_idx:end_idx]  # [GN]
         ngram_ids = _base64_limbs_mod_exportable(mixed_limbs, head_vocab_sizes)  # [B,SH,GN]
         blocks.append(ngram_ids + head_offsets.view(1, 1, -1))  # append [B,SH,GN]
 
-    ngram_ids = torch.cat(blocks, dim=-1)[:, -input_ids.shape[1] :]  # [B,S,G]
-    embedding_device = module.ngram_embedding.weight.device  # device scalar
-    return (
-        module.ngram_embedding(ngram_ids.to(embedding_device))  # [B,S,G,DE]
-        .to(input_ids.device)
-        .flatten(-2)
-    )  # [B,S,G*DE] = [B,S,H]
+    ngram_ids = torch.cat(blocks, dim=-1)[:, -module.export_sequence_length :]  # [B,S,G]
+    return module.ngram_embedding(ngram_ids).flatten(-2)  # [B,S,G*DE] = [B,S,H]
+
+
+def _ple_forward_exportable(module, hidden_states, input_ids, past_key_values, conv_mask=None):
+    """Keep the residual streams grouped until PLE's convolution norm."""
+    embeddings = module.ple_embedding(input_ids, past_key_values)
+    key = module.norm_key(module.key_proj(embeddings)).unflatten(-1, (module.hc_count, module.hidden_size))
+    query = module.norm_query(hidden_states).unflatten(-1, (module.hc_count, module.hidden_size))
+    gate = (key * query).sum(dim=-1, keepdim=True) / module.hidden_size**0.5
+    gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+    grouped = torch.sigmoid(gate) * module.value_proj(embeddings).unsqueeze(-2)
+    normalized = module.norm_conv(grouped)
+    values = grouped.flatten(-2)
+    if conv_mask is not None:
+        values = values * conv_mask[:, :, None]
+        normalized = normalized * conv_mask[:, :, None]
+    return values + module._short_conv(normalized, past_key_values)
 
 
 def _ple_short_conv_exportable(
@@ -1320,12 +1340,14 @@ def _replace_native_modules_for_export(
         if device.type == "meta":
             device = torch.device("cpu")
         inv_freq, attention_scaling = type(rotary).compute_default_rope_parameters(rotary.config, device=device)
+        # Cast once before TorchFX registers each shared table on its axis Gather calls.
+        cache_dtype = next((p.dtype for p in model.parameters() if p.is_floating_point()), inv_freq.dtype)
         model.rotary_emb = StaticMRotaryEmbedding(
             inv_freq,
             attention_scaling,
             int(rotary.config.max_position_embeddings),
             rotary.mrope_section,
-        )
+        ).to(dtype=cache_dtype)
     for module in tuple(model.modules()):  # container traversal; no tensor shape
         linear_attention = getattr(module, "linear_attn", None)  # module: [B,S,H] -> [B,S,H]
         if linear_attention is not None and type(linear_attention).__name__ == "Qwen4ExpTextGatedDeltaNet":
@@ -1337,6 +1359,8 @@ def _replace_native_modules_for_export(
         elif isinstance(linear_attention, Qwen4ExpExportableGatedDeltaNet):
             linear_attention.input_sequence_length = int(sequence_length)
     for module in tuple(model.modules()):  # container traversal; no tensor shape
+        if type(module).__name__ == "Qwen4ExpTextGatedResidual":
+            module.__class__ = Qwen4ExpExportableGatedResidual
         moe = getattr(module, "mlp", None)  # module: [B,S,H] -> [B,S,H]
         if moe is not None and type(moe).__name__ == "Qwen4ExpTextSparseMoeBlock":
             module.mlp = Qwen4ExpExportableSparseMoe.from_native(
@@ -1354,6 +1378,7 @@ def _replace_native_modules_for_export(
                 attention, cache_length=cache_length, sequence_length=sequence_length,
             )
         elif isinstance(attention, Qwen4ExpExportableAttention):
+            attention.input_sequence_length = int(sequence_length)
             attention.indexer.set_sequence_length(sequence_length)
             attention.packed_qsa.tail.input_length = int(sequence_length)
     for module in tuple(model.modules()):  # container traversal; no tensor shape
@@ -1364,6 +1389,13 @@ def _replace_native_modules_for_export(
             module.indexer = Qwen4ExpExportableQSAIndexer(indexer, sequence_length=sequence_length)
     for module in tuple(model.modules()):  # container traversal; no tensor shape
         if type(module).__name__ == "Qwen4ExpTextNGramEmbedding":
+            module.export_sequence_length = int(sequence_length)
+            module.register_buffer(
+                "export_history_positions",
+                torch.arange(module.context_len + sequence_length, dtype=torch.int32,
+                             device=module.layer_multipliers.device),
+                persistent=False,
+            )
             multipliers = [int(value) for value in module.layer_multipliers.tolist()]  # list[ngram_size]
             multiplier_limbs = [
                 [
@@ -1393,6 +1425,9 @@ def _replace_native_modules_for_export(
             limb_shifts = torch.arange(_NGRAM_LIMB_BITS, dtype=torch.int32).unsqueeze(0)  # [1,6]
             limb_bit_table = torch.bitwise_and(torch.bitwise_right_shift(limb_values, limb_shifts), 1)  # [64,6]
             export_buffers = {
+                "export_limb_base": buffer_reference.new_tensor(_NGRAM_LIMB_BASE, dtype=torch.int32),
+                "export_two": buffer_reference.new_tensor(2, dtype=torch.int32),
+                "export_eos_token": buffer_reference.new_tensor(module.eos_token_id, dtype=torch.int32),
                 "export_multiplier_limbs": buffer_reference.new_tensor(
                     multiplier_limbs, dtype=torch.int32
                 ),  # [ngram_size,NL]
@@ -1419,6 +1454,8 @@ def _replace_native_modules_for_export(
             if not hasattr(module, "ple_conv_cache_slice"):
                 module.ple_conv_cache_slice = xhnn.DynamicSlice([module.short_conv_state_len], [2], [1])
             module._short_conv = types.MethodType(_ple_short_conv_exportable, module)
+            module.norm_conv.input_is_grouped = True
+            module.forward = types.MethodType(_ple_forward_exportable, module)
 
 
 def _transformers_qwen4_status() -> tuple[str | None, bool]:

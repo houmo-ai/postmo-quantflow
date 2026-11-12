@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,12 @@ from xhmodel_merak.model_integrations.autoregressive.build import (
     validate_artifact as validate_autoregressive_artifact,
 )
 
-from .artifact import mtp_v3_graph_entries, validate_external_ple_contract, validate_serving_contract
+from .artifact import (
+    mtp_v3_graph_entries,
+    validate_component_vision,
+    validate_external_ple_contract,
+    validate_serving_contract,
+)
 
 
 def checkpoint_terminal_mismatches(
@@ -93,16 +99,30 @@ def normalize_export(stage_path: Path, export_result: Any, plan: BuildPlan) -> N
 def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
     def speculative_validator(root, metadata, resolved_plan):
         spec = metadata.get("spec_decode")
-        if isinstance(spec, dict) and spec.get("runtime_contract_version") == 3:
+        if isinstance(spec, dict) and spec.get("runtime_contract_version") in (3, 4):
+            default_count = 4 if spec["runtime_contract_version"] == 4 else 1
+            requested = resolved_plan.config_overrides.get("export.model.num_draft_tokens", default_count)
             if ("mtp" not in resolved_plan.components
-                    or resolved_plan.config_overrides.get("export.model.num_draft_tokens", 1) != 1):
-                raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "Unexpected Qwen4 MTP v3 component")
+                    or requested != spec.get("num_draft_tokens")):
+                raise ModelError(ErrorCode.ARTIFACT_VALIDATION_FAILED, "Unexpected Qwen4 MTP candidate contract")
             validate_serving_contract(root, metadata)
         else:
             _validate_speculative_assets(root, metadata, resolved_plan)
 
-    result = validate_autoregressive_artifact(stage_path, plan, speculative_validator=speculative_validator)
-    metadata = json.loads((stage_path / result["metadata_file"]).read_text(encoding="utf-8"))
+    metadata = json.loads((stage_path / "golden_meta_info.json").read_text(encoding="utf-8"))
+    vision = validate_component_vision(stage_path, metadata, image_token_gears=plan.vision_gears)
+    # The shared validator's vision profile is the legacy whole-gear ABI.
+    # Qwen4 validates its component ABI first, retaining all shared text checks.
+    text_plan = replace(
+        plan, vision_gears=(), vision_profile=None,
+        components=tuple(c for c in plan.components if c != "visual"),
+    ) if vision else plan
+    result = validate_autoregressive_artifact(stage_path, text_plan, speculative_validator=speculative_validator)
+    if vision:
+        result["components"] = list(plan.components)
+        result["vision_profile"] = plan.vision_profile
+        result["dynamic_vision"] = {k: v for k, v in vision.items() if k != "export_entries"}
+        result["export_entries"].update(vision["export_entries"])
     validate_serving_contract(stage_path, metadata)
     result["export_entries"].update(validate_external_ple_contract(stage_path, metadata))
     result["export_entries"].update(mtp_v3_graph_entries(metadata))

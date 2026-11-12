@@ -11,7 +11,7 @@ from typing import Any, Mapping
 import torch
 
 from .cache_contract import FULL_ATTENTION, QWEN_SPARSE_ATTENTION, Qwen4ExpCacheContract
-from .mtp_contract import mtp_verify_phase, resolve_mtp_verify_length
+from .mtp_contract import mtp_verify_phase, resolve_mtp_num_draft_tokens, resolve_mtp_verify_length
 
 
 def _md5(path: str | Path) -> str:
@@ -176,9 +176,14 @@ def build_qwen4_exp_serving_metadata(
     if ple_assets:
         meta["qwen4_exp_ple"] = ple_assets
     if visual_metadata is not None:
-        meta["visual_config"] = dict(visual_metadata)
+        if visual_metadata.get("abi_version") == 2 and visual_metadata.get("layout") == "components":
+            meta["qwen4_exp_vision"] = dict(visual_metadata)
+            meta["visual_config"] = None
+        else:
+            meta["visual_config"] = dict(visual_metadata)
     if mtp_metadata is not None:
         separate_graphs = "prefill" in mtp_metadata and "decode" in mtp_metadata
+        num_draft_tokens = resolve_mtp_num_draft_tokens(model_config) if separate_graphs else 1
         if separate_graphs:
             if verify_hmonnx is None:
                 raise ValueError("Separate Qwen4 MTP graphs require a dedicated target verify graph")
@@ -202,8 +207,8 @@ def build_qwen4_exp_serving_metadata(
             graph = prefill_graph = _relative(output_path, mtp_metadata["onnx_path"])
         meta["spec_decode"] = {
             "mode": "mtp",
-            "runtime_contract_version": 3 if separate_graphs else 2,
-            "num_draft_tokens": 1,
+            "runtime_contract_version": 4 if separate_graphs else 2,
+            "num_draft_tokens": num_draft_tokens,
             "verify_length": verify_length,
             "target_verify_graph": verify_phase if separate_graphs else "prefill",
             "target_verify_padding": verify_length if separate_graphs else prefill_length,
@@ -220,6 +225,11 @@ def build_qwen4_exp_serving_metadata(
             },
         }
         if separate_graphs:
+            from ...shared_head import resolve_shared_head_bits
+
+            bits = resolve_shared_head_bits(model_config.get("quant_scheme"), None, model_config.get("mtp_config"))
+            meta["spec_decode"]["shared_head"] = {"version": 1, "owner": "target", "logical_bits": bits}
+            meta["spec_decode"]["draft_head_weight_bits"] = bits
             meta["spec_decode"]["draft"].update(prefill_chunk_length=prefill_length, decode_chunk_length=1)
             meta["spec_decode"]["target"] = {
                 "verify_hmonnx": meta[f"{verify_phase}_hmonnx"], "verify_chunk_length": verify_length,

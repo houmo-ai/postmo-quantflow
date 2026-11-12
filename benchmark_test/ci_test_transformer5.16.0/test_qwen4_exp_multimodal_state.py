@@ -66,7 +66,10 @@ def test_host_rope_inputs_preserve_multiaxis_group_starts_and_padding():
     torch.testing.assert_close(current[:, :, :2], positions.int())
     assert torch.count_nonzero(current[:, :, 2:]) == 0
     torch.testing.assert_close(group, torch.tensor([[[4]], [[7]], [[1]]], dtype=torch.int32))
-    torch.testing.assert_close(state.group_start_position, positions[:, :, 1:2].int())
+    # Position state commits with successful graph execution, after Golden's
+    # before-state has been recorded, rather than during feed preparation.
+    torch.testing.assert_close(state.group_start_position, torch.tensor([[[4]], [[7]], [[1]]], dtype=torch.int32))
+    torch.testing.assert_close(processor.next_group_start_position, positions[:, :, 1:2].int())
     assert "past_position_ids" not in state.tensors
     with pytest.raises(ValueError, match="shape"):
         processor({"input_ids": torch.tensor([[3, 4]]), "position_ids": torch.ones(1, 1, 2)})
@@ -82,3 +85,77 @@ def test_auxiliary_hc_output_does_not_shift_state_commits():
     assert actual is logits
     assert state.tensors["qsa_key_tail_0"] is key_tail
     assert "target_hidden_states" not in state.tensors
+
+
+def test_native_mixed_media_positions_preserve_timestamp_text_and_frame_groups():
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_llm.models.qwen4_exp.multimodal import multimodal_rope_positions
+
+    config = SimpleNamespace(image_token_id=30, video_token_id=31,
+                             vision_config=SimpleNamespace(spatial_merge_size=2))
+    # Two images and one two-frame video; text between frames carries timestamps.
+    ids = torch.tensor([[1, 30, 30, 2, 30, 3, 31, 31, 4, 31, 31, 5]])
+    kinds = torch.tensor([[0, 1, 1, 0, 1, 0, 2, 2, 0, 2, 2, 0]])
+    images = torch.tensor([[1, 2, 4], [1, 2, 2]])
+    video = torch.tensor([[2, 2, 4]])
+    positions, delta = multimodal_rope_positions(
+        config, ids, image_grid_thw=images, video_grid_thw=video, mm_token_type_ids=kinds,
+    )
+    assert positions.shape == (3, 1, 12)
+    assert delta.item() == positions.max().item() + 1 - ids.shape[1]
+    # Native video implementation expands grid T into independent frame groups.
+    assert positions[:, 0, 8].unique().numel() == 1
+    assert positions[:, 0, 9].min() > positions[:, 0, 7].max()
+    torch.testing.assert_close(video, torch.tensor([[2, 2, 4]]))
+    with pytest.raises(ValueError, match="placeholder count"):
+        multimodal_rope_positions(config, ids, image_grid_thw=images,
+                                  video_grid_thw=torch.tensor([[1, 2, 4]]), mm_token_type_ids=kinds)
+
+
+def test_media_fusion_retains_text_and_original_ids_for_ple():
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_llm.models.qwen4_exp.multimodal import fuse_multimodal_embeddings
+
+    # Exercise the host boundary with tensor-producing encoders; SDK composition
+    # is covered separately by the real multimedia integration case.
+    class Encoder:
+        def encode_many(self, pixels, grid):
+            return list(pixels.reshape(-1, 4, pixels.shape[-1]).sum(1).split(1))
+
+        def encode_videos(self, pixels, grid):
+            return [pixels.reshape(-1, 4, pixels.shape[-1]).sum(1)]
+
+    embed = torch.nn.Embedding(8, 4)
+    ids = torch.tensor([[1, 6, 2, 7, 7]])
+    before = ids.clone()
+    images, videos = torch.randn(4, 4), torch.randn(8, 4)
+    result = fuse_multimodal_embeddings(
+        ids, embed, Encoder(), SimpleNamespace(image_token_id=6, video_token_id=7),
+        pixel_values=images, image_grid_thw=torch.tensor([[1, 2, 2]]),
+        pixel_values_videos=videos, video_grid_thw=torch.tensor([[2, 2, 2]]),
+    )
+    torch.testing.assert_close(result[0, [0, 2]], embed(ids)[0, [0, 2]])
+    torch.testing.assert_close(result[0, 1], images.sum(0))
+    torch.testing.assert_close(result[0, 3:], videos.reshape(2, 4, 4).sum(1))
+    torch.testing.assert_close(ids, before)
+
+
+def test_media_fusion_rejects_malformed_patch_rows_before_encoder():
+    from types import SimpleNamespace
+
+    from xhmodel_merak.xh_llm.models.qwen4_exp.multimodal import fuse_multimodal_embeddings
+
+    class Encoder:
+        def encode_many(self, *args):
+            raise AssertionError("invalid patches must not reach the visual session")
+
+        encode_videos = encode_many
+
+    with pytest.raises(ValueError, match="patch rows"):
+        fuse_multimodal_embeddings(
+            torch.tensor([[6]]), torch.nn.Embedding(8, 4), Encoder(),
+            SimpleNamespace(image_token_id=6, video_token_id=7),
+            pixel_values=torch.zeros(3, 4), image_grid_thw=torch.tensor([[1, 2, 2]]),
+        )
