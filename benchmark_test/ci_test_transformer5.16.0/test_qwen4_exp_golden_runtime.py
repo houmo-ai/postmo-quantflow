@@ -114,7 +114,7 @@ def test_recurrent_cache_and_replaced_ple_state_are_snapshotted_live(session, tm
     assert isinstance(states["recurrent"], CacheTensor)
 
 
-@pytest.mark.parametrize("verify_phase", ["decode_m2", "decode_m4"])
+@pytest.mark.parametrize("verify_phase", ["decode", "decode_m2", "decode_m4"])
 def test_external_ple_demo_replays_actual_sdk_golden_after_relocation(tmp_path, verify_phase):
     import shutil
     import subprocess
@@ -147,34 +147,36 @@ def test_external_ple_demo_replays_actual_sdk_golden_after_relocation(tmp_path, 
     onnx.save(model, graph_path)
     host = HostPLEInputs.from_graph(graph_path)
     session = HMONNXInferenceV2(str(graph_path), session_config=HMONNXInferenceConfig(exec_devices=["cpu"]))
-    capture = GoldenCapture(tmp_path / "golden", ["prefill", "decode", "mtp"])
+    components = ["mtp"] if verify_phase == "decode" else ["prefill", "decode", "mtp"]
+    capture = GoldenCapture(tmp_path / "golden", components)
     capture.add_ple_resources({"prefill": host, "decode": host, verify_phase: host})
     state = {"ple_ngram_history_0": torch.tensor([[0]], dtype=torch.int32)}
-    for phase, token in (("prefill", 2), ("decode", 3), (verify_phase, 4)):
+    for component, phase, token in (("prefill", "prefill", 2), ("decode", "decode", 3), ("mtp", verify_phase, 4)):
         (embedding,) = host.prepare(torch.tensor([[token, 1, 99]]), state, 2, device="cpu")
         assert embedding.shape == (1, 3, 2, 65)
-        component = "mtp" if phase == verify_phase else phase
         with capture.step(component, session, graph_name=phase, runtime_state=state, ple_indices=host.last_indices):
             session(embedding)
     capture.finish()
     shutil.rmtree(source)
     relocated = tmp_path / "moved"
     shutil.move(capture.root, relocated)
-    for manifest in ("manifest.json", "decode_manifest.json", f"{verify_phase}_manifest.json"):
+    manifests = json.loads((relocated / "qwen4_golden_capture.json").read_text())["external_ple"]["manifests"]
+    for manifest in manifests.values():
         result = subprocess.run(
-            [sys.executable, "-I", str(relocated / "ple_demo.py"), "--manifest", str(relocated / "ple" / manifest)],
+            [sys.executable, "-I", str(relocated / "ple_demo.py"), "--manifest", str(relocated / manifest)],
             cwd=tmp_path, capture_output=True, text=True, check=True,
         )
         assert json.loads(result.stdout)["matched_expected"] is True
-    assert (relocated / "ple/prefill/layer_0.packed.bin").read_bytes() == packed.numpy().tobytes()
-    assert (relocated / "ple/prefill/layer_0.exponent.bin").read_bytes() == exponent.numpy().tobytes()
+    assert (relocated / "ple/layer_0.packed.bin").read_bytes() == packed.numpy().tobytes()
+    assert (relocated / "ple/layer_0.exponent.bin").read_bytes() == exponent.numpy().tobytes()
+    assert len(list((relocated / "ple").rglob("*.bin"))) == 2
     assert not (relocated / "mtp").exists()
-    verify_manifest = json.loads((relocated / f"ple/{verify_phase}_manifest.json").read_text())
+    verify_manifest = json.loads((relocated / manifests[verify_phase]).read_text())
     assert verify_manifest["samples"][0]["component"] == verify_phase
-    assert (relocated / f"ple/{verify_phase}/layer_0.packed.bin").read_bytes() == packed.numpy().tobytes()
+    assert verify_manifest["layers"][0]["packed"]["path"] == "layer_0.packed.bin"
 
 
-@pytest.mark.parametrize("verify_phase", ["decode_m2", "decode_m4"])
+@pytest.mark.parametrize("verify_phase", ["decode", "decode_m2", "decode_m4"])
 def test_mtp_group_requires_and_captures_all_three_graphs(session, tmp_path, verify_phase):
     capture = GoldenCapture(tmp_path / "golden", ["mtp"])
     capture.required_graphs.update({"mtp_prefill", "mtp_decode", verify_phase})
@@ -190,7 +192,7 @@ def test_mtp_group_requires_and_captures_all_three_graphs(session, tmp_path, ver
     assert all(row["runtime_before"] and row["runtime_after"] for row in records)
 
 
-@pytest.mark.parametrize("verify_phase", ["decode_m2", "decode_m4"])
+@pytest.mark.parametrize("verify_phase", ["decode", "decode_m2", "decode_m4"])
 def test_mtp_group_rejects_missing_prefill_or_verify_golden(session, tmp_path, verify_phase):
     capture = GoldenCapture(tmp_path / "golden", ["mtp"])
     capture.required_graphs.update({"mtp_prefill", "mtp_decode", verify_phase})

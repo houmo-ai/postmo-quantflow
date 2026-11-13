@@ -7,21 +7,12 @@ import json
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
 from torch import nn
 from transformers import AutoConfig
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpVisionModel
 
 from xhquant import nn as xhnn
-from xhquant.api import (
-    ConfigDict,
-    FrontendType,
-    PrecisionMode,
-    ptq_quantize,
-    to_export_hmonnx_from_quanted_graph,
-    to_frontend_graph,
-    to_quant_graph,
-)
+from xhquant.api import ConfigDict
 
 from ....utils import calculate_file_md5
 from ...wrap_model import wrap_llm_model
@@ -38,9 +29,11 @@ from ..qwen3_5.visual_token_gears import (
 
 
 class Qwen4VisionCheckpoint:
-    """Read only the selected native visual component, without text weights."""
+    """Load a visual component through the shared strict checkpoint loader."""
 
     def __init__(self, model_dir, *, dtype=torch.float16):
+        from .streaming_loader import _ModuleWeightLoader
+
         self.root = Path(model_dir)
         self.config = AutoConfig.from_pretrained(self.root).vision_config
         if getattr(self.config, "deepstack_visual_indexes", ()):
@@ -48,45 +41,10 @@ class Qwen4VisionCheckpoint:
         if self.config.hidden_size % self.config.num_heads or self.config.hidden_size // self.config.num_heads % 4:
             raise ValueError("Qwen4 visual RoPE requires head_dim divisible by four")
         self.dtype = dtype
-        index = self.root / "model.safetensors.index.json"
-        if index.is_file():
-            self.weight_map = json.loads(index.read_text())["weight_map"]
-        else:
-            self.weight_map = {}
-            for path in sorted(self.root.glob("*.safetensors")):
-                with safe_open(path, framework="pt", device="cpu") as source:
-                    for name in source.keys():
-                        if name.startswith("model.visual."):
-                            if name in self.weight_map:
-                                raise ValueError(f"duplicate visual checkpoint tensor {name}")
-                            self.weight_map[name] = path.name
+        self._loader = _ModuleWeightLoader(self.root)
 
     def load_module(self, module, prefix):
-        expected = module.state_dict()
-        keys = {name for name in self.weight_map if name.startswith(prefix)}
-        required = {prefix + name for name in expected}
-        if keys != required:
-            raise ValueError(
-                f"visual component tensor keys differ at {prefix}: missing={required - keys}, extra={keys - required}"
-            )
-        for name, reference in expected.items():
-            full_name = prefix + name
-            with safe_open(self.root / self.weight_map[full_name], framework="pt", device="cpu") as source:
-                value = source.get_tensor(full_name)
-            if value.shape != reference.shape or value.dtype not in (
-                torch.float16,
-                torch.bfloat16,
-                torch.float32,
-                torch.float64,
-            ):
-                raise ValueError(f"invalid native visual tensor {full_name}: {value.shape}/{value.dtype}")
-            value = value.to(dtype=self.dtype)
-            parent_name, _, leaf = name.rpartition(".")
-            parent = module.get_submodule(parent_name) if parent_name else module
-            if leaf in parent._parameters:
-                setattr(parent, leaf, nn.Parameter(value, requires_grad=False))
-            else:
-                parent._buffers[leaf] = value
+        self._loader._load_module_from_safetensor(module, prefix.removesuffix("."))
         return module.eval()
 
 
@@ -143,30 +101,25 @@ class Qwen4VisionMerger(nn.Module):
 
 
 def _export_component(wrapped, inputs, path, *, input_names, output_names, quant_scheme, chip_arch, device):
-    frontend = quanted = None
+    from .static_export import _StaticModel
+
+    component = None
     try:
-        wrapped = wrapped.float().cpu().eval()
-        frontend = to_frontend_graph(wrapped, FrontendType.TorchFX, inputs)
-        quanted = to_quant_graph(frontend, chip_arch, ConfigDict(quant_scheme))
-        ptq_quantize(
-            quanted,
-            [inputs],
-            PrecisionMode.ALIGNED,
-            [device],
-            auto_release_unused_parameters=True,
-            infer_shape=False,
+        # Visual ABI2 exposes FP16 tensors even when the source checkpoint or
+        # a caller's numerical reference uses FP32.
+        wrapped = wrapped.half().cpu().eval()
+        inputs = [value.half() if value.is_floating_point() else value for value in inputs]
+        component = _StaticModel(
+            wrapped, inputs, input_names, output_names, quant_scheme, device,
+            model_name=path.stem, chip_arch=chip_arch,
         )
-        quanted.fixed()
-        return to_export_hmonnx_from_quanted_graph(
-            quanted,
-            inputs,
-            str(path),
-            input_names=input_names,
-            output_names=output_names,
-            save_as_external_data=True,
-        )
+        exported = Path(component.export_hmonnx(str(path.parent)))
+        # Component roles own their published filenames; keep the SDK graph
+        # and its relative external-weight references unchanged.
+        exported.replace(path)
+        return str(path)
     finally:
-        del frontend, quanted, wrapped
+        del component, wrapped
         gc.collect()
         if torch.device(device).type == "cuda" and torch.cuda.is_available():
             with torch.cuda.device(device):

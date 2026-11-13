@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import numpy as np
@@ -25,15 +24,18 @@ class HostPLEInputs:
 
     @classmethod
     def from_graph(cls, graph_path: str | Path) -> "HostPLEInputs | None":
+        from .ple_export import ple_resource_manifest, read_qwen4_exp_ple_specs
+
         graph = onnx.load(str(graph_path), load_external_data=False)
-        metadata = {item.key: item.value for item in graph.metadata_props}
-        if "qwen4_exp_ple" not in metadata:
+        specs = read_qwen4_exp_ple_specs(graph_path)
+        if not specs:
             return None
-        manifest = json.loads(metadata["qwen4_exp_ple"])
+        manifest = {"version": 1, "layers": specs}
         names = [spec["input_name"] for spec in manifest["layers"]]
         if len(names) != len(set(names)) or (names and [i.name for i in graph.graph.input][-len(names):] != names):
             raise ValueError("External PLE inputs must appear once at the end of the graph input list")
-        return cls(graph_path, manifest)
+        root, _ = ple_resource_manifest(graph_path)
+        return cls(root / "model.onnx", manifest)
 
     def prepare(self, token_ids, state, current_input_length: int, *, device):
         ids = token_ids.detach().cpu().numpy()

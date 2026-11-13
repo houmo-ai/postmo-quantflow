@@ -93,7 +93,9 @@ def validate_serving_contract(root: Path, metadata: Mapping[str, Any]) -> None:
             raise ValueError("Qwen4 KV cache layout disagrees with its cache contract")
         import onnx
 
-        for phase, length in (("prefill", model["prefill_chunk_length"]), ("decode", 1)):
+        speculative = metadata.get("spec_decode") or {}
+        decode_length = speculative["verify_length"] if speculative.get("runtime_contract_version", 0) >= 5 else 1
+        for phase, length in (("prefill", model["prefill_chunk_length"]), ("decode", decode_length)):
             graph_path = confined_file(root.resolve(), metadata[f"{phase}_hmonnx"], f"{phase}_hmonnx")
             graph = onnx.load(str(graph_path), load_external_data=False).graph
             _validate_mrope_inputs(graph, length, phase)
@@ -210,23 +212,40 @@ def validate_external_ple_contract(root: Path, metadata: Mapping[str, Any]) -> d
     declared = metadata.get("qwen4_exp_ple")
     phases = {"prefill": metadata["prefill_hmonnx"], "decode": metadata["decode_hmonnx"]}
     spec = metadata.get("spec_decode")
-    if isinstance(spec, Mapping) and spec.get("runtime_contract_version") in (3, 4):
+    if isinstance(spec, Mapping) and spec.get("runtime_contract_version") in (3, 4, 5):
         verify_role = spec.get("target_verify_graph", "decode_m2")
         phases[verify_role] = metadata.get(f"{verify_role}_hmonnx")
-    if declared is not None and (not isinstance(declared, Mapping) or set(declared) != set(phases)):
+    shared = isinstance(declared, Mapping) and set(declared) == {"manifest"}
+    if declared is not None and not shared and (not isinstance(declared, Mapping) or set(declared) != set(phases)):
         raise ValueError("External PLE metadata must describe every target phase")
     entries = {}
+    shared_manifest = None
+    if shared:
+        path = confined_file(root, declared["manifest"], "qwen4_exp_ple.manifest")
+        shared_manifest = json.loads(path.read_text())
+        entries["ple_manifest"] = {"path": path.relative_to(root).as_posix(), "type": "json"}
     for phase, graph_value in phases.items():
         graph_path = confined_file(root, graph_value, f"{phase}_hmonnx")
         try:
             graph = onnx.load(str(graph_path), load_external_data=False)
         except Exception as exc:
             raise ValueError(f"Cannot read {phase} PLE graph: {exc}") from exc
-        values = [item.value for item in graph.metadata_props if item.key == "qwen4_exp_ple"]
+        values = [json.dumps(shared_manifest)] if shared else [
+            item.value for item in graph.metadata_props if item.key == "qwen4_exp_ple"
+        ]
+        resource_manifest = graph_path.parent / "ple.json"
+        if not shared and resource_manifest.is_file():
+            resource_manifest = confined_file(root, resource_manifest.relative_to(root).as_posix(), "ple.json")
+            if values:
+                raise ValueError("PLE manifest must have one source")
+            values = [resource_manifest.read_text()]
+            entries[f"{phase}_ple_manifest"] = {
+                "path": resource_manifest.relative_to(root).as_posix(), "type": "json",
+            }
         if len(values) > 1:
             raise ValueError("Graph has duplicate PLE metadata")
         graph_manifest = json.loads(values[0]) if values else None
-        phase_manifest = declared[phase] if declared is not None else None
+        phase_manifest = shared_manifest if shared else (declared[phase] if declared is not None else None)
         if phase_manifest is None and graph_manifest is None:
             if any(item.name.startswith("ple_embeddings_") for item in graph.graph.input):
                 raise ValueError("External PLE graph inputs require a manifest")
@@ -312,13 +331,14 @@ def validate_external_ple_contract(root: Path, metadata: Mapping[str, Any]) -> d
                         or any(type(value) is not int for value in resource["shape"])
                         or resource["shape"] != [rows, *tail]):
                     raise ValueError(f"Invalid external PLE {kind} resource layout")
-                path = confined_file(graph_path.parent, resource.get("path"), f"ple.{kind}")
+                path = confined_file(root if shared else graph_path.parent, resource.get("path"), f"ple.{kind}")
                 expected_size = rows * tail[0] * tail[1] * itemsize
                 if path.stat().st_size != expected_size:
                     raise ValueError(f"External PLE {kind} resource size differs from its shape")
                 relative = path.relative_to(root).as_posix()
                 resource["path"] = relative
-                entries[f"ple_{phase}_{layer}_{kind}"] = {"path": relative, "type": "embedding"}
+                name = f"ple_{layer}_{kind}" if shared else f"ple_{phase}_{layer}_{kind}"
+                entries[name] = {"path": relative, "type": "embedding"}
         declared_order = [spec["input_name"] for spec in rebased["layers"]]
         if [item.name for item in graph.graph.input][-len(declared_order):] != declared_order:
             raise ValueError("External PLE inputs must follow the original graph inputs")
@@ -332,7 +352,9 @@ def validate_external_ple_contract(root: Path, metadata: Mapping[str, Any]) -> d
 
 def mtp_v3_graph_entries(metadata: Mapping[str, Any]) -> dict[str, Any]:
     spec = metadata.get("spec_decode")
-    if not isinstance(spec, Mapping) or spec.get("runtime_contract_version") not in (3, 4):
+    if not isinstance(spec, Mapping) or spec.get("runtime_contract_version") not in (3, 4, 5):
+        return {}
+    if spec["runtime_contract_version"] >= 5:
         return {}
     return {"target_verify": {"path": spec["target"]["verify_hmonnx"], "type": "decode"}}
 
@@ -354,13 +376,13 @@ def validate_mtp_v3_contract(root, metadata, text, target_contract):
     version = spec.get("runtime_contract_version") if isinstance(spec, Mapping) else None
     if version == 2:
         return  # The existing version-2 build checks retain their original contract.
-    if version not in (3, 4) or spec.get("mode") != "mtp":
+    if version not in (3, 4, 5) or spec.get("mode") != "mtp":
         raise ValueError("Unsupported Qwen4 speculative runtime contract")
     count = spec.get("num_draft_tokens")
     if (type(count) is not int or count < 1 or (version == 3 and count != 1)
             or type(spec.get("verify_length")) is not int or spec["verify_length"] < count + 1):
         raise ValueError("Qwen4 MTP requires positive draft count and verify length >= num_draft_tokens + 1")
-    if version == 4:
+    if version >= 4:
         from xhmodel_merak.xh_llm.shared_head import resolve_shared_head_bits
 
         bits = resolve_shared_head_bits(metadata["model_config"].get("quant_scheme"))
@@ -372,7 +394,7 @@ def validate_mtp_v3_contract(root, metadata, text, target_contract):
                 or spec["draft_head_weight_bits"] != bits):
             raise ValueError("Qwen4 MTP shared head must declare the target's logical precision")
     verify_length = spec["verify_length"]
-    verify_role = f"decode_m{verify_length}"
+    verify_role = "decode" if version >= 5 else f"decode_m{verify_length}"
     target, draft = spec.get("target"), spec.get("draft")
     if not isinstance(target, Mapping) or not isinstance(draft, Mapping):
         raise ValueError("Qwen4 MTP v3 requires target and draft contracts")
@@ -407,7 +429,12 @@ def validate_mtp_v3_contract(root, metadata, text, target_contract):
     expected_draft = _declared_cache_contract(Qwen4ExpTextConfig(**draft_text), draft.get("cache_contract"))
     if target_contract.ple_layer_indices:
         ple = metadata.get("qwen4_exp_ple", {})
-        if set(ple) != {"prefill", "decode", verify_role} or any(
+        if version >= 5:
+            path = confined_file(root, ple.get("manifest"), "qwen4_exp_ple.manifest")
+            layers = json.loads(path.read_text())["layers"]
+            if {layer["layer_idx"] for layer in layers} != set(target_contract.ple_layer_indices):
+                raise ValueError("Qwen4 MTP shared PLE resources disagree with target layers")
+        elif set(ple) != {"prefill", "decode", verify_role} or any(
             {layer["layer_idx"] for layer in phase["layers"]} != set(target_contract.ple_layer_indices)
             for phase in ple.values()
         ):
@@ -496,8 +523,9 @@ def validate_mtp_v3_contract(root, metadata, text, target_contract):
                 require(outputs, f"present_{tensor.name}", shape, onnx.TensorProto.FLOAT16)
         require(outputs, "logits", [1, length, vocab], onnx.TensorProto.FLOAT16)
         require(outputs, output, [1, length, hidden * hc], onnx.TensorProto.FLOAT16)
+    separate_target_roles = ("prefill_hmonnx",) if version >= 5 else ("prefill_hmonnx", "decode_hmonnx")
     if len(set(paths)) != 3 or verify_path in {
-        confined_file(root, metadata[key], key) for key in ("prefill_hmonnx", "decode_hmonnx")
+        confined_file(root, metadata[key], key) for key in separate_target_roles
     }:
         raise ValueError("Qwen4 MTP v3 graph roles must not alias")
     for key, expected in (("draft_prefill_onnx", draft["prefill_hmonnx"]),

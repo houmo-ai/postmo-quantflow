@@ -9,10 +9,97 @@ from typing import Any
 
 import torch
 
+from xhmodel_merak.configuration_utils import HFModelConfig
+
+from ...base_model import XHSubModel
+from ...kv_cache_mixin import EmptyKVCacheMixin
+from ...shared_head import SharedHeadMixin
+from ...types import LLMModelState
 from .cache_contract import Qwen4ExpCacheContract, qwen4_exp_cache_input_specs, resolve_qwen4_exp_cache_shape
 from .checkpoint import _adapt_gptq_linears
 from .modeling import build_qwen4_exp_text_export_wrapper, extract_qwen4_exp_text_config, extract_qwen4_exp_text_model
 from .static_runtime import _mrope_inputs as _sample_mrope_position_inputs
+
+
+class _StaticInputProcessor:
+    def __init__(self, names, inplace):
+        self.names, self.inplace = names, inplace
+        self.device = "cpu"
+
+    def to(self, device=None, dtype=None):
+        if device is not None:
+            self.device = device
+        return self
+
+    def __call__(self, data):
+        from xhquant.core import CacheTensor
+
+        names = iter(self.names)
+
+        def prepare(value):
+            if isinstance(value, (tuple, list)):
+                return type(value)(prepare(item) for item in value)
+            name = next(names)
+            value = value.detach().clone().to(self.device)
+            return CacheTensor(value) if data["cache"] and name in self.inplace else value
+
+        return prepare(data["inputs"])
+
+
+class _StaticModel(SharedHeadMixin, XHSubModel):
+    """A static Qwen4 component using the same lifecycle as Qwen3.5 MTP."""
+
+    def __init__(self, wrapper, inputs, names, outputs, quant_config, quant_device, *,
+                 model_name="qwen4_exp_text", chip_arch="XH2a"):
+        from ...utils import unfold_args
+
+        dtype = next(value.dtype for value in unfold_args(inputs) if value.is_floating_point())
+        super().__init__(HFModelConfig(
+            model_name=model_name, chip_arch=chip_arch, dtype=str(dtype).removeprefix("torch."),
+            quant_scheme=quant_config or {"quant_type": "w8a8h1_sefp"}, quant_device=quant_device,
+        ))
+        self._source_wrapper, self._sample_inputs = wrapper, inputs
+        self._input_names, self._output_names = tuple(names), tuple(outputs)
+        contract = getattr(wrapper, "cache_contract", None)
+        specs = qwen4_exp_cache_input_specs(contract) if contract is not None else {}
+        self._inplace = {name for name in names if name.startswith(
+            ("past_key_cache_", "past_value_cache_", "qsa_indexer_key_cache_")
+        )}
+        self._inplace.update(
+            spec.name for spec in specs.values()
+            if spec.state_kind == "delta_recurrent" and wrapper._linear_attention_uses_gdr_cache_state(spec.layer_idx)
+        )
+
+    def get_native_model(self):
+        return self._source_wrapper
+
+    def _to_wrap(self, wrapper):
+        self._wrap_model = wrapper
+        del self._source_wrapper
+
+    def get_dummy_inputs(self):
+        return {"inputs": self._sample_inputs, "cache": self._state != LLMModelState.WRAP}
+
+    def _get_data_preprocessor(self):
+        return _StaticInputProcessor(self._input_names, self._inplace)
+
+    def get_kvcache_mixin(self):
+        return EmptyKVCacheMixin()
+
+    def _to_fronted(self, wrapper):
+        from xhquant.api import FrontendType, to_frontend_graph
+
+        inputs = self.get_data_preprocessor()(self.get_dummy_inputs())
+        return to_frontend_graph(wrapper, FrontendType.TorchFX, inputs)
+
+    def _to_quanted(self, frontend_model, state, **kwargs):
+        return super()._to_quanted(frontend_model, state, infer_shape=False, **kwargs)
+
+    def get_export_cfg(self):
+        return {"input_names": list(self._input_names), "output_names": list(self._output_names)}
+
+    def export_hmonnx(self, output_dir):
+        return super()._export_hmonnx(output_dir)
 
 
 def _module_device(module: torch.nn.Module, fallback: torch.device) -> torch.device:
@@ -152,47 +239,44 @@ def export_qwen4_exp_hmonnx(
     export_wrapper=None,
     export_input_names=None,
     export_output_names=None,
-    calibration_inputs=None,
     validate_export_graph_parity=False,
     shared_quantized_head=None,
     capture_quantized_head=False,
+    model_name="qwen4_exp_text",
+    ple_resources=None,
 ):
     """Export one already-static wrapper with the standard SDK lifecycle.
 
     Nested cache tuples remain intact for TorchFX tracing. The SDK frontend
     flattens them; PTQ and serialization consume the same shared flat ABI.
-    Publication retains QSA layout resources required by the existing graph
-    contract; capture and quantization use only the standard SDK frontend.
+    Components use XHSubModel for PTQ, fixed-head binding and serialization.
     """
     import onnx
 
-    from xhquant.api import (
-        ConfigDict,
-        FrontendType,
-        PrecisionMode,
-        ptq_quantize,
-        to_export_graph,
-        to_export_hmonnx_v2,
-        to_frontend_graph,
-        to_quant_graph,
-    )
-
     from ...big_hf_model_helper import _copy_module_shared_params
     from ...mrope import MROPE_CURRENT_POSITION_NAMES, MROPE_POOL_POSITION_NAMES
-    from ...shared_head import bind_quantized_head, quantized_head
+    from ...shared_head import quantized_head
     from ...utils import unfold_args
     from .modeling import Qwen4ExpExportableAttention, Qwen4ExpExportableGatedDeltaNet, adapt_qwen4_exp_rms_norms
-    from .ple_export import export_ple_sefp4_hmonnx, extract_qwen4_exp_ple_specs
+    from .ple_export import validate_qwen4_exp_ple_inputs
     from .precision import resolve_ple_quant_type
     from .qsa_host_controls import QSA_HOST_CONTROL_NAMES
+    from .streaming_ple import PLEExportResources
     from .xhquant_extensions import qwen4_exp_xhquant_extension_scope
 
     ple_quant_type = resolve_ple_quant_type(ple_quant_type)
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
-    ple_specs = extract_qwen4_exp_ple_specs(native_model) if ple_quant_type == "sefp4" else ()
+    ple_resources = ple_resources if ple_resources is not None else PLEExportResources(root)
+    if export_wrapper is None:
+        native_model = _copy_module_shared_params(native_model)
     converted = _adapt_gptq_linears(native_model)
     if export_wrapper is None:
+        from .streaming_ple import prepare_native_ple
+
+        ple_specs = prepare_native_ple(
+            native_model, root, quant_device=quant_device or "cpu", resources=ple_resources,
+        ) if ple_quant_type == "sefp4" else ()
         config = extract_qwen4_exp_text_config(text_config or native_model)
         width = int(input_sequence_length or sample_inputs[0].shape[1])
         wrapper = build_qwen4_exp_text_export_wrapper(
@@ -203,6 +287,14 @@ def export_qwen4_exp_hmonnx(
             cache_length=cache_length,
             return_hidden_states=return_hidden_states,
         ).eval()
+        wrapper.ple_specs = tuple(ple_specs)
+        if ple_specs:
+            from .host_ple_inputs import HostPLEInputs
+
+            host = HostPLEInputs(ple_resources.root / "model.onnx", {"version": 1, "layers": list(ple_specs)})
+            cache = dict(zip(wrapper.cache_keys, sample_inputs[-1][:len(wrapper.cache_keys)], strict=True))
+            values = host.prepare(sample_inputs[3], cache, int(sample_inputs[2].item()), device=sample_inputs[0].device)
+            sample_inputs = (*sample_inputs[:-1], (*sample_inputs[-1], *values))
         adapt_qwen4_exp_rms_norms(wrapper)
         if use_fused_gdr:
             for module in tuple(wrapper.modules()):
@@ -221,23 +313,21 @@ def export_qwen4_exp_hmonnx(
             *MROPE_POOL_POSITION_NAMES,
             *cache_names,
             *(QSA_HOST_CONTROL_NAMES if qsa else ()),
+            *(spec["input_name"] for spec in ple_specs),
         )
-        inplace = {
-            s.name
-            for s in wrapper.cache_contract.tensors
-            if s.state_kind == "delta_recurrent" and wrapper._linear_attention_uses_gdr_cache_state(s.layer_idx)
-        }
+        output_specs = set(spec.name for spec in wrapper.output_cache_specs())
         export_output_names = export_output_names or (
             "logits",
             *(("target_hidden_states",) if return_hidden_states else ()),
             *(
                 f"present_{name}"
                 for name, spec in qwen4_exp_cache_input_specs(wrapper.cache_contract).items()
-                if spec.name not in inplace
+                if spec.name in output_specs
             ),
         )
     else:
         wrapper = export_wrapper
+        ple_specs = getattr(wrapper, "ple_specs", ())
     if export_input_names is None or export_output_names is None:
         raise ValueError("Static wrapper export requires explicit input and output names")
     flat = tuple(unfold_args(sample_inputs))
@@ -246,76 +336,27 @@ def export_qwen4_exp_hmonnx(
     # Shared tensor ownership helper keeps PTQ module replacement independent
     # from the caller's native model without copying its large parameter data.
     wrapper = _copy_module_shared_params(wrapper)
-    from xhquant.core import CacheTensor
-
-    contract = getattr(wrapper, "cache_contract", None)
-    specs = qwen4_exp_cache_input_specs(contract) if contract is not None else {}
-    inplace_names = {
-        name
-        for name, spec in specs.items()
-        if spec.state_kind in {"kv_key", "kv_value", "qsa_indexer_key"}
-        or (spec.state_kind == "delta_recurrent" and wrapper._linear_attention_uses_gdr_cache_state(spec.layer_idx))
-    }
-    flat = tuple(
-        CacheTensor(value.detach().clone()) if name in inplace_names else value
-        for name, value in zip(export_input_names, flat, strict=True)
+    component = _StaticModel(
+        wrapper, sample_inputs, export_input_names, export_output_names, quant_config, quant_device,
+        model_name=model_name,
     )
+    if shared_quantized_head is not None:
+        component.bind_target_head(shared_quantized_head)
     with qwen4_exp_xhquant_extension_scope():
-        frontend = to_frontend_graph(wrapper, FrontendType.TorchFX, sample_inputs)
-        quanted = to_quant_graph(frontend, "xh2a", ConfigDict(dict(quant_config or {"quant_type": "w8a8h1_sefp"})))
-        if shared_quantized_head is not None:
-            bind_quantized_head(quanted, shared_quantized_head)
-        calibration = [
-            [
-                CacheTensor(value.detach().clone()) if name in inplace_names else value.detach().clone()
-                for name, value in zip(export_input_names, unfold_args(values), strict=True)
-            ]
-            for values in (calibration_inputs or (sample_inputs,))
-        ]
-        ptq_quantize(
-            quanted,
-            calibration,
-            PrecisionMode.ALIGNED,
-            [str(quant_device or "cpu")],
-            auto_release_unused_parameters=True,
-            infer_shape=False,
-        )
-        quanted.fixed()
-        fixed_head = quantized_head(quanted) if capture_quantized_head else None
-        exported = to_export_graph(quanted, list(flat))
-        path = Path(
-            to_export_hmonnx_v2(
-                exported,
-                flat,
-                str(root / "qwen4_exp_text.onnx"),
-                cfg=ConfigDict(input_names=list(export_input_names), output_names=list(export_output_names)),
-                save_as_external_data=True,
-            )
-        )
+        path = Path(component.export_hmonnx(str(root)))
+        fixed_head = quantized_head(component.quanted_model) if capture_quantized_head else None
         parity = []
         if validate_export_graph_parity:
             from .golden_runtime import _validate_hmonnx_runtime_parity
 
+            flat = tuple(unfold_args(component.get_data_preprocessor()(component.get_dummy_inputs())))
             parity = _validate_hmonnx_runtime_parity(
-                path, flat, exported, device=quant_device or "cpu", reference_device="cpu"
+                path, flat, component.quanted_model, device=quant_device or "cpu", reference_device="cpu"
             )
     onnx.checker.check_model(str(path))
-    ple = {"status": "disabled", "quant_type": ple_quant_type}
-    if ple_quant_type == "sefp4":
-        ple = export_ple_sefp4_hmonnx(path, path, ple_specs=ple_specs)
-        onnx.checker.check_model(str(path))
-    if export_wrapper is None:
-        from .serving_graph import publish_qwen4_exp_qsa_layout_resources
-
-        publish_qwen4_exp_qsa_layout_resources(
-            path,
-            batch_size=batch_size,
-            input_sequence_length=width,
-            num_attention_heads=int(config.num_attention_heads),
-            num_key_value_heads=int(config.num_key_value_heads),
-            head_dim=int(config.head_dim),
-        )
-        onnx.checker.check_model(str(path))
+    validate_qwen4_exp_ple_inputs(path, ple_specs, ple_resources.root)
+    ple = {"status": "externalized" if ple_specs else "disabled", "quant_type": ple_quant_type,
+           "layers": list(ple_specs)}
     graph = onnx.load(path, load_external_data=False).graph
     dtype_names = {onnx.TensorProto.FLOAT: "float32", onnx.TensorProto.DOUBLE: "float64"}
     inputs = [

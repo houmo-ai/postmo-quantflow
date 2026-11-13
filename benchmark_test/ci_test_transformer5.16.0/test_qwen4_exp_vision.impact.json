@@ -6,6 +6,7 @@
       "patterns": [
         "xhmodel_merak/xh_llm/models/qwen4_exp/vision.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/vision_export.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/static_export.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/vision_contract.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/multimodal.py",
         "xhmodel_merak/xh_llm/models/qwen3_5/_vision_model_impl.py",

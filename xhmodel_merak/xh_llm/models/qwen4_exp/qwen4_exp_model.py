@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import torch
@@ -122,9 +121,6 @@ class XHQwen4ExpModel(VisionLLMModel):
             extract_qwen4_exp_text_config,
             extract_qwen4_exp_text_model,
         )
-        from .ple_export import extract_qwen4_exp_ple_specs
-
-        self._ple_specs = extract_qwen4_exp_ple_specs(source)
         _adapt_gptq_linears(source)
 
         # Qwen4 wrapper construction replaces native submodules in place.  Keep
@@ -226,7 +222,10 @@ class XHQwen4ExpModel(VisionLLMModel):
 
     def _get_wrapper_cfg(self):
         names = self.qwen4_cache_contract.expected_keys()
-        inplace = self._inplace_recurrent_names["prefill" if self.is_prefill() else "decode"]
+        inplace = self._inplace_recurrent_names["prefill" if self.is_prefill() else "decode"] | {
+            spec.name for spec in self.qwen4_cache_contract.tensors
+            if spec.state_kind in {"kv_key", "kv_value", "qsa_indexer_key"}
+        }
         host_controls = tuple(getattr(self, "_qsa_host_control_names", ()))
         return {
             "input_names": [
@@ -264,36 +263,6 @@ class XHQwen4ExpModel(VisionLLMModel):
         exported.meta = self.META_CLS()
         return exported
 
-    def _export_hmonnx(self, exported_info):
-        import onnx
-
-        from .ple_export import export_ple_sefp4_hmonnx
-        from .serving_graph import convert_qwen4_exp_kv_to_llm_cache, publish_qwen4_exp_qsa_layout_resources
-        from .xhquant_extensions import qwen4_exp_xhquant_extension_scope
-
-        with qwen4_exp_xhquant_extension_scope():
-            super()._export_hmonnx(exported_info, save_token_embedding=False)
-        root = Path(exported_info.exported_dir)
-        for stage in ("prefill", "decode"):
-            path = root / getattr(exported_info.meta, stage + "_hmonnx")
-            if self.config.ple_quant_type == "sefp4":
-                export_ple_sefp4_hmonnx(path, path, ple_specs=self._ple_specs)
-            convert_qwen4_exp_kv_to_llm_cache(
-                path, path, context_length=int(self.config.context_max_length),
-                num_kv_heads=self.qwen4_cache_contract.num_key_value_heads,
-                head_dim=self.qwen4_cache_contract.head_dim,
-            )
-            publish_qwen4_exp_qsa_layout_resources(
-                path,
-                batch_size=int(self.config.batch_size),
-                input_sequence_length=int(self.config.prefill_chunk_length) if stage == "prefill" else 1,
-                num_attention_heads=int(self._text_config.num_attention_heads),
-                num_key_value_heads=int(self._text_config.num_key_value_heads),
-                head_dim=int(self._text_config.head_dim),
-            )
-            onnx.checker.check_model(str(path))
-        return exported_info
-
     def forward(self, *args, **kwargs):
         if self._state == LLMModelState.WRAP and self.is_decode():
             outputs = self._decode_wrap_model(*args, **kwargs)
@@ -303,107 +272,24 @@ class XHQwen4ExpModel(VisionLLMModel):
             return self._qwen4_cache.commit(outputs, self._get_wrapper_cfg()["output_names"])
         return outputs
 
-    def export_hmonnx(self, output_dir: str):
+    def export_hmonnx(self, output_dir: str, *, phase="both", resume=False, low_memory=None):
+        from .package_export import _export_qwen4_exp_package
+
         self.work_dir = str(output_dir)
-        exported_info = self.get_export_info(output_dir)
-        if getattr(self, "visual", None) is not None:
-            self._export_visual_hmonnx_impl(exported_info)
-            # Remove the exported child from the generic lifecycle registry.
-            del self.visual
-            self.visual = None
-        from ...utils import HUGE_MODEL_EXPORT_ENABLED_ENV, is_huge_model_export_enabled
-
-        low_memory = self._state == LLMModelState.NONE and is_huge_model_export_enabled(
-            os.environ.get(HUGE_MODEL_EXPORT_ENABLED_ENV, "1")
-        )
-        if low_memory:
-            self._export_streamed_hmonnx(exported_info)
-        else:
-            if self._state != LLMModelState.QUANTED_ALIGNED:
-                self.to_quanted_aligned()
-            for stage in ("prefill", "decode"):
-                self._quanted_model[stage].fixed()
-            self._export_hmonnx(exported_info)
-        from .serving_export import build_qwen4_exp_serving_metadata
-
-        meta = exported_info.meta
-        visual = getattr(meta, "qwen4_exp_vision", None)
-        if visual is None:
-            visual = getattr(meta, "visual_config", None)
         model_config = self.config.to_dict()
         model_config["quant_scheme"] = self.config._export_quant_config
-        meta_path = build_qwen4_exp_serving_metadata(
-            output_dir=exported_info.exported_dir, model_name=self.config.model_name,
-            hf_model_dir=self.hf_model_dir, text_config=self._text_config,
-            model_config=model_config,
-            prefill_hmonnx=Path(exported_info.exported_dir) / meta.prefill_hmonnx,
-            decode_hmonnx=Path(exported_info.exported_dir) / meta.decode_hmonnx,
-            embedding_state=self.embed_tokens.weight, pad_token_id=self.pad_token_id,
-            visual_metadata=(visual.to_dict() if hasattr(visual, "to_dict") else visual),
+        manifest = _export_qwen4_exp_package(
+            model_dir=self.hf_model_dir, output_dir=output_dir, model_config=model_config,
+            device=self.config.get("quant_device") or ("cuda" if torch.cuda.is_available() else "cpu"),
+            device_map=self.config.get("device_map"), model_name=self.config.model_name,
+            mtp_source_dir=self.config.get("mtp_source_dir"), phase=phase, resume=resume, low_memory=low_memory,
         )
-        return self.META_CLS.from_dict(json.loads(meta_path.read_text(encoding="utf-8")))
+        if manifest["status"] != "complete":
+            return None
+        from .shared_weights import publish_qwen4_exp_shared_weights
 
-    def _export_streamed_hmonnx(self, exported_info):
-        """Reuse the phase implementation while the model owns package assembly."""
-        import onnx
-
-        from .modeling import extract_qwen4_exp_text_model
-        from .serving_graph import convert_qwen4_exp_kv_to_llm_cache
-        from .streaming_export import export_qwen4_exp_streamed_phase
-        from .streaming_loader import Qwen4ExpStreamingLoader
-
-        if self.config.ple_quant_type != "sefp4":
-            raise ValueError("Qwen4 low-memory export requires Host PLE SEFP4")
-        loader = Qwen4ExpStreamingLoader(self.hf_model_dir, dtype=self.dtype)
-        text_model = extract_qwen4_exp_text_model(loader.model)
-        prefix = next(name for name, module in loader.model.named_modules() if module is text_model)
-        embedding = loader.read_tensor(f"{prefix}.embed_tokens.weight").to(loader.dtype)
-        self.embed_tokens = torch.nn.Embedding.from_pretrained(embedding)
-        root = Path(exported_info.exported_dir)
-        for stage, length in (("prefill", self.config.prefill_chunk_length), ("decode", 1)):
-            phase_dir = root / stage
-            result = export_qwen4_exp_streamed_phase(
-                loader, phase_dir, input_sequence_length=int(length),
-                cache_length=int(self.config.context_max_length),
-                quant_config=self.config._export_quant_config,
-                quant_device=getattr(self.config, "quant_device", "cuda" if torch.cuda.is_available() else "cpu"),
-                use_fused_gdr=bool(getattr(self.config, "use_fused_gdr", False)),
-                return_hidden_states=False, ple_quant_type=self.config.ple_quant_type,
-            )
-            path = phase_dir / f"qwen4_exp_{stage}_llm_cache.onnx"
-            convert_qwen4_exp_kv_to_llm_cache(
-                result.hmonnx_path, path, context_length=int(self.config.context_max_length),
-                num_kv_heads=self.qwen4_cache_contract.num_key_value_heads,
-                head_dim=self.qwen4_cache_contract.head_dim,
-            )
-            onnx.checker.check_model(str(path))
-            Path(result.hmonnx_path).unlink()
-            Path(result.io_manifest_path).unlink()
-            # The assembler has copied child weights into the final sidecar.
-            # Retain any still-referenced file and the separate Host PLE bins.
-            final_graph = onnx.load(str(path), load_external_data=False)
-            if any(node.op_type == "PlaceHolder" for node in final_graph.graph.node):
-                raise ValueError("Streamed Qwen4 graph still contains decoder placeholders")
-            required = {
-                (phase_dir / item.value).resolve()
-                for tensor in onnx.external_data_helper._get_all_tensors(final_graph)
-                for item in tensor.external_data if item.key == "location"
-            }
-            for child_dir in (phase_dir / "blocks").iterdir():
-                for filename in (
-                    "qwen4_exp_text_external_data", "qwen4_exp_hmonnx_io.json",
-                    f"block_{child_dir.name}.onnx",
-                ):
-                    temporary = child_dir / filename
-                    if temporary.resolve() not in required:
-                        temporary.unlink(missing_ok=True)
-                if not any(child_dir.iterdir()):
-                    child_dir.rmdir()
-            setattr(exported_info.meta, stage + "_hmonnx", str(path.relative_to(root)))
-
-    def _export_visual_hmonnx_impl(self, exported_info):
-        visual_meta = self.visual.export_hmonnx(exported_info.exported_dir, write_standalone_metadata=False)
-        exported_info.meta.qwen4_exp_vision = visual_meta
+        publish_qwen4_exp_shared_weights(output_dir)
+        return self.META_CLS.from_dict(json.loads(Path(manifest["meta"]).read_text()))
 
 
 __all__ = ["XHQwen4ExpModel"]

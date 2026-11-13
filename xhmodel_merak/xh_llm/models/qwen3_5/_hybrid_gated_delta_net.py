@@ -550,7 +550,15 @@ class HybridGatedDeltaNetMixin:
             hidden_states.dtype,
         )
         batch_size, seq_len, _ = hidden_states.shape
-        query, key, value, z, b, a = self._project_qkvzba(hidden_states)
+        merged_qkv = not self.split_conv_cache and not self._uses_packed_input_projections
+        if merged_qkv:
+            # A merged checkpoint projection already has the convolution's
+            # channel order. Keep it merged until after the convolution.
+            mixed_qkv = self.in_proj_qkv(hidden_states)
+            z = self.in_proj_z(hidden_states).reshape(batch_size, seq_len, -1, self.head_v_dim)
+            b, a = self.in_proj_b(hidden_states), self.in_proj_a(hidden_states)
+        else:
+            query, key, value, z, b, a = self._project_qkvzba(hidden_states)
         use_recurrent = self.linear_attention_mode == "recurrent"
         if self.linear_attention_mode == "auto" and current_input_length is not None:
             resolved_len = _resolve_python_int_length(current_input_length)
@@ -649,14 +657,16 @@ class HybridGatedDeltaNetMixin:
             value = value_states.transpose(1, 2).reshape(batch_size, attn_seq_len, -1, self.head_v_dim)
         else:
             # === Merged conv_cache path (single tensor, default) ===
-            mixed_qkv = torch.cat(
-                (
-                    query.reshape(batch_size, seq_len, self.key_dim),
-                    key.reshape(batch_size, seq_len, self.key_dim),
-                    value.reshape(batch_size, seq_len, self.value_dim),
-                ),
-                dim=-1,
-            ).transpose(1, 2)
+            if not merged_qkv:
+                mixed_qkv = torch.cat(
+                    (
+                        query.reshape(batch_size, seq_len, self.key_dim),
+                        key.reshape(batch_size, seq_len, self.key_dim),
+                        value.reshape(batch_size, seq_len, self.value_dim),
+                    ),
+                    dim=-1,
+                )
+            mixed_qkv = mixed_qkv.transpose(1, 2)
             conv_cache, recurrent_state = _align_linear_cache_args(
                 conv_cache,
                 recurrent_state,

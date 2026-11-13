@@ -427,7 +427,7 @@ def test_verify_page_layout_must_match_target():
         _allocate_page_caches(model)
 
 
-@pytest.mark.parametrize("version", [2, 3, 4])
+@pytest.mark.parametrize("version", [2, 3, 4, 5])
 def test_shared_mtp_factory_resolves_graphs_and_execution_devices(monkeypatch, tmp_path, version):
     from addict import Dict
 
@@ -471,7 +471,8 @@ def test_shared_mtp_factory_resolves_graphs_and_execution_devices(monkeypatch, t
         model._qwen4_verify_length = 5
         capture = SimpleNamespace(components=("mtp",), required_graphs=set())
         assert create_mtp_runtime(model, capture=capture) is first
-        assert capture.required_graphs == {"mtp_prefill", "mtp_decode", "decode_m5"}
+        role = "decode" if version >= 5 else "decode_m5"
+        assert capture.required_graphs == {"mtp_prefill", "mtp_decode", role}
         assert len(builds) == 1
     assert captured["path"] == tmp_path / "mtp_decode/model.hmonnx"
     assert captured["device_map"] == ["cuda:2", "cuda:7"]

@@ -120,18 +120,46 @@ def _safe_asset(root: Path, value: dict) -> Path:
     return path
 
 
+def ple_resource_manifest(onnx_path):
+    """Resolve the resource owner of a standalone component or flat package."""
+    path = Path(onnx_path).resolve()
+    for root in (path.parent, path.parent.parent):
+        manifest = root / "ple" / "manifest.json"
+        if manifest.is_file():
+            return root, json.loads(manifest.read_text())
+    manifest = path.parent / "ple.json"
+    return path.parent, json.loads(manifest.read_text()) if manifest.is_file() else None
+
+
 def read_qwen4_exp_ple_specs(onnx_path: str | Path) -> list[dict]:
     path = Path(onnx_path).resolve()
-    return _metadata_specs(onnx.load(path, load_external_data=False), path.parent)
-
-
-def _metadata_specs(model, root: Path) -> list[dict]:
-    values = [entry.value for entry in model.metadata_props if entry.key == "qwen4_exp_ple"]
-    if not values:
+    model = onnx.load(path, load_external_data=False)
+    names = {value.name for value in model.graph.input if value.name.startswith("ple_embeddings_")}
+    if not names:
         return []
-    if len(values) != 1:
-        raise ValueError("Duplicate qwen4_exp_ple metadata")
-    metadata = json.loads(values[0])
+    root, metadata = ple_resource_manifest(path)
+    if metadata is not None:
+        metadata = dict(metadata, layers=[spec for spec in metadata["layers"] if spec["input_name"] in names])
+    return _metadata_specs(model, root, metadata=metadata)
+
+
+def validate_qwen4_exp_ple_inputs(onnx_path, specs, resource_root):
+    """Check the final graph against package resources without rewriting it."""
+    if not specs:
+        return
+    path = Path(onnx_path)
+    metadata = {"version": 1, "layers": list(specs)}
+    _metadata_specs(onnx.load(path, load_external_data=False), Path(resource_root), metadata=metadata)
+
+
+def _metadata_specs(model, root: Path, *, metadata=None) -> list[dict]:
+    if metadata is None:
+        values = [entry.value for entry in model.metadata_props if entry.key == "qwen4_exp_ple"]
+        if not values:
+            return []
+        if len(values) != 1:
+            raise ValueError("Duplicate qwen4_exp_ple metadata")
+        metadata = json.loads(values[0])
     if metadata.get("version") != 1 or not isinstance(metadata.get("layers"), list):
         raise ValueError("Invalid qwen4_exp_ple metadata")
     inputs = {value.name: value for value in model.graph.input}

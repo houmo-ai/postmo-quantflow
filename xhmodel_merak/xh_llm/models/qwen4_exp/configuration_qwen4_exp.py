@@ -14,6 +14,8 @@ class XHQwen4ExpModelConfig(VisionLLMModelConfig):
     """Route Qwen4-Exp configs through the model-specific workflow."""
 
     def __init__(self, *, ple_quant_type: str = DEFAULT_PLE_QUANT_TYPE, visual_config=None, **kwargs):
+        if "export_mode" in kwargs:
+            raise ValueError("Qwen4 export_mode was removed; select MTP with spec_decode_mode")
         ple_quant_type = resolve_ple_quant_type(ple_quant_type)
         declared_quant = kwargs.get("quant_scheme")
         self._export_quant_config = copy.deepcopy(

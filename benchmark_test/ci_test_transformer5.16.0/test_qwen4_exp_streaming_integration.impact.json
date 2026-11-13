@@ -5,7 +5,7 @@
       "id": "qwen4-streaming-serving",
       "patterns": [
         "xhmodel_merak/xh_llm/models/qwen4_exp/streaming_*.py",
-        "xhmodel_merak/xh_llm/models/qwen4_exp/serving_workflow.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/package_export.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/mtp_contract.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/mtp_export.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/modeling.py",
@@ -15,7 +15,6 @@
         "xhmodel_merak/xh_llm/shared_head.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/static_export.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/checkpoint.py",
-        "xhmodel_merak/xh_llm/models/qwen4_exp/serving_graph.py",
         "xhmodel_merak/model_artifact/files.py"
       ]
     }

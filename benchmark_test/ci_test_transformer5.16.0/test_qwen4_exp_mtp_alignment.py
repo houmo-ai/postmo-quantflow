@@ -8,7 +8,6 @@ requires a real rejection before comparing every target state to greedy SDK.
 from __future__ import annotations
 
 import json
-import shutil
 
 import numpy as np
 import pytest
@@ -71,15 +70,21 @@ def test_default_n4_metadata_and_real_native_draft_feedback(alignment_package):
     from onnx import numpy_helper
     from transformers import DynamicCache
 
+    from xhmodel_merak.model_integrations.qwen4_exp.artifact import (
+        mtp_v3_graph_entries,
+        validate_serving_contract,
+    )
     from xhmodel_merak.xh_llm.models.qwen4_exp.generation import create_mtp_runtime
 
     root, source = alignment_package
     meta = json.loads((root / "golden_meta_info.json").read_text())
     spec = meta["spec_decode"]
+    validate_serving_contract(root, meta)
+    assert mtp_v3_graph_entries(meta) == {}
     assert spec["num_draft_tokens"] == 4
     assert spec["verify_length"] == 5
-    assert spec["target_verify_graph"] == "decode_m5"
-    assert spec["runtime_contract_version"] == 4
+    assert spec["target_verify_graph"] == "decode"
+    assert spec["runtime_contract_version"] == 5
     assert spec["shared_head"]["owner"] == "target"
     assert spec["shared_head"]["logical_bits"] == 8
     paths = {
@@ -89,7 +94,7 @@ def test_default_n4_metadata_and_real_native_draft_feedback(alignment_package):
         spec["draft"]["prefill_hmonnx"],
         spec["draft"]["decode_hmonnx"],
     }
-    assert len(paths) == 5 and all((root / path).is_file() for path in paths)
+    assert len(paths) == 4 and all((root / path).is_file() for path in paths)
     heads = []
     for relative in sorted(paths):
         path = root / relative
@@ -116,7 +121,8 @@ def test_default_n4_metadata_and_real_native_draft_feedback(alignment_package):
     try:
         assert model.get_input_sequence_length() == 4
         model.set_decode()
-        assert model.get_input_sequence_length() == 1
+        assert model.get_input_sequence_length() == 5
+        assert model.verify_model is model.decode_model
         inputs = _processor_inputs(model.get_processor())
         fused, positions = _fused_and_positions(model, source, inputs)
         logits, _, hidden = _prefill(model, inputs["input_ids"], fused, positions)
@@ -156,45 +162,36 @@ def test_default_n4_metadata_and_real_native_draft_feedback(alignment_package):
 
 
 @torch.inference_mode()
-def test_legacy_v3_single_candidate_with_five_position_verify_uses_real_sdk(alignment_package, tmp_path):
-    """Exercise v3/N1 with its supported padded verify5 geometry, reusing real graphs."""
+def test_shared_decode_commits_only_valid_tokens_at_context_end(alignment_package):
+    from xhmodel_merak.xh_llm.models.qwen4_exp.generation import _page_step
+
     root, source = alignment_package
-    legacy = tmp_path / "legacy_v3_n1_verify5"
-    shutil.copytree(root, legacy)
-    path = legacy / "golden_meta_info.json"
-    metadata = json.loads(path.read_text())
-    spec = metadata["spec_decode"]
-    assert spec["verify_length"] == 5
-    spec.update(runtime_contract_version=3, num_draft_tokens=1)
-    spec.pop("shared_head")
-    spec.pop("draft_head_weight_bits")
-    path.write_text(json.dumps(metadata))
-    model, oracle = _load_package(legacy), _load_package(root)
+    model = _load_package(root)
     try:
-        inputs = _processor_inputs(model.get_processor())
-        ids = inputs["input_ids"]
-        fused, positions = _fused_and_positions(oracle, source, inputs)
-        logits, caches, _ = _prefill(oracle, ids, fused, positions)
-        tokens = []
-        for offset in range(4):
-            token = int(logits.argmax(-1).item())
-            tokens.append(token)
-            if offset < 3:
-                logits, _ = _decode(
-                    oracle,
-                    caches,
-                    [token],
-                    past=ids.shape[1] + offset,
-                    next_position=int(positions.max()) + 1 + offset,
-                )
-        actual = model.generate(**inputs, max_new_tokens=4, do_sample=False, eos_token_id=[])
-        torch.testing.assert_close(actual, torch.cat((ids, ids.new_tensor([tokens])), 1), rtol=0, atol=0)
-        assert model._qwen4_verify_length == 5
-        assert model.last_mtp_stats["draft_capacity_per_round"] == 1
-        assert model.last_mtp_stats["num_rounds"] > 0
+        assert model.verify_model is model.decode_model
+        assert model.external_ple["prefill"] is model.external_ple["decode"]
+        context = int(model.meta_info.model_config.context_max_length)
+        ids = (torch.arange(context - 3) % source.native.config.text_config.vocab_size).view(1, -1)
+        positions = torch.arange(context).view(1, 1, -1).expand(3, 1, -1)
+        fused = model.embed_tokens(ids)
+        _, caches, _ = _prefill(model, ids, fused, positions[..., :context - 3])
+        saved = _state(model)
+        tokens = [2, 3, 4]
+        expected, _ = _decode(model, caches, tokens, past=context - 3, next_position=context - 3)
+        expected_state = _state(model)
+        for name, value in saved.items():
+            if name != "group_start_position":
+                model._qwen4_state.tensors[name].copy_(value)
+        model._qwen4_state.group_start_position.copy_(saved["group_start_position"])
+        model.set_verify()
+        actual = _page_step(
+            model, caches, torch.tensor([tokens]), context - 3,
+            position_ids=positions[..., -3:], return_all=True,
+        )
+        _assert_numerical(actual, expected, cosine=0.99, atol=5e-3)
+        _assert_state(_state(model), expected_state)
     finally:
         model.close()
-        oracle.close()
 
 
 @pytest.mark.parametrize("accepted", [0, 2, 4])
@@ -351,7 +348,7 @@ def _assert_mtp_capture(capture, *, context_length):
     manifest = json.loads(capture.manifest_path.read_text())
     assert manifest["status"] == "complete"
     steps = [step for step in manifest["steps"] if step["component"] == "mtp"]
-    assert {step["graph"] for step in steps} == {"mtp_prefill", "mtp_decode", "decode_m5"}
+    assert {step["graph"] for step in steps} == {"mtp_prefill", "mtp_decode", "decode"}
     for step in manifest["steps"]:
         names = {entry["name"] for entry in step["inputs"]}
         assert {*MROPE_CURRENT_POSITION_NAMES, *MROPE_POOL_POSITION_NAMES} <= names
@@ -456,6 +453,7 @@ def test_production_n4_natural_rejection_greedy_states_sessions_and_golden(align
             return run(draft, embedding, hidden, position_ids=position_ids, **options)
 
         capture = GoldenCapture(tmp_path / "mtp_golden", ["prefill", "decode", "mtp"])
+        capture.add_ple_resources(model.external_ple)
         kwargs = dict(inputs, max_new_tokens=10, do_sample=False, eos_token_id=[])
         with monkeypatch.context() as patch:
             patch.setattr(mtp_runtime.MTPGraphRuntime, "_run", observed_draft_run)

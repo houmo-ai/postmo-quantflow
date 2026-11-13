@@ -26,8 +26,8 @@ def resolve_mtp_verify_length(model_config: Mapping[str, Any]) -> int:
     return length
 
 
-def mtp_verify_phase(length: int) -> str:
+def mtp_verify_phase(length: int, *, runtime_version=5) -> str:
     """Return the graph role corresponding to an already validated static width."""
     if type(length) is not int or length < 2:
         raise ValueError("Qwen4 MTP physical verify length must be an integer >= 2")
-    return f"decode_m{length}"
+    return "decode" if runtime_version >= 5 else f"decode_m{length}"

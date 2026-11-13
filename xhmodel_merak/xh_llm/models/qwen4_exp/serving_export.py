@@ -93,6 +93,9 @@ def build_qwen4_exp_serving_metadata(
         layer.layer_idx for layer in contract.layers if layer.layer_type in {FULL_ATTENTION, QWEN_SPARSE_ATTENTION}
     ]
     prefill_length = int(model_config.get("prefill_chunk_length", 256))
+    separate_mtp = mtp_metadata is not None and "prefill" in mtp_metadata and "decode" in mtp_metadata
+    if separate_mtp:
+        verify_hmonnx = decode_hmonnx
     verify_length = resolve_mtp_verify_length(model_config) if verify_hmonnx is not None else 2
     verify_phase = mtp_verify_phase(verify_length)
     if verify_hmonnx is not None and context_length < verify_length:
@@ -158,23 +161,28 @@ def build_qwen4_exp_serving_metadata(
     phase_paths = [("prefill", prefill_path), ("decode", decode_path)]
     if verify_hmonnx is not None:
         verify_path = Path(verify_hmonnx)
-        if verify_path.resolve() in {prefill_path.resolve(), decode_path.resolve()}:
-            raise ValueError("Qwen4 target verify must be an independent target verify graph")
-        phase_paths.append((verify_phase, verify_path))
+        if verify_path.resolve() != decode_path.resolve():
+            raise ValueError("Qwen4 MTP target decode must be the verify graph")
         meta[f"{verify_phase}_hmonnx"] = _relative(output_path, verify_path)
         meta[f"{verify_phase}_hmonnx_md5"] = _md5(verify_path)
-    for phase, graph_path in phase_paths:
-        specs = read_qwen4_exp_ple_specs(graph_path)
-        for spec in specs:
-            for key in ("packed", "exponent"):
-                asset = (graph_path.parent / spec[key]["path"]).resolve()
-                if not asset.is_relative_to(output_path.resolve()):
-                    raise ValueError("PLE serving assets must be inside the artifact root")
-                spec[key]["path"] = str(asset.relative_to(output_path.resolve()))
-        if specs:
-            ple_assets[phase] = {"version": 1, "layers": specs}
-    if ple_assets:
-        meta["qwen4_exp_ple"] = ple_assets
+    shared_ple = output_path / "ple" / "manifest.json"
+    if shared_ple.is_file():
+        for _, graph_path in phase_paths:
+            read_qwen4_exp_ple_specs(graph_path)
+        meta["qwen4_exp_ple"] = {"manifest": "ple/manifest.json"}
+    else:
+        for phase, graph_path in phase_paths:
+            specs = read_qwen4_exp_ple_specs(graph_path)
+            for spec in specs:
+                for key in ("packed", "exponent"):
+                    asset = (graph_path.parent / spec[key]["path"]).resolve()
+                    if not asset.is_relative_to(output_path.resolve()):
+                        raise ValueError("PLE serving assets must be inside the artifact root")
+                    spec[key]["path"] = str(asset.relative_to(output_path.resolve()))
+            if specs:
+                ple_assets[phase] = {"version": 1, "layers": specs}
+        if ple_assets:
+            meta["qwen4_exp_ple"] = ple_assets
     if visual_metadata is not None:
         if visual_metadata.get("abi_version") == 2 and visual_metadata.get("layout") == "components":
             meta["qwen4_exp_vision"] = dict(visual_metadata)
@@ -207,7 +215,7 @@ def build_qwen4_exp_serving_metadata(
             graph = prefill_graph = _relative(output_path, mtp_metadata["onnx_path"])
         meta["spec_decode"] = {
             "mode": "mtp",
-            "runtime_contract_version": 4 if separate_graphs else 2,
+            "runtime_contract_version": 5 if separate_graphs else 2,
             "num_draft_tokens": num_draft_tokens,
             "verify_length": verify_length,
             "target_verify_graph": verify_phase if separate_graphs else "prefill",

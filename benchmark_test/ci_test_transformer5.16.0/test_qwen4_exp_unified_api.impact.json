@@ -16,7 +16,9 @@
         "configs_merak/workflows/xh2a/llm_models/qwen4_exp/**",
         "examples_merak/llm/qwen4_exp/**",
         "benchmark_test/ci_test_transformer5.16.0/test_qwen4_exp_unified_api.py",
-        "examples_merak/unified_api/build.py"
+        "examples_merak/unified_api/build.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/host_ple_inputs.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/ple_export.py"
       ]
     }
   ]

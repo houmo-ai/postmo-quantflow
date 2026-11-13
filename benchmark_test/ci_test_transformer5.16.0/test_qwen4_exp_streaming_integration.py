@@ -9,7 +9,7 @@ import torch
 from safetensors.torch import save_file
 from transformers import Qwen4ExpForCausalLM, Qwen4ExpTextConfig
 
-from xhmodel_merak.xh_llm.models.qwen4_exp.serving_workflow import export_qwen4_exp_serving_package
+from xhmodel_merak.xh_llm.models.qwen4_exp.package_export import export_qwen4_exp_serving_package
 
 
 def _resume_child_code(checkpoint, output, export_config, report_path):
@@ -51,7 +51,7 @@ def _check_resume_provenance_in_fresh_process(checkpoint, output, export_config,
     from onnx import numpy_helper
     from safetensors.torch import load_file
 
-    import xhquant.api
+    from xhmodel_merak.xh_llm import base_model
 
     checkpoint, output = Path(checkpoint), Path(output)
     from xhmodel_merak.xh_llm.models.qwen4_exp import mtp_export
@@ -59,17 +59,17 @@ def _check_resume_provenance_in_fresh_process(checkpoint, output, export_config,
     def unexpected(*args, **kwargs):
         raise AssertionError("Completed resume must not repeat target/head/draft PTQ")
 
-    xhquant.api.ptq_quantize = unexpected
+    base_model.ptq_quantize = unexpected
     mtp_export.export_qwen4_exp_mtp = unexpected
     manifest_path = output / "export_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     resources = {name for record in manifest["mtp_graphs"].values() for name in record["resources"]}
-    resources.update(record["page_hmonnx"] for record in manifest["graphs"].values())
-    target_roles = {Path(record["page_hmonnx"]).relative_to(output).parts[0] for record in manifest["graphs"].values()}
+    resources.update(record["hmonnx"] for record in manifest["graphs"].values())
+    target_roles = {Path(record["hmonnx"]).relative_to(output).parts[0] for record in manifest["graphs"].values()}
     resources.update(
         str(path.relative_to(output))
         for path in output.rglob("*")
-        if path.is_file() and path.relative_to(output).parts[0] in target_roles
+        if path.is_file() and path.relative_to(output).parts[0] in target_roles | {"ple"}
     )
     resources.update({"golden_meta_info.json", ".qwen4_fixed_head.pt"})
 
@@ -86,16 +86,18 @@ def _check_resume_provenance_in_fresh_process(checkpoint, output, export_config,
     assert hashes() == before
     results = {"normal": "zero PTQ; graph/resources/metadata/head bytes unchanged"}
     graph = output / "mtp_prefill/model.onnx"
-    sidecar = next(
-        output / name for name in manifest["mtp_graphs"]["prefill"]["resources"] if name != "mtp_prefill/model.onnx"
-    )
-    for case, path in (
+    cases = [
         ("source_head", checkpoint / "model.safetensors"),
         ("source_assistant", checkpoint / "mtp.safetensors"),
         ("graph_same_shape", graph),
-        ("sidecar", sidecar),
         ("missing_completion", manifest_path),
-    ):
+    ]
+    sidecars = [
+        output / name for name in manifest["mtp_graphs"]["prefill"]["resources"] if name != "mtp_prefill/model.onnx"
+    ]
+    if sidecars:
+        cases.append(("sidecar", sidecars[0]))
+    for case, path in cases:
         original = path.read_bytes()
         try:
             if case.startswith("source_"):
@@ -132,8 +134,8 @@ def _check_resume_provenance_in_fresh_process(checkpoint, output, export_config,
 
 
 def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path, monkeypatch):
-    import xhquant.api
     from xhmodel_merak.exec_backends import HMONNXInferenceConfig
+    from xhmodel_merak.xh_llm import base_model
     from xhmodel_merak.xh_llm.models.qwen4_exp.host_ple_runtime import (
         Qwen4ExpHostPLEInferenceV2,
         enable_qwen4_exp_inplace_kv,
@@ -144,7 +146,7 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
     monkeypatch.setenv("TORCH_COMPILE_DISABLE", "0")
     monkeypatch.delenv("HUGE_MODEL_EXPORT_ENABLED", raising=False)
     fixed_before_ptq, head_quantizations, head_ids, head_refs, patched_classes = [], [], set(), [], set()
-    original_ptq = xhquant.api.ptq_quantize
+    original_ptq = base_model.ptq_quantize
 
     def tracked_ptq(graph, *args, **kwargs):
         heads = [
@@ -169,7 +171,7 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
                 patched_classes.add(cls)
         return original_ptq(graph, *args, **kwargs)
 
-    monkeypatch.setattr(xhquant.api, "ptq_quantize", tracked_ptq)
+    monkeypatch.setattr(base_model, "ptq_quantize", tracked_ptq)
     torch.manual_seed(103)
     config = Qwen4ExpTextConfig(
         max_position_embeddings=16,
@@ -190,7 +192,9 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
         hc_count=2,
         hc_lowrank=4,
         layer_types=["linear_attention", "qwen_sparse_attention"],
-        ple_layer_ids=[],
+        ple_layer_ids=[1],
+        ple_embed_dim=64, ple_conv_kernel_size=2, ngram_size=2, heads_per_ngram=1,
+        ngram_vocab_size_base=5, make_ngram_vocab_size_divisible_by=8, split_ngram_parts=1,
         indexer_n_heads=2,
         indexer_kv_heads=1,
         indexer_head_dim=8,
@@ -217,6 +221,16 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
         "use_fused_gdr": True,
         "cache_abi": "llm_cache_inplace_v1",
     }
+    from xhmodel_merak.xh_llm.models.qwen4_exp import ple_sefp4
+
+    encoded_chunks = []
+    encode_rows = ple_sefp4.quantize_ple_sefp4_rows
+
+    def record_ple_encoding(rows):
+        encoded_chunks.append(len(rows))
+        return encode_rows(rows)
+
+    monkeypatch.setattr(ple_sefp4, "quantize_ple_sefp4_rows", record_ple_encoding)
     report = export_qwen4_exp_serving_package(
         model_dir=checkpoint,
         output_dir=output,
@@ -224,16 +238,24 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
         model_config=export_config,
     )
     assert report["status"] == "complete" and report["export_mode"] == "low_memory"
+    assert len(encoded_chunks) == 1
+    assert len(list((output / "ple").glob("*.packed.bin"))) == 1
+    assert len(list((output / "ple").glob("*.exponent.bin"))) == 1
+    assert not list(output.glob("*/ple.json"))
+    assert not list(output.glob("decode_m*"))
+    assert len(list(output.rglob("*.onnx"))) == 4
+    assert not list(output.rglob("*_raw")) and not list(output.rglob("raw"))
+    assert not list(output.rglob("placeholders"))
+    assert not list(output.rglob("block_*.onnx"))
     meta = json.loads((output / "golden_meta_info.json").read_text())
     assert meta["spec_decode"]["verify_length"] == 5
-    assert meta["spec_decode"]["target_verify_graph"] == "decode_m5"
+    assert meta["spec_decode"]["target_verify_graph"] == "decode"
     assert meta["spec_decode"]["num_draft_tokens"] == 4
-    assert fixed_before_ptq == [False, True, True, True, True]
+    assert fixed_before_ptq == [False, True, True, True]
     assert len(head_quantizations) == 1
     paths = [
         meta["prefill_hmonnx"],
         meta["decode_hmonnx"],
-        meta["decode_m5_hmonnx"],
         meta["spec_decode"]["draft_prefill_onnx"],
         meta["spec_decode"]["draft_decode_onnx"],
     ]
@@ -243,7 +265,7 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
         path = output / relative
         onnx.checker.check_model(str(path))
         graph = onnx.load(path, load_external_data=False)
-        if relative == meta["decode_m5_hmonnx"]:
+        if relative == meta["decode_hmonnx"]:
             inputs = {value.name: value for value in graph.graph.input}
             assert inputs["inputs_embeds"].type.tensor_type.shape.dim[1].dim_value == 5
             assert sum(node.op_type == "GDRRecurrentScan" for node in graph.graph.node) == 5
@@ -294,6 +316,12 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
 
                 value = CacheTensor(value)
             feeds[info.name] = value
+        from xhmodel_merak.xh_llm.models.qwen4_exp.host_ple_inputs import HostPLEInputs
+
+        host = HostPLEInputs.from_graph(path)
+        if host is not None:
+            rows = host.prepare(feeds["ple_input_ids"], feeds, 1, device="cpu")
+            feeds.update(zip((spec["input_name"] for spec in host.manifest["layers"]), rows, strict=True))
         raw = session.run(feeds)
         outputs = dict(
             zip(
@@ -308,7 +336,7 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
     import hashlib
 
     def graph_hashes():
-        roles = {Path(relative).parts[0] for relative in paths}
+        roles = {Path(relative).parts[0] for relative in paths} | {"ple"}
         return {
             str(path.relative_to(output)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in output.rglob("*")
@@ -326,7 +354,7 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
         model_config=export_config,
     )
     assert resumed["status"] == "complete"
-    assert fixed_before_ptq == [False, True, True, True, True]
+    assert fixed_before_ptq == [False, True, True, True]
     assert len(head_quantizations) == 1
     assert graph_hashes() == before_resume
     import subprocess
@@ -338,8 +366,10 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
             [sys.executable, "-c", child_code], stdout=child_log, stderr=subprocess.STDOUT, timeout=180
         )
     assert child.returncode == 0, (tmp_path / "resume_provenance.log").read_text()
-    assert len(json.loads((tmp_path / "resume_provenance.json").read_text())) == 6
-    from xhmodel_merak.xh_llm.models.qwen4_exp.serving_workflow import _load_fixed_head_checkpoint
+    assert {"normal", "source_head", "source_assistant", "graph_same_shape", "missing_completion"} <= set(
+        json.loads((tmp_path / "resume_provenance.json").read_text())
+    )
+    from xhmodel_merak.xh_llm.models.qwen4_exp.package_export import _load_fixed_head_checkpoint
 
     record = report["fixed_quantized_head"]
     head = _load_fixed_head_checkpoint(output, record, record["bindings"])
@@ -371,53 +401,3 @@ def test_streamed_package_exports_and_executes_target_and_draft_graphs(tmp_path,
     sanitize_artifact(output, SimpleNamespace())
     assert not private_head.exists()
     assert all((output / relative).is_file() for relative in paths)
-
-
-@pytest.mark.parametrize("options", [{"low_memory": "yes"}, {"low_memory": True, "ple_quant_type": "fp16"}])
-def test_invalid_streamed_options_fail_before_output_or_loading(tmp_path, options):
-    options = dict(options)
-    low_memory = options.pop("low_memory")
-    with pytest.raises(ValueError):
-        export_qwen4_exp_serving_package(
-            model_dir=tmp_path / "missing",
-            output_dir=tmp_path / "output",
-            device="cpu",
-            low_memory=low_memory,
-            model_config=options,
-        )
-    assert not (tmp_path / "output").exists()
-
-
-@pytest.mark.parametrize(
-    "settings",
-    [
-        {"num_draft_tokens": 0},
-        {"num_draft_tokens": True},
-        {"num_draft_tokens": 4, "verify_length": 4},
-        {"num_draft_tokens": 8},
-    ],
-)
-def test_invalid_mtp_candidate_capacity_fails_before_loading_or_output(tmp_path, settings):
-    with pytest.raises(ValueError):
-        export_qwen4_exp_serving_package(
-            model_dir=tmp_path / "missing",
-            output_dir=tmp_path / "output",
-            device="cpu",
-            model_config={"spec_decode_mode": "mtp", "context_max_length": 8, "prefill_chunk_length": 3, **settings},
-        )
-    assert not (tmp_path / "output").exists()
-
-
-def test_resume_rejects_export_mode_change_before_loading(tmp_path):
-    output = tmp_path / "output"
-    output.mkdir()
-    (output / "export_manifest.json").write_text(json.dumps({"export_mode": "standard"}))
-    with pytest.raises(ValueError, match="export mode"):
-        export_qwen4_exp_serving_package(
-            model_dir=tmp_path / "missing",
-            output_dir=output,
-            device="cpu",
-            low_memory=True,
-            resume=True,
-            model_config={},
-        )

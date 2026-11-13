@@ -15,7 +15,6 @@ from xhmodel_merak.xh_llm.models.qwen4_exp.cache_contract import (
 from xhmodel_merak.xh_llm.models.qwen4_exp.checkpoint import _build_qwen4_exp_gptq_export_device_map
 from xhmodel_merak.xh_llm.models.qwen4_exp.golden_runtime import run_qwen4_exp_hmonnx_golden
 from xhmodel_merak.xh_llm.models.qwen4_exp.modeling import (
-    Qwen4ExpExportableGatedDeltaNet,
     inspect_qwen4_exp_export_capability,
 )
 from xhmodel_merak.xh_llm.models.qwen4_exp.ple_sharding import (
@@ -194,35 +193,6 @@ def test_preflight_accepts_ple_qsa_and_hyperconnection_architecture() -> None:
     assert capability.cache_contract is not None
 
 
-def test_gated_delta_net_uses_runtime_valid_length(monkeypatch) -> None:
-    captured = {}
-
-    def fake_forward(
-        _module,
-        hidden_states,
-        conv_cache, recurrent_state, linear_attn_mask, current_input_length,
-    ):
-        captured["current_input_length"] = current_input_length
-        return hidden_states, conv_cache, recurrent_state
-
-    monkeypatch.setattr(Qwen4ExpExportableGatedDeltaNet, "_forward_merged", fake_forward)
-    module = Qwen4ExpExportableGatedDeltaNet.__new__(Qwen4ExpExportableGatedDeltaNet)
-    torch.nn.Module.__init__(module)
-    module.layer_idx = 0
-    conv_cache = torch.zeros((1, 4, 3))
-    recurrent_state = torch.zeros((1, 2, 4, 4))
-    cache = SimpleNamespace(
-        current_input_length=torch.tensor([3], dtype=torch.int32),
-        layers=[SimpleNamespace(conv_states=[conv_cache], recurrent_states=[recurrent_state])],
-    )
-
-    Qwen4ExpExportableGatedDeltaNet.forward(
-        module,
-        torch.zeros((1, 64, 8)),
-        cache_params=cache,
-    )
-
-    assert captured["current_input_length"] is cache.current_input_length
 
 
 def test_golden_runner_casts_inputs_and_writes_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,11 +239,8 @@ def test_golden_runner_casts_inputs_and_writes_summary(tmp_path: Path, monkeypat
     assert [item["dtype"] for item in summary["inputs"]] == ["int32", "float16"]
 
 
-@pytest.mark.parametrize(
-    "verify_width,with_ple",
-    [(2, False), (4, True), (4, "packed")],
-    ids=["recurrent2_gdr", "padded4_gdr_and_ple", "padded4_packed_gdr"],
-)
+@pytest.mark.parametrize("with_ple", [False, True, "packed"], ids=["gdr_conv", "gdr_and_ple_conv", "packed_gdr_conv"])
+@pytest.mark.parametrize("verify_width", [5])
 def test_verify_recurrent_graph_matches_sdk_decode_steps(tmp_path, monkeypatch, with_ple, verify_width):
     import numpy as np
     import onnx
@@ -404,9 +371,9 @@ def test_verify_recurrent_graph_matches_sdk_decode_steps(tmp_path, monkeypatch, 
         for name in state_names:
             torch.testing.assert_close(actual[name], expected[name], rtol=0, atol=0)
 
-    # A width-four verify graph still receives two real positions for the
-    # current single-candidate policy. Padding must leave recurrent/conv/PLE
-    # state unchanged, including when the next single-token decode consumes it.
+    # The default four-candidate verifier also accepts a shorter valid prefix.
+    # Padding must leave recurrent/conv/PLE state unchanged, including when
+    # the next single-token decode consumes it.
     for valid_length in sorted({2, verify_width}):
         batch, batch_state = execute(
             verify_width, 0, {name: value.clone() for name, value in initial.items()}, valid_length,

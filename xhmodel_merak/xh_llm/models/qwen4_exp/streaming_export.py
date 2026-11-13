@@ -212,9 +212,10 @@ class _BlockPlaceholder(nn.Module):
             values.update(zip(QSA_HOST_CONTROL_NAMES, past_key_values.qsa_host_controls, strict=True))
         for name, spec in self.cache_input_specs:
             values[name] = _cache_value(past_key_values, spec)
-        # Host PLE inputs are promoted to the skeleton after capture; they do
-        # not require a table or a synthetic weight in the capture model.
-        arguments = tuple(values[name] for name in self.input_names if not name.startswith("ple_embeddings_"))
+        for name in self.input_names:
+            if name.startswith("ple_embeddings_"):
+                values[name] = past_key_values._streamed_ple_embeddings[int(name.removeprefix("ple_embeddings_"))]
+        arguments = tuple(values[name] for name in self.input_names)
         outputs = self.placeholder(*arguments)
         for index, spec in enumerate(self.output_specs):
             _set_cache_value(past_key_values, spec, outputs[index + 1])
@@ -222,9 +223,10 @@ class _BlockPlaceholder(nn.Module):
 
 
 class _StreamingSkeleton(Qwen4ExpTextExportWrapper):
-    def __init__(self, *args, inplace_layers=(), **kwargs):
+    def __init__(self, *args, inplace_layers=(), ple_specs=(), **kwargs):
         super().__init__(*args, **kwargs)
         self.inplace_layers = tuple(inplace_layers)
+        self.ple_specs = tuple(ple_specs)
         # Child graph ports define the skeleton's actual tensor dependencies.
         # Avoid constructing masks or position indices that no block consumes.
         child_inputs = {name for layer in self.native_text_model.layers for name in layer.input_names}
@@ -278,39 +280,6 @@ def _module_prefix(model, selected):
     return next(name for name, module in model.named_modules() if module is selected)
 
 
-def _publish_ple_boundary(path, parts, specs):
-    """Promote explicit Host PLE inputs and relocate only their own resources."""
-    import onnx
-
-    model = onnx.load(path, load_external_data=False)
-    by_content = {f"block_{idx}": graph for idx, graph in parts}
-    known = {value.name for value in model.graph.input}
-    for node in model.graph.node:
-        if node.op_type != "PlaceHolder":
-            continue
-        content = next(onnx.helper.get_attribute_value(a) for a in node.attribute if a.name == "content")
-        content = content.decode() if isinstance(content, bytes) else content
-        child = by_content[content]
-        original = iter(node.input)
-        inputs = []
-        for value in child.input:
-            if value.name.startswith("ple_embeddings_"):
-                if value.name not in known:
-                    model.graph.input.append(value)
-                    known.add(value.name)
-                inputs.append(value.name)
-            else:
-                inputs.append(next(original))
-        if next(original, None) is not None:
-            raise ValueError("Streaming placeholder has extra captured inputs")
-        del node.input[:]
-        node.input.extend(inputs)
-    if specs:
-        entry = model.metadata_props.add()
-        entry.key, entry.value = "qwen4_exp_ple", json.dumps({"version": 1, "layers": specs})
-    onnx.save(model, path)
-
-
 def export_qwen4_exp_streamed_phase(
     loader,
     output_dir,
@@ -325,32 +294,33 @@ def export_qwen4_exp_streamed_phase(
     ple_quant_type="sefp4",
     shared_quantized_head=None,
     capture_quantized_head=False,
+    ple_resources=None,
 ):
     """Load/export/release one real decoder at a time, then fill a small skeleton."""
     import onnx
 
-    from xhquant.utils.logger import get_root_logger
-
-    from ...big_hf_model_helper import replace_placeholders_with_subgraphs
+    from ...big_hf_model_helper import _module_name_to_filename
     from .checkpoint import _adapt_gptq_linears
     from .static_export import export_qwen4_exp_hmonnx
+    from .streaming_ple import PLEExportResources
 
     if not 1 <= input_sequence_length <= cache_length:
         raise ValueError("Require 1 <= streamed sequence length <= cache length")
     root = Path(output_dir)
     root.mkdir(parents=True, exist_ok=True)
+    ple_resources = ple_resources if ple_resources is not None else PLEExportResources(root)
     source_text = extract_qwen4_exp_text_model(loader.model)
     config = extract_qwen4_exp_text_config(loader.config)
     prefix = _module_prefix(loader.model, source_text)
     skeleton = copy.deepcopy(source_text)
     skeleton.embed_tokens = nn.Identity()
-    paths, parts, ple_specs, inplace_layers = {}, [], [], []
+    paths, ple_specs, inplace_layers = {}, [], []
     block_load_audits = []
     converted_sources = []
     full_contract = Qwen4ExpCacheContract.from_text_config(config)
     cache_names = qwen4_exp_cache_input_specs(full_contract)
     for index in range(int(config.num_hidden_layers)):
-        block_root = root / "blocks" / str(index)
+        block_root = root / "placeholders"
         block_prefix = f"{prefix}.layers.{index}"
         from .streaming_ple import streamed_ple_tensor_names
 
@@ -368,7 +338,9 @@ def export_qwen4_exp_streamed_phase(
             if skip:
                 from .streaming_ple import prepare_streamed_ple
 
-                specs = prepare_streamed_ple(loader, layer, block_prefix, block_root, quant_device=quant_device)
+                specs = prepare_streamed_ple(
+                    loader, layer, block_prefix, block_root, quant_device=quant_device, resources=ple_resources,
+                )
             converted_sources.extend(f"{block_prefix}.{name}" for name in _adapt_gptq_linears(layer))
             wrapper = Qwen4ExpBlockExportWrapper(
                 layer,
@@ -384,11 +356,7 @@ def export_qwen4_exp_streamed_phase(
             inplace = wrapper._linear_attention_uses_gdr_cache_state(index)
             if inplace:
                 inplace_layers.append(index)
-            state_specs = tuple(
-                spec
-                for spec in wrapper.cache_contract.tensors
-                if not (inplace and spec.state_kind == "delta_recurrent")
-            )
+            state_specs = wrapper.output_cache_specs()
             block_names = tuple(name for name, spec in cache_names.items() if spec.layer_idx == index)
             names = (*_BLOCK_INPUTS, *block_names, *(spec["input_name"] for spec in specs))
             outputs = (
@@ -412,8 +380,10 @@ def export_qwen4_exp_streamed_phase(
                 export_input_names=names,
                 export_output_names=outputs,
                 ple_quant_type=ple_quant_type,
+                model_name=f"qwen4_exp_block_{index}",
+                ple_resources=ple_resources,
             )
-            path = Path(result.onnx_path).rename(block_root / f"block_{index}.onnx")
+            path = Path(result.onnx_path).rename(block_root / f"{_module_name_to_filename(f'block_{index}')}.onnx")
             part_model = onnx.load(path, load_external_data=False)
             graph = part_model.graph
             # Private block ports represent actual dependencies. TorchFX may
@@ -436,11 +406,7 @@ def export_qwen4_exp_streamed_phase(
                 cache_length=cache_length,
             )
             paths[f"block_{index}"] = path
-            parts.append((index, graph))
             for spec in specs:
-                spec = copy.deepcopy(spec)
-                for key in ("packed", "exponent"):
-                    spec[key]["path"] = str((block_root / spec[key]["path"]).relative_to(root))
                 ple_specs.append(spec)
         finally:
             loader.release(layer)
@@ -465,6 +431,7 @@ def export_qwen4_exp_streamed_phase(
             cache_length=cache_length,
             return_hidden_states=return_hidden_states,
             inplace_layers=inplace_layers,
+            ple_specs=ple_specs,
         )
         sample = (
             torch.zeros((1, input_sequence_length, config.hidden_size), dtype=torch.float16),
@@ -484,14 +451,11 @@ def export_qwen4_exp_streamed_phase(
                 for spec in full_contract.tensors
             ),
         )
+        output_specs = set(spec.name for spec in wrapper.output_cache_specs())
         outputs = (
             "logits",
             *(("target_hidden_states",) if return_hidden_states else ()),
-            *(
-                f"present_{name}"
-                for name, spec in cache_names.items()
-                if not (spec.layer_idx in inplace_layers and spec.state_kind == "delta_recurrent")
-            ),
+            *(f"present_{name}" for name, spec in cache_names.items() if spec.name in output_specs),
         )
         has_qsa = any(spec.state_kind == "qsa_indexer_key" for spec in full_contract.tensors)
         input_names = (
@@ -510,6 +474,11 @@ def export_qwen4_exp_streamed_phase(
             )
             sample = (*sample[:-1], (*sample[-1], *controls))
             input_names += QSA_HOST_CONTROL_NAMES
+        if ple_specs:
+            values = tuple(torch.zeros((1, input_sequence_length, len(spec["vocab_sizes"]),
+                                        spec["embedding_dim"]), dtype=torch.float16) for spec in ple_specs)
+            sample = (*sample[:-1], (*sample[-1], *values))
+            input_names += tuple(spec["input_name"] for spec in ple_specs)
         result = export_qwen4_exp_hmonnx(
             wrapper,
             root,
@@ -525,19 +494,9 @@ def export_qwen4_exp_streamed_phase(
             ple_quant_type=ple_quant_type,
             shared_quantized_head=shared_quantized_head,
             capture_quantized_head=capture_quantized_head,
+            ple_resources=ple_resources,
         )
-        _publish_ple_boundary(result.onnx_path, parts, ple_specs)
-        replace_placeholders_with_subgraphs(result.onnx_path, paths, get_root_logger(), cleanup_temporary_files=True)
-        from .serving_graph import publish_qwen4_exp_qsa_layout_resources
-
-        publish_qwen4_exp_qsa_layout_resources(
-            result.onnx_path,
-            batch_size=1,
-            input_sequence_length=input_sequence_length,
-            num_attention_heads=int(config.num_attention_heads),
-            num_key_value_heads=int(config.num_key_value_heads),
-            head_dim=int(config.head_dim),
-        )
+        loader._loader.replace_hmonnx_placeholders_with_subgraphs(result.onnx_path, cleanup_temporary_files=True)
         onnx.checker.check_model(result.onnx_path)
         info = json.loads(Path(result.io_manifest_path).read_text())
         final_graph = onnx.load(result.onnx_path, load_external_data=False).graph

@@ -11,9 +11,8 @@
         "xhmodel_merak/xh_llm/models/qwen4_exp/static_export.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/golden_runtime.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/serving_export.py",
-        "xhmodel_merak/xh_llm/models/qwen4_exp/serving_workflow.py",
-        "xhmodel_merak/xh_llm/models/qwen4_exp/modeling.py",
-        "xhmodel_merak/xh_llm/models/qwen4_exp/serving_graph.py"
+        "xhmodel_merak/xh_llm/models/qwen4_exp/package_export.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/modeling.py"
       ]
     }
   ]

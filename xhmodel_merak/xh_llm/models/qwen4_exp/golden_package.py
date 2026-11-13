@@ -1,4 +1,4 @@
-"""Package four-layer Qwen4-Exp raw HMONNX exports in Merak Golden layout."""
+"""Package four-layer Qwen4-Exp HMONNX exports in Merak Golden layout."""
 
 from __future__ import annotations
 
@@ -121,14 +121,14 @@ def _require_complete_manifest(source_dir: Path) -> dict[str, Any]:
         graph = graphs.get(phase)
         if not isinstance(graph, dict):
             raise ValueError(f"source export_manifest missing graphs.{phase}")
-        raw_hmonnx = graph.get("raw_hmonnx")
-        if not isinstance(raw_hmonnx, str) or not raw_hmonnx:
-            raise ValueError(f"source export_manifest missing graphs.{phase}.raw_hmonnx")
-        op_counts = graph.get("raw_op_counts")
+        hmonnx = graph.get("hmonnx")
+        if not isinstance(hmonnx, str) or not hmonnx:
+            raise ValueError(f"source export_manifest missing graphs.{phase}.hmonnx")
+        op_counts = graph.get("op_counts")
         if not isinstance(op_counts, dict) or not op_counts:
-            raise ValueError(f"source export_manifest missing graphs.{phase}.raw_op_counts")
+            raise ValueError(f"source export_manifest missing graphs.{phase}.op_counts")
         if int(op_counts.get("SparseAttentionSelectKV", 0)) <= 0:
-            raise ValueError(f"graphs.{phase}.raw_op_counts must include SparseAttentionSelectKV")
+            raise ValueError(f"graphs.{phase}.op_counts must include SparseAttentionSelectKV")
     return manifest
 
 
@@ -264,37 +264,6 @@ def _find_external_locations(onnx_path: Path) -> list[str]:
     return locations
 
 
-def _rewrite_external_locations(source_onnx: Path, target_onnx: Path, external_data_name: str) -> None:
-    import onnx
-    from onnx import TensorProto, external_data_helper
-
-    model = onnx.load(str(source_onnx), load_external_data=False)
-    changed = False
-    for tensor in external_data_helper._get_all_tensors(model):
-        if tensor.data_location != TensorProto.EXTERNAL:
-            continue
-        found = False
-        for entry in tensor.external_data:
-            if entry.key == "location":
-                entry.value = external_data_name
-                found = True
-                changed = True
-        if not found:
-            tensor.external_data.add(key="location", value=external_data_name)
-            changed = True
-    if not changed:
-        raise ValueError(f"HMONNX has no external data locations: {source_onnx}")
-    temporary = target_onnx.with_name(f".{target_onnx.name}.tmp")
-    onnx.save_model(model, str(temporary), save_as_external_data=False)
-    if target_onnx.exists():
-        if target_onnx.read_bytes() != temporary.read_bytes():
-            temporary.unlink(missing_ok=True)
-            raise FileExistsError(f"refusing to overwrite different ONNX artifact: {target_onnx}")
-        temporary.unlink()
-        return
-    temporary.replace(target_onnx)
-
-
 def _package_phase(
     source_dir: Path,
     output_dir: Path,
@@ -303,14 +272,13 @@ def _package_phase(
     phase: str,
 ) -> dict[str, Any]:
     graph = manifest["graphs"][phase]
-    source_onnx = Path(graph["raw_hmonnx"])
+    source_onnx = Path(graph["hmonnx"])
     if not source_onnx.is_absolute():
         source_onnx = source_dir / source_onnx
     source_onnx = source_onnx.resolve(strict=True)
     phase_dir = output_dir / phase
     phase_dir.mkdir(parents=True, exist_ok=True)
     target_onnx = phase_dir / f"{release_prefix}_{phase}_with_act.onnx"
-    target_external = phase_dir / f"{release_prefix}_{phase}_external_data"
 
     locations = _find_external_locations(source_onnx)
     if len(locations) != 1:
@@ -319,14 +287,28 @@ def _package_phase(
     if not source_external.is_file():
         raise FileNotFoundError(f"missing source external data for {phase}: {source_external}")
 
+    target_external = phase_dir / source_external.name
     _link_or_keep(source_external, target_external)
-    _rewrite_external_locations(source_onnx, target_onnx, target_external.name)
+    _replace_file_with_same_guard(source_onnx, target_onnx)
+    from .ple_export import ple_resource_manifest, read_qwen4_exp_ple_specs
+
+    resource_root, _ = ple_resource_manifest(source_onnx)
+    shared_manifest = resource_root / "ple" / "manifest.json"
+    resource_target = output_dir if shared_manifest.is_file() else phase_dir
+    for spec in read_qwen4_exp_ple_specs(source_onnx):
+        for kind in ("packed", "exponent"):
+            relative = spec[kind]["path"]
+            target = resource_target / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _link_or_keep(resource_root / relative, target)
+    if shared_manifest.is_file():
+        _replace_file_with_same_guard(shared_manifest, output_dir / "ple" / "manifest.json")
     selected_kv_proof = _selected_kv_proof(
         target_onnx,
         expected_score_mode=str(manifest.get("selected_kv_score_mode", "")).lower() or None,
     )
 
-    for name in ("qwen4_exp_hmonnx_io.json", "qwen4_exp_hmonnx_preflight.json"):
+    for name in ("ple.json", "qwen4_exp_hmonnx_io.json", "qwen4_exp_hmonnx_preflight.json"):
         source_sidecar = source_onnx.parent / name
         if source_sidecar.is_file():
             _replace_file_with_same_guard(source_sidecar, phase_dir / name)
@@ -336,7 +318,7 @@ def _package_phase(
         "external_data": _relative(output_dir, target_external),
         "source_hmonnx": str(source_onnx),
         "source_external_data": str(source_external),
-        "raw_op_counts": graph["raw_op_counts"],
+        "op_counts": graph["op_counts"],
         "selected_kv_proof": selected_kv_proof,
         "io_manifest": _relative(output_dir, phase_dir / "qwen4_exp_hmonnx_io.json")
         if (phase_dir / "qwen4_exp_hmonnx_io.json").is_file()
@@ -532,7 +514,7 @@ def _build_meta(
         "use_cache": True,
         "use_fused_gdr": bool(manifest.get("use_fused_gdr", True)),
         "enable_page_attention": False,
-        "raw_hmonnx_only": True,
+        "final_hmonnx_only": True,
         "source_config": source_config,
     }
     cache_contract = _cache_contract_from_phase_io(output_dir, phase_artifacts)
@@ -573,7 +555,7 @@ def _build_meta(
             "selected_kv_phase_proofs": {
                 phase: artifacts.get("selected_kv_proof") for phase, artifacts in phase_artifacts.items()
             },
-            "raw_hmonnx_only": True,
+            "final_hmonnx_only": True,
             "page_cache_modified_graphs": False,
             "golden_status": "not_generated",
             "phase_artifacts": phase_artifacts,

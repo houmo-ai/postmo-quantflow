@@ -68,9 +68,10 @@ the all-ones direction, so LayerNorm mean subtraction remains invariant.
 - Historical XH2/HMONNX artifact location (see the 2026-09-02 evidence):
   `/data01/home/xuzk/datasets/Qwen3.8-Flash-Next-AutoRound-W4A8-G64-XH2`.
 - The workflow loads either the raw HF model or a GPTQModel-HF artifact and
-  converts packed linears/MoE blocks. The current static lifecycle exports
-  prefill/decode; serving configuration can additionally export target verify
-  and MTP draft graphs. SDK Golden capture is a separate validation step.
+  converts packed linears/MoE blocks. The model entry exports prefill/decode
+  and, when `spec_decode_mode: mtp` is selected, target verify and draft graphs.
+  Workflow, direct model calls and the diagnostic CLI use that same entry.
+  SDK Golden capture is a separate validation step.
 
 Qwen4-specific frontend mappings and the PLE operator registration are scoped
 in `xhmodel_merak/xh_llm/models/qwen4_exp/xhquant_extensions.py`. Standard ONNX
@@ -79,21 +80,32 @@ parsers, Conv1d runtime ABI and HMONNX serialization belong to
 and MTP exports use static wrappers through the standard
 wrap → TorchFX frontend → quant → HMONNX lifecycle, matching GLM5.3. The final
 state argument is a nested tuple indexed by the fixed cache contract.
-Text serialization uses the existing public
-`to_export_hmonnx_v2(..., save_as_external_data=True)` API and SDK defaults.
-Vision exports the stem, each block and merger directly from QuantGraph via
-`to_export_hmonnx_from_quanted_graph`, with explicit PTQ device selection.
+Target/verify components, MTP, streamed blocks and visual components use
+`XHSubModel` for quantization, fixed-head binding and serialization. The model schedules
+ordinary and MTP phases through the same component lifecycle. There is no
+Qwen4-specific PTQ or serialization pipeline. The SDK selects inline or external
+weight storage according to graph size.
 Each component's weights are released before loading the next component.
 There is no independent Dynamo exporter or module-restoration path.
+
+The workflow reuses `BaseLLMWorkflow.export`; its only Qwen4 export input is
+the original MTP checkpoint location. `XHQwen4ExpModel.export_hmonnx` owns
+the phase selection. `package_export.py` schedules phases and publishes their
+resources, while `streaming_export.py` changes loading and placeholder assembly.
+`static_export.py` adapts component inputs/outputs to `XHSubModel`; it does not
+reimplement frontend conversion, PTQ or serialization. Visual components use
+that same child model and the shared strict checkpoint module loader.
+
 SDK fixes are tracked in
 [47747](http://gerrit.houmo.ai/c/houmoquantization/xhquanttool/+/47747).
 
-Packed-MoE handling remains inside the Qwen4 adapter; delta-rule kernels remain
-in the existing shared implementation. The wrapper expresses static shapes,
+Packed-MoE handling remains inside the Qwen4 adapter; the entire GDN forward
+reuses Qwen3.5's canonical implementation, including the merged-QKV convolution
+path. The Qwen4 layer only adapts DynamicCache. The wrapper expresses static shapes,
 cache updates and numerical operations directly, without global capture patches.
 
-The Qwen4 exporter enables the default Torch/ONNX optimizers and requests ONNX
-external-data serialization. It requires SDK support for saving external weights
+The Qwen4 exporter uses the default Torch/ONNX optimizers and serialization policy.
+Large graphs require SDK support for saving external weights
 before protobuf conversion and optimizing the graph with lazy external-data
 references. Explicit state outputs remain part of the export contract. The SDK
 lifts static constants for runtime parsers and applies its existing HMONNX transforms.
@@ -132,12 +144,32 @@ dtype before frontend capture. For the validated FP16/CPU PTQ route, all T/H/W
 Gather registrations retain one cosine and one sine table. FP32 native eager
 outputs retain their original precision.
 
-The model-local `publish_qwen4_exp_qsa_layout_resources` publication step preserves
-QSA layout constants and degenerate views required by the old artifact contract.
-It derives them from current graph/configuration geometry, checks tensor shapes,
-and does not read the old baseline or change active connections, precision,
-weights or SDK diagnostics. This bounded compatibility step is distinct from
-the historical whole-graph cleanup.
+The wrapper declares the final in-place cache ABI before capture: K/V and
+compressed-index storage remain inputs, while convolution, explicit recurrent
+state and three-row tails are outputs. Both ordinary and MTP SDK export write
+their final graphs directly; there is no raw graph or cache-conversion pass.
+Host PLE tables are encoded before capture, and their lookup results are
+explicit graph inputs. One package-level `ple/manifest.json` describes the shared
+compressed tables, encoded once for all target phases;
+no PLE operation or lookup table is added to or removed from the SDK graph.
+The Qwen4 build adapter lists the validated PLE resource paths in
+`qwen4_exp_runtime_assets` so the unchanged shared publisher retains them.
+
+As in Qwen3.5, full exports target prefill/decode; MTP exports target
+prefill/decode and draft prefill/decode. MTP's target decode width is N+1
+(default 5). Verification and single-token replay share that graph and SDK
+session, using the valid length to commit only real tokens. No separate
+single-token target graph or `decode_m5` is exported.
+
+Low-memory export uses Qwen3.5's existing placeholder filename, assembly and
+cleanup implementation. Child files live under each phase's `placeholders/`
+during export; successful assembly removes that directory. No raw stage,
+per-block graph, or temporary child sidecar is kept in the completed package.
+
+SDK export is the end of ordinary graph lowering. Qwen4 does not append unused
+layout constants or views to reproduce a historical graph. Regression checks
+cover executable boundaries, weight precision, numerical outputs and state
+updates; unused nodes and file bytes are not an artifact contract.
 
 ## Historical real-checkpoint evidence (2026-09-02)
 
@@ -189,6 +221,10 @@ MTP remains an explicit serving configuration. The README describes this entry
 and the focused impact declarations cover its configuration and visual hooks.
 The model configuration rejects unsupported batch/sequence geometry before
 loading checkpoint weights.
+
+The follow-up refactor removes `export.model.export_mode`: ordinary and MTP
+exports share the model entry. Low-memory export changes module loading and
+placeholder assembly, while component computation and SDK stages stay shared.
 
 The local evidence directory is
 `work_dirs/qwen4_static_lifecycle_20261112/`; its formal package is
@@ -242,7 +278,10 @@ publication checks also used the installed `aenum.StrEnum` alias. Repository
 Python requirements and shared SDK sources were unchanged. A broader local run
 was interrupted with SIGTERM (143), so it is not recorded as a full-suite pass.
 
-## Wrap/TorchFX strict graph validation (2026-11-13)
+## Historical Wrap/TorchFX strict graph validation (2026-11-13)
+
+This is the colleague's pre-refactor evidence. The follow-up below removes
+unused layout resources and checks executable semantics rather than old DAGs.
 
 The same real RTN four-layer checkpoint/configuration was fully re-exported via
 `XHQwen4ExpModel.export_hmonnx()`: three GDR blocks and one QSA block, W4/W8 G64,
@@ -284,6 +323,41 @@ configuration. It does not establish 48-layer, GPU, visual, HMCC/TCIM or new
 four-layer Golden validation. The numerical A/B replay is from the small model.
 FP32 eager parity is tested; FP32-source large-table sharing through FP16 PTQ
 is outside this strict export result. These focused checks are not a full CI run.
+
+## Shared lifecycle four-block validation (2026-11-13)
+
+The follow-up on Gerrit 48561 PS8 exports the original
+`/data01/datasets/Qwen3.8-Flash-Next` weights through `Qwen4ExpWorkflow.export`.
+The local four-layer checkpoint retains the first three GDN blocks, one QSA
+block, PLE and MTP weights. It uses W8A8 SEFP, W4 RTN experts and Host SEFP4 PLE,
+context capacity 262144, chunk 256 and four draft tokens (verify width five).
+Low-memory export produces target prefill/decode/verify and MTP prefill/decode
+with identical quantized head payloads across all five graphs.
+
+After two consecutive 256-token prefill chunks, five-position verify and five
+single-token decode calls have bitwise-identical logits, hidden states and all
+14 persistent states, including QSA tails and compressed index cache. MTP
+prefill/decode versus sequential decode is also bitwise identical. Production
+speculative generation matches target greedy for six output tokens; this
+four-layer sample accepts zero drafts, so it validates rejection/replay rather
+than acceleration. Tiny-model regressions separately cover acceptance 0/2/4.
+
+Against the native FP16 four-layer reference, relative logits RMSE is 0.17417
+after 512 prefill tokens and 0.18769 for the next five decode tokens. These
+measure quantization differences, not export equivalence or full-model quality.
+The context capacity is 256K; the executed prompt contains 512 tokens.
+
+The final direct-export rerun uses HMONNX V2 (`ENABLE_HMINFERENCE_V2=1`) and
+packed W4 runtime weights. It preserves the same five W8 head payloads and
+native-reference numerical differences as the previous export. Successful
+placeholder assembly removes every temporary child graph and sidecar.
+
+Evidence is in the v2 workspace's `.qwen4-reuse-48561/`: `artifact/` contains
+the five final graphs without raw or placeholder directories;
+`real-validation-direct.json` records numerical, state, resource and relocation
+checks, including unchanged graph bytes during package relocation.
+Focused CI covers shared workflow/model consumers and small real exports;
+full repository CI, vLLM, HMCC/TCIM and the full 48-layer model were not run.
 
 ## GLM5.3 vision lifecycle alignment (2026-11-13)
 
@@ -383,3 +457,11 @@ The random tiny assistant naturally rejected all 26 proposals in the diagnostic
 ten-token run; controlled acceptance tests establish state correctness, not
 acceptance quality or speedup. Full-checkpoint MTP quality, GPU inference,
 HMCC and TCIM remain outside this validation.
+
+## Shared external target storage (2026-11-13)
+
+Publication reuses the existing streaming tensor writer for equal target
+prefill/decode initializers. The two phase-local weights.bin paths share one
+inode; graph ports, tensor identities and payloads remain unchanged. Root PLE
+resources remain shared through the existing package manifest. MTP follows
+the original Gerrit 48585 PS2 graph, scheduling, loading and resume contracts.

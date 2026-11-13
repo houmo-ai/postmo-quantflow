@@ -56,7 +56,7 @@ def export_qwen4_exp_mtp(
 
     ``model_dir`` must retain the checkpoint's MTP payload. The target head
     can be passed by ownership to avoid loading it twice. This exports a
-    separate assistant; target verify graphs belong to serving_workflow.
+    separate assistant; target verify graphs belong to the model package plan.
     """
     from ...shared_head import load_checkpoint_head
     from .cache_contract import (
@@ -65,10 +65,11 @@ def export_qwen4_exp_mtp(
         resolve_qwen4_exp_cache_abi,
         resolve_qwen4_exp_cache_shape,
     )
-    from .serving_graph import convert_qwen4_exp_kv_to_llm_cache, convert_qwen4_exp_kv_to_page_cache
     from .static_export import _sample_mrope_position_inputs, export_qwen4_exp_hmonnx
 
     cache_abi = resolve_qwen4_exp_cache_abi(cache_abi)
+    if cache_abi != QWEN4_EXP_LLM_CACHE_ABI:
+        raise ValueError("Qwen4 export uses llm_cache_inplace_v1; PageKV lowering belongs to the serving backend")
     if dtype != torch.float16:
         raise ValueError("Qwen4 MTP HMONNX requires float16 graph tensors")
     if not 1 <= input_sequence_length <= cache_length:
@@ -103,7 +104,9 @@ def export_qwen4_exp_mtp(
         *MROPE_POOL_POSITION_NAMES,
         *cache_names,
     )
-    outputs = ("logits", "mtp_hidden_states", *(f"present_{name}" for name in cache_names))
+    output_names = {spec.name for spec in wrapper.core.output_cache_specs()}
+    outputs = ("logits", "mtp_hidden_states", *(f"present_{name}" for name, spec in
+               qwen4_exp_cache_input_specs(wrapper.cache_contract).items() if spec.name in output_names))
     cache_tensors = tuple(
         torch.zeros(
             resolve_qwen4_exp_cache_shape(spec, batch_size=1, context_length=cache_length),
@@ -136,7 +139,7 @@ def export_qwen4_exp_mtp(
     )
     exported = export_qwen4_exp_hmonnx(
         assistant,
-        root / "raw",
+        root,
         text_config=c,
         sample_inputs=sample,
         quant_config=quant_config,
@@ -149,28 +152,9 @@ def export_qwen4_exp_mtp(
         export_output_names=outputs,
         shared_quantized_head=shared_quantized_head,
     )
-    converter = (
-        convert_qwen4_exp_kv_to_llm_cache
-        if cache_abi == QWEN4_EXP_LLM_CACHE_ABI
-        else convert_qwen4_exp_kv_to_page_cache
-    )
-    graph_path = converter(
-        exported.onnx_path,
-        root / "model.onnx",
-        context_length=cache_length,
-        num_kv_heads=c.num_key_value_heads,
-        head_dim=c.head_dim,
-    )
-    from .serving_graph import publish_qwen4_exp_qsa_layout_resources
-
-    publish_qwen4_exp_qsa_layout_resources(
-        graph_path,
-        batch_size=1,
-        input_sequence_length=input_sequence_length,
-        num_attention_heads=int(c.num_attention_heads),
-        num_key_value_heads=int(c.num_key_value_heads),
-        head_dim=int(c.head_dim),
-    )
+    graph_path = root / "model.onnx"
+    Path(exported.onnx_path).replace(graph_path)
+    Path(exported.io_manifest_path).unlink()
     return _mtp_export_metadata(
         graph_path,
         cache_contract=wrapper.cache_contract.to_dict(),
@@ -178,5 +162,4 @@ def export_qwen4_exp_mtp(
         hidden_size=c.hidden_size,
         hc_count=c.hc_count,
         input_sequence_length=input_sequence_length,
-        io_manifest_path=exported.io_manifest_path,
     )

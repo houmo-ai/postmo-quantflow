@@ -42,8 +42,10 @@ try:
 except ImportError:  # pragma: no cover - exercised by the version preflight.
     TransformersDynamicCache = None
 
-from ..qwen3_5._delta_rule import torch_chunk_gated_delta_rule, torch_recurrent_gated_delta_rule
-from ..qwen3_5._hybrid_gated_delta_net import HybridRMSNormGatedMixin
+from ..qwen3_5._hybrid_gated_delta_net import (
+    HybridGatedDeltaNetMixin,
+    HybridRMSNormGatedMixin,
+)
 from ..qwen3_5_moe.autoround_hybrid import AutoRoundGatedDeltaNetMixin, AutoRoundSparseMoeMixin
 from .cache_contract import (
     FULL_ATTENTION,
@@ -563,8 +565,6 @@ class Qwen4ExpExportableGatedDeltaNet(AutoRoundGatedDeltaNetMixin, nn.Module):
                 }
             )
         )
-        mask_dtype = native_gated_delta_net._input_projection_dtype()
-        native_gated_delta_net.mask_cast = xhnn.Cast(mask_dtype).to(dtype=mask_dtype)
         return native_gated_delta_net
 
     def enable_fused_gdr(
@@ -621,8 +621,8 @@ class Qwen4ExpExportableGatedDeltaNet(AutoRoundGatedDeltaNetMixin, nn.Module):
         recurrent_state = cache_layer.recurrent_states[0]  # [B,NV,DK,DV]
         if attention_mask is None:
             attention_mask = hidden_states.new_ones(hidden_states.shape[:2])  # [B,S]
-        output, conv_cache_out, recurrent_state_out = self._forward_merged(
-            hidden_states, conv_cache, recurrent_state, attention_mask, cache_params.current_input_length,
+        output, conv_cache_out, recurrent_state_out = HybridGatedDeltaNetMixin.forward(
+            self, hidden_states, conv_cache, recurrent_state, attention_mask, cache_params.current_input_length,
         )
         cache_layer.conv_states[0] = conv_cache_out  # [B,CD,KD]
         # xh::GDRChunkScan owns recurrent-state mutation through its cache
@@ -630,59 +630,6 @@ class Qwen4ExpExportableGatedDeltaNet(AutoRoundGatedDeltaNetMixin, nn.Module):
         # cache ABI populated by reusing the existing state tensor in that case.
         cache_layer.recurrent_states[0] = recurrent_state if recurrent_state_out is None else recurrent_state_out
         return output  # [B,S,H]
-
-    def _forward_merged(self, hidden, conv, recurrent, valid, current):
-        """Keep the checkpoint's merged QKV projection merged through convolution."""
-        batch, length = self.batch_size, self.input_sequence_length
-        valid = self.mask_cast(valid)
-        mask = valid.unsqueeze(-1)
-        channel_mask = valid.unsqueeze(1)
-        state_mask = mask.unsqueeze(-1)
-        mixed = self.in_proj_qkv(hidden).transpose(1, 2)
-        z = self.in_proj_z(hidden).reshape(batch, length, -1, self.head_v_dim)
-        b, a = self.in_proj_b(hidden), self.in_proj_a(hidden)
-        extended = torch.cat((conv, mixed), dim=-1).to(self.conv1d.weight.dtype)
-        next_conv = self.conv_cache_slice(extended, current)
-        mixed = torch.nn.functional.silu(
-            self.conv1d(extended)[:, :, self.conv_kernel_size:self.conv_kernel_size + length],
-        ).to(mixed.dtype) * channel_mask
-        query, key, value = torch.split(
-            mixed.transpose(1, 2), (self.key_dim, self.key_dim, self.value_dim), dim=-1,
-        )
-        query = query.reshape(batch, length, -1, self.head_k_dim)
-        key = key.reshape(batch, length, -1, self.head_k_dim)
-        value = value.reshape(batch, length, -1, self.head_v_dim) * state_mask
-        beta = b.sigmoid() * mask
-        g = (self.A_log_exp * torch.nn.functional.softplus(a + self.dt_bias)) * mask
-        if self.num_v_heads // self.num_k_heads > 1:
-            query = query.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
-            key = key.repeat_interleave(self.num_v_heads // self.num_k_heads, dim=2)
-        common = dict(
-            g=g, beta=beta, mask_qkv=state_mask, initial_state=recurrent,
-            output_final_state=self.use_cache, use_qk_l2norm_in_kernel=True,
-            num_heads=self.chunk_num_heads, k_head_dim=self.chunk_k_head_dim,
-            v_head_dim=self.chunk_v_head_dim, batch_size=batch, scale=self.chunk_scale,
-        )
-        recurrent_mode = self.linear_attention_mode == "recurrent"
-        if recurrent_mode:
-            core, next_state = torch_recurrent_gated_delta_rule(
-                query, key, value, **common, sequence_length=length, recurrent_scan_op=self.recurrent_scan_op,
-            )
-        else:
-            core, next_state = torch_chunk_gated_delta_rule(
-                query, key, value, **common, chunk_size=self.linear_chunk_size,
-                chunk_mask_incl=self.chunk_mask_incl, chunk_mask_strict=self.chunk_mask_strict,
-                chunk_eye_matrix=self.chunk_eye_matrix, chunk_eye_8_batched=self.chunk_eye_8_batched,
-                cumsum_matrix=self.chunk_cumsum_matrix, input_sequence_length=length,
-                chunk_row_masks=self.chunk_row_masks, cumsum_matmul=self.cumsum_matmul,
-                block_tri_inverse_op=self.block_tri_inverse_op, chunk_scan_op=self.chunk_scan_op,
-            )
-        if not recurrent_mode and (
-            self.suppress_recurrent_state_outputs or getattr(self.chunk_scan_op, "state_is_cache", False)
-        ):
-            next_state = None
-        output = self.norm(core, z).reshape(batch, length, -1).to(self.out_proj.weight.dtype)
-        return self.out_proj(output) * mask, next_conv, next_state
 
     # SDK tracing replaces forward with graph_forward. Keep the native cache
     # adapter instead of inheriting the shared mixin's flat-tensor graph ABI.
@@ -694,7 +641,8 @@ class Qwen4ExpTextExportWrapper(nn.Module):
 
     It accepts explicit cache tensors described by
     :class:`Qwen4ExpCacheContract`, reconstructs the Transformers
-    ``DynamicCache``, and returns the updated cache in the same stable order.
+    ``DynamicCache``, and returns functional state in contract order. K/V and
+    compressed-index storage are updated in place, matching Qwen3.5's ABI.
     HMONNX capability is checked by the export facade rather than here so this
     wrapper can also serve as an executable cache-ABI oracle.
     """
@@ -717,6 +665,7 @@ class Qwen4ExpTextExportWrapper(nn.Module):
         self.lm_head = lm_head
         self.return_hidden_states = return_hidden_states
         self.return_native_hidden_states = return_native_hidden_states
+        self.ple_specs = ()
         _replace_native_modules_for_export(
             self.native_text_model,
             batch_size=batch_size,
@@ -822,6 +771,14 @@ class Qwen4ExpTextExportWrapper(nn.Module):
         dynamic_cache.past_seq_length = past_seq_length  # [1]
         dynamic_cache.current_input_length = current_input_length  # [1]
         dynamic_cache.qsa_host_controls = qsa_controls
+        if self.ple_specs:
+            from .streaming_ple import set_streamed_ple_inputs
+
+            offset = len(self.cache_keys) + self.qsa_control_count
+            set_streamed_ple_inputs(
+                self.native_text_model, self.ple_specs,
+                tuple(states[offset + index] for index in range(len(self.ple_specs))), cache=dynamic_cache,
+            )
 
         query_capacity = self.input_sequence_length
         query_offsets = self.query_offsets
@@ -971,9 +928,18 @@ class Qwen4ExpTextExportWrapper(nn.Module):
             getattr(getattr(linear_attention, "chunk_scan_op", None), "state_is_cache", False)
         )
 
+    def output_cache_specs(self):
+        """Functional state outputs; large cache storage stays in the caller."""
+        return tuple(
+            spec for spec in self.cache_contract.tensors
+            if spec.state_kind not in {"kv_key", "kv_value", "qsa_indexer_key"}
+            and not (spec.state_kind == "delta_recurrent"
+                     and self._linear_attention_uses_gdr_cache_state(spec.layer_idx))
+        )
+
     def _flatten_dynamic_cache(self, dynamic_cache: Any) -> tuple[torch.Tensor, ...]:
         tensors: list[torch.Tensor] = []  # list[num_cache_tensors] of heterogeneous shapes
-        for spec in self.cache_contract.tensors:
+        for spec in self.output_cache_specs():
             cache_layer = dynamic_cache.layers[spec.layer_idx]  # layer-local cache container
             if spec.state_kind in {"delta_conv", "ple_conv", "ple_ngram_history"}:
                 tensor = cache_layer.conv_states[_required_state_idx(spec)]  # contract-specific [B,...]
@@ -981,12 +947,6 @@ class Qwen4ExpTextExportWrapper(nn.Module):
                 if self._linear_attention_uses_gdr_cache_state(spec.layer_idx):
                     continue
                 tensor = cache_layer.recurrent_states[_required_state_idx(spec)]  # [B,NV,DK,DV]
-            elif spec.state_kind == "kv_key":
-                tensor = cache_layer.keys  # [B,NKV,L,DH]
-            elif spec.state_kind == "kv_value":
-                tensor = cache_layer.values  # [B,NKV,L,DH]
-            elif spec.state_kind == "qsa_indexer_key":
-                tensor = cache_layer.indexer_keys  # [B,1,L//4,DI]
             elif spec.state_kind == "qsa_indexer_tail":
                 tensor = cache_layer.indexer_tail  # [B,4,DI]
             elif spec.state_kind == "qsa_key_tail":

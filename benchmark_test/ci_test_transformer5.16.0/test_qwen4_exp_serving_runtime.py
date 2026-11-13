@@ -651,6 +651,7 @@ def test_verify_dispatches_independent_target_sdk_graph(tmp_path, verify_length)
     model.verify_model = SimpleNamespace(hmonnx_session=session, forward=session.forward)
     model.prefill_model = model.decode_model = None
     model._qwen4_verify_length = verify_length
+    model._qwen4_verify_phase = f"decode_m{verify_length}"
     model._data_processor = None
     model._qwen4_state = Qwen4ExpServingState(
         Qwen4ExpCacheContract.from_text_config(_text_config()),

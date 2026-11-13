@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "qwen4-exp-shared-external-weights",
+      "patterns": [
+        "xhmodel_merak/xh_llm/models/qwen4_exp/shared_weights.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/ple_export.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/host_ple_inputs.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/ple_demo.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/package_export.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/qwen4_exp_model.py",
+        "xhmodel_merak/model_integrations/qwen4_exp/build.py",
+        "xhmodel_merak/model_integrations/shared_weights.py",
+        "xhmodel_merak/model_build/packaging.py",
+        "xhmodel_merak/model_artifact/files.py"
+      ]
+    }
+  ]
+}

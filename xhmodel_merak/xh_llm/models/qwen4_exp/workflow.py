@@ -76,47 +76,13 @@ class Qwen4ExpWorkflow(Qwen35Workflow):
     def build_input_message(self, input_messages: Any) -> list[dict[str, Any]]:
         return super().build_input_message(input_messages)
 
-    def export(
-        self,
-        quant_result: QuantResult,
-        output_dir: str,
-        device: str,
-        config_overrides: Mapping[str, Any] | None = None,
-    ) -> ExportResult:
-        if quant_result is None:
-            raise ValueError("quant_result can't be None")
-        workflow_config = self.workflow_config.with_overrides(config_overrides)
-        model_dir = self._resolve_export_model_dir(quant_result)
-        # Ordinary exports use the model lifecycle. Explicit MTP packages
-        # add verify/draft phases through the same static wrapper exporter.
-        export_mode = workflow_config.export["model"].get("export_mode", "static")
-        model_cfg = workflow_config.export["model"]
-        if export_mode == "serving" and (
-            model_cfg.get("spec_decode_mode") == "mtp" or model_cfg.get("cache_abi") == "page_kv_v1"
-        ):
-            from .serving_workflow import export_qwen4_exp_serving_package
+    def export(self, quant_result, output_dir, device, config_overrides=None):
+        return BaseLLMWorkflow.export(self, quant_result, output_dir, device, config_overrides)
 
-            export_qwen4_exp_serving_package(
-                model_dir=model_dir,
-                output_dir=output_dir,
-                model_config=model_cfg,
-                mtp_source_dir=self.model_dir,
-                device=device,
-                device_map=model_cfg.get("device_map"),
-            )
-            config_file = Path(output_dir) / f"{workflow_config.name}.yaml"
-            workflow_config.dump(str(config_file))
-            meta = json.loads((Path(output_dir) / "golden_meta_info.json").read_text(encoding="utf-8"))
-            return ExportResult(work_dir=str(output_dir), config_file=str(config_file), meta=meta)
-        if export_mode in {"static", "serving"}:
-            return BaseLLMWorkflow.export(
-                self,
-                quant_result=quant_result,
-                output_dir=output_dir,
-                device=device,
-                config_overrides=config_overrides,
-            )
-        raise ValueError(f"Unknown Qwen4-Exp export_mode: {export_mode!r}")
+    def _build_export_config(self, quant_result, workflow_config):
+        config = BaseLLMWorkflow._build_export_config(self, quant_result, workflow_config)
+        config["model"]["mtp_source_dir"] = self.model_dir
+        return config
 
     def dump_golden(
         self,

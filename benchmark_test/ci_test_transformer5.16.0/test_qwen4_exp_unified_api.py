@@ -125,7 +125,7 @@ def test_resolver_routes_lengths_precision_and_existing_checkpoint(source, tmp_p
     from xhmodel_merak.xh_llm.workflows.config import WorkflowConfig
 
     model = WorkflowConfig.from_file(str(path)).with_overrides(plan.config_overrides).export["model"]
-    assert model.get("export_mode", "static") == "static"
+    assert "export_mode" not in model
     assert model["context_max_length"] == 4096
     assert model["prefill_chunk_length"] == 128
     assert model["max_pe_length"] == 262144
@@ -341,7 +341,7 @@ def _prepare_publication(source, tmp_path, monkeypatch, *, variant, external_ple
             config = WorkflowConfig.from_file(self.config_path).with_overrides(config_overrides)
             saved = root / "workflow.yaml"
             config.dump(str(saved))
-            assert config.export["model"].get("export_mode", "static") == ("serving" if variant == "mtp" else "static")
+            assert "export_mode" not in config.export["model"]
             assert Path(quant_result.quanted_model_dir) == checkpoint
             for phase in ["prefill", "decode"]:
                 _write_graph(root / phase / f"qwen38_{phase}.onnx")
@@ -374,6 +374,8 @@ def _prepare_publication(source, tmp_path, monkeypatch, *, variant, external_ple
             metadata["visual_config"] = _visual_metadata(root)
             if external_ple:
                 metadata.update(_external_ple_artifact(root))
+                _share_ple_resources(root, metadata)
+                (root / "ple" / "unused.raw").write_bytes(b"not referenced by the PLE manifest")
             import hashlib
 
             from xhmodel_merak.xh_llm.models.qwen4_exp.cache_contract import Qwen4ExpCacheContract
@@ -763,19 +765,59 @@ def _external_ple_artifact(root):
     return metadata
 
 
-def test_external_ple_validates_real_graph_and_inventory_after_relocation(tmp_path):
+def _share_ple_resources(root, metadata):
+    import onnx
+
+    directory = root / "ple"
+    directory.mkdir()
+    manifest = metadata["qwen4_exp_ple"]["prefill"]
+    for kind in ("packed", "exponent"):
+        (root / "prefill" / f"{kind}.raw").rename(directory / f"{kind}.raw")
+        (root / "decode" / f"{kind}.raw").unlink()
+        manifest["layers"][0][kind]["path"] = f"ple/{kind}.raw"
+    (directory / "manifest.json").write_text(json.dumps(manifest))
+    metadata["qwen4_exp_ple"] = {"manifest": "ple/manifest.json"}
+    for phase in ("prefill", "decode"):
+        path = root / metadata[f"{phase}_hmonnx"]
+        graph = onnx.load(path)
+        del graph.metadata_props[:]
+        onnx.save(graph, path)
+
+
+@pytest.mark.parametrize("storage", ["inline", "phase", "shared"])
+def test_external_ple_validates_real_graph_and_inventory_after_relocation(tmp_path, storage):
+    import onnx
+
     from xhmodel_merak.model_integrations.qwen4_exp.artifact import validate_external_ple_contract
 
     root = tmp_path / "artifact"
     root.mkdir()
     metadata = _external_ple_artifact(root)
+    if storage == "shared":
+        _share_ple_resources(root, metadata)
+    if storage != "inline":
+        for phase in ("prefill", "decode"):
+            graph_path = root / metadata[phase + "_hmonnx"]
+            graph = onnx.load(graph_path)
+            if storage == "phase":
+                (graph_path.parent / "ple.json").write_text(graph.metadata_props[0].value)
+            del graph.metadata_props[:]
+            onnx.save(graph, graph_path)
     moved = tmp_path / "moved"
     root.rename(moved)
     entries = validate_external_ple_contract(moved, metadata)
-    assert entries == {
+    expected = {
         f"ple_{phase}_1_{kind}": {"path": f"{phase}/{kind}.raw", "type": "embedding"}
         for phase in ("prefill", "decode") for kind in ("packed", "exponent")
     }
+    if storage == "phase":
+        expected.update({f"{phase}_ple_manifest": {"path": f"{phase}/ple.json", "type": "json"}
+                         for phase in ("prefill", "decode")})
+    elif storage == "shared":
+        expected = {f"ple_1_{kind}": {"path": f"ple/{kind}.raw", "type": "embedding"}
+                    for kind in ("packed", "exponent")}
+        expected["ple_manifest"] = {"path": "ple/manifest.json", "type": "json"}
+    assert entries == expected
 
 
 @pytest.mark.parametrize("damage", [
@@ -852,15 +894,16 @@ def test_public_external_ple_resources_are_published_and_required_in_manifest(so
     shutil.rmtree(tmp_path / "checkpoint")
     root, manifest = read_manifest(str(relocated))
     entries = json.loads((root / "export_meta_info.json").read_text())
-    for phase in ("prefill", "decode"):
-        for kind in ("packed", "exponent"):
-            entry = entries[f"ple_{phase}_1_{kind}"]
-            assert entry == {"path": f"{phase}/{kind}.raw", "type": "embedding"}
-            assert any(item["path"] == entry["path"] for item in manifest["artifact"]["files"])
+    for kind in ("packed", "exponent"):
+        entry = entries[f"ple_1_{kind}"]
+        assert entry == {"path": f"ple/{kind}.raw", "type": "embedding"}
+        assert any(item["path"] == entry["path"] for item in manifest["artifact"]["files"])
+    assert entries["ple_manifest"] == {"path": "ple/manifest.json", "type": "json"}
+    assert len(list((root / "ple").glob("*.raw"))) == 2
     meta_file = root / "golden_meta_info.json"
     validate_artifact(root, manifest, meta_file, get_recipe(MODEL_ID))
     manifest["artifact"]["files"] = [
-        item for item in manifest["artifact"]["files"] if item["path"] != "prefill/packed.raw"
+        item for item in manifest["artifact"]["files"] if item["path"] != "ple/packed.raw"
     ]
     with pytest.raises(ModelError, match="Manifest"):
         validate_artifact(root, manifest, meta_file, get_recipe(MODEL_ID))
@@ -1161,6 +1204,26 @@ def test_mtp_v4_candidate_and_fixed_head_contract(tmp_path, count, damage):
         with pytest.raises(ValueError):
             validate_mtp_v3_contract(tmp_path, metadata, text, target)
     else:
+        validate_mtp_v3_contract(tmp_path, metadata, text, target)
+
+
+def test_mtp_v5_uses_decode_for_verify_and_registers_it_once(tmp_path):
+    from xhmodel_merak.model_integrations.qwen4_exp.artifact import mtp_v3_graph_entries, validate_mtp_v3_contract
+
+    metadata, text, target = _mtp_v3_contract_artifact(tmp_path, explicit_cache=True, verify_length=5)
+    verify = tmp_path / metadata.pop("decode_m5_hmonnx")
+    verify.replace(tmp_path / metadata["decode_hmonnx"])
+    verify.parent.rmdir()
+    metadata["decode_hmonnx_md5"] = metadata.pop("decode_m5_hmonnx_md5")
+    metadata["model_config"]["quant_scheme"] = {"quant_type": "w8a8h1_sefp"}
+    spec = metadata["spec_decode"]
+    spec.update(runtime_contract_version=5, num_draft_tokens=4, target_verify_graph="decode", draft_head_weight_bits=8,
+                shared_head={"version": 1, "owner": "target", "logical_bits": 8})
+    spec["target"]["verify_hmonnx"] = metadata["decode_hmonnx"]
+    validate_mtp_v3_contract(tmp_path, metadata, text, target)
+    assert mtp_v3_graph_entries(metadata) == {}
+    spec["target"]["verify_hmonnx"] = metadata["prefill_hmonnx"]
+    with pytest.raises(ValueError, match="paths disagree"):
         validate_mtp_v3_contract(tmp_path, metadata, text, target)
 
 

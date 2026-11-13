@@ -152,44 +152,6 @@ def test_native_ngram_module_exposes_real_hash_contract():
     assert spec["offsets"] == module.ngram_heads_offsets.tolist()
 
 
-def test_page_rewrite_links_sidecars_and_keeps_metadata(tmp_path):
-    attention_schema = onnx.defs.get_schema("FlashAttention", 1, "ai.houmo.xh2a")
-    from xhmodel_merak.xh_llm.models.qwen4_exp.serving_graph import convert_qwen4_exp_kv_to_page_cache
-
-    source, _, _ = _fixture(tmp_path / "source")
-    output = tmp_path / "raw" / "model.onnx"
-    export_ple_sefp4_hmonnx(source, output, ple_specs=[_spec()])
-    model = onnx.load(output, load_external_data=False)
-    for name in ("key", "value", "past_key_cache_0", "past_value_cache_0"):
-        model.graph.input.insert(len(model.graph.input) - 1,
-                                 helper.make_tensor_value_info(name, TensorProto.FLOAT16, [1, 1, 8, 8]))
-    for name in ("past_seq_length", "current_input_length"):
-        model.graph.input.insert(len(model.graph.input) - 1,
-                                 helper.make_tensor_value_info(name, TensorProto.INT32, [1]))
-    for kind in ("key", "value"):
-        model.graph.node.append(helper.make_node(
-            "LLMCache", [kind, "past_seq_length", "current_input_length", f"past_{kind}_cache_0"],
-            [f"{kind}_cached"], domain="ai.houmo.xh2a", name=f"{kind}_cache"))
-    # Older SDKs exported a separate score precision; current FlashAttention
-    # schemas expose only Q/K/V and probability precision.
-    score_attrs = {"s_bits": 16} if "s_bits" in attention_schema.attributes else {}
-    model.graph.node.append(helper.make_node(
-        "FlashAttention", ["key", "key_cached", "value_cached", "rotary_table"], ["attn_output"],
-        domain="ai.houmo.xh2a", name="attention", is_causal=0, scale=0.3535533905932738,
-        num_heads=1, num_kv_heads=1, q_bits=16, k_bits=16, v_bits=16, p_bits=16, sliding_window=-1,
-        **score_attrs))
-    model.graph.initializer.append(numpy_helper.from_array(np.zeros((8, 4), dtype=np.float16), "rotary_table"))
-    model.graph.output.append(helper.make_tensor_value_info("attn_output", TensorProto.FLOAT16, [1, 1, 8, 8]))
-    output.write_bytes(model.SerializeToString())
-    page = tmp_path / "page" / "model.onnx"
-    convert_qwen4_exp_kv_to_page_cache(output, page, context_length=8, num_kv_heads=1, head_dim=8)
-    assert read_qwen4_exp_ple_specs(output) == read_qwen4_exp_ple_specs(page)
-    assert {"ids", "history", "ple_embeddings_1"} <= {v.name for v in onnx.load(page).graph.input}
-    onnx.checker.check_model(str(page))
-    metadata = json.loads(next(e.value for e in onnx.load(page).metadata_props if e.key == "qwen4_exp_ple"))
-    assert metadata["version"] == 1
-
-
 def test_fresh_export_golden_helper_prepares_host_inputs_from_original_samples(tmp_path):
     from xhmodel_merak.xh_llm.models.qwen4_exp.golden_runtime import run_qwen4_exp_hmonnx_golden
     from xhmodel_merak.xh_llm.models.qwen4_exp.host_ple_inputs import HostPLEInputs

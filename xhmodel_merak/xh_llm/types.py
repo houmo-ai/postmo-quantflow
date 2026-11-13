@@ -126,6 +126,7 @@ class BaseLLMModelConfig(HFModelConfig):
 
         self.hf_model = hf_model
         if isinstance(quant_scheme, dict):
+            quant_scheme = dict(quant_scheme)
             target_device = DeviceType(self.chip_arch)
             if "target_device" not in quant_scheme:
                 quant_scheme["target_device"] = target_device

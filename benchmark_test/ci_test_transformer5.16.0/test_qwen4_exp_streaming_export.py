@@ -9,7 +9,6 @@ import pytest
 import torch
 from transformers import Qwen4ExpForCausalLM, Qwen4ExpTextConfig
 
-from xhmodel_merak.xh_llm.models.qwen4_exp.serving_graph import convert_qwen4_exp_kv_to_llm_cache
 from xhmodel_merak.xh_llm.models.qwen4_exp.static_export import (
     build_qwen4_exp_serving_sample_inputs,
     export_qwen4_exp_hmonnx,
@@ -85,22 +84,26 @@ def test_static_model_publishes_streamed_phases_without_capture_files(tmp_path, 
         "preserve_model_dtype": True,
     }
     assert "spec_decode" not in saved
-    assert set(saved["qwen4_exp_ple"]) == {"prefill", "decode"}
+    assert saved["qwen4_exp_ple"] == {"manifest": "ple/manifest.json"}
+    ple = json.loads((root / "ple/manifest.json").read_text())
+    assert len(list((root / "ple").glob("*.packed.bin"))) == 1
+    assert len(list((root / "ple").glob("*.exponent.bin"))) == 1
     for phase in ("prefill", "decode"):
         relative = saved[phase + "_hmonnx"]
         assert getattr(meta, phase + "_hmonnx") == relative
-        expected_name = f"qwen4_exp_{phase}_llm_cache.onnx"
-        assert relative == f"{phase}/{expected_name}"
+        assert Path(relative).parent == Path(phase)
         onnx.checker.check_model(str(root / relative))
         graph = onnx.load(str(root / relative), load_external_data=False)
         assert not any(node.op_type == "PlaceHolder" for node in graph.graph.node)
-        assert {layer["input_name"] for layer in saved["qwen4_exp_ple"][phase]["layers"]} == {
+        assert {layer["input_name"] for layer in ple["layers"]} == {
             value.name for value in graph.graph.input if value.name.startswith("ple_embeddings_")
         }
         assert not any(value.name.startswith("present_past_") for value in graph.graph.output)
         assert not any(value.name.startswith("_streamed_input_") for value in graph.graph.output)
         files = [path for path in (root / phase).rglob("*") if path.is_file()]
-        assert all(path.suffix != ".json" for path in files)
+        assert {path.name for path in files if path.suffix == ".json"} == set()
+        assert not (root / f"{phase}_raw").exists()
+        assert not (root / phase / "placeholders").exists()
         assert [path.relative_to(root / phase).as_posix() for path in files if path.suffix == ".onnx"] == [
             Path(relative).name,
         ]
@@ -111,14 +114,30 @@ def test_static_model_publishes_streamed_phases_without_capture_files(tmp_path, 
     "sequence_length,mode,ple",
     [
         (1, None, False),
-        (2, "recurrent", False),
+        (5, "recurrent", False),
         (3, None, True),
     ],
 )
 def test_real_streamed_graph_matches_standard_export(tmp_path, monkeypatch, sequence_length, mode, ple):
+    from xhmodel_merak.xh_llm import base_model
+
     monkeypatch.setenv("TORCH_COMPILE_DISABLE", "0")
+    sdk_graphs = {}
+    sdk_export = base_model.to_export_hmonnx_v2
+
+    def capture_sdk_graph(*args, **kwargs):
+        path = sdk_export(*args, **kwargs)
+        sdk_graphs[str(path)] = Path(path).read_bytes()
+        return path
+
+    monkeypatch.setattr(base_model, "to_export_hmonnx_v2", capture_sdk_graph)
     torch.manual_seed(41)
     config = _config(ple)
+    if sequence_length == 1:
+        # Multiple QSA layers exercise global cache ordinals and shared RoPE.
+        config.layer_types = ["qwen_sparse_attention", "qwen_sparse_attention"]
+    # Replay two complete calls, with capacity aligned to QSA's C4 groups.
+    context_length = max(8, 4 * ((2 * sequence_length + 3) // 4))
     native = Qwen4ExpForCausalLM(config).half().eval()
     checkpoint = tmp_path / "checkpoint"
     native.save_pretrained(checkpoint)
@@ -128,7 +147,7 @@ def test_real_streamed_graph_matches_standard_export(tmp_path, monkeypatch, sequ
         loader,
         tmp_path / "streamed",
         input_sequence_length=sequence_length,
-        cache_length=8,
+        cache_length=context_length,
         quant_config=quant,
         quant_device="cpu",
         use_fused_gdr=True,
@@ -139,7 +158,7 @@ def test_real_streamed_graph_matches_standard_export(tmp_path, monkeypatch, sequ
     _, _, sample = build_qwen4_exp_serving_sample_inputs(
         native,
         input_sequence_length=sequence_length,
-        context_length=8,
+        context_length=context_length,
     )
     standard = export_qwen4_exp_hmonnx(
         native,
@@ -147,7 +166,7 @@ def test_real_streamed_graph_matches_standard_export(tmp_path, monkeypatch, sequ
         sample_inputs=copy.deepcopy(sample),
         text_config=config,
         input_sequence_length=sequence_length,
-        cache_length=8,
+        cache_length=context_length,
         quant_config=quant,
         quant_device="cpu",
         use_fused_gdr=True,
@@ -156,24 +175,15 @@ def test_real_streamed_graph_matches_standard_export(tmp_path, monkeypatch, sequ
     )
     monkeypatch.setenv("TORCH_COMPILE_DISABLE", "1")
     for label, result in (("streamed", streamed), ("standard", standard)):
-        path = Path(
-            convert_qwen4_exp_kv_to_llm_cache(
-                result.onnx_path,
-                tmp_path / f"{label}_published" / "model.onnx",
-                context_length=8,
-                num_kv_heads=config.num_key_value_heads,
-                head_dim=config.head_dim,
-            )
-        )
+        path = Path(result.hmonnx_path)
+        if label == "standard":
+            assert path.read_bytes() == sdk_graphs[str(path)]
+        assert not (path.parent / "placeholders").exists()
         graph = onnx.load(path, load_external_data=False)
         assert not any(node.op_type == "PlaceHolder" for node in graph.graph.node)
-        cache_internal_names = {
-            name
-            for node in graph.graph.node
-            if node.op_type == "SparseAttentionSelectKV"
-            for name in node.input
-            if name.startswith(("present_past_", "present_qsa_indexer_"))
-        }
+        writers = {name for node in graph.graph.node if node.op_type == "KVcache" for name in node.output}
+        cache_internal_names = {name for node in graph.graph.node if node.op_type == "SparseAttentionSelectKV"
+                                for name in node.input if name in writers}
         assert cache_internal_names
         assert cache_internal_names <= {value.name for value in graph.graph.value_info}
         assert not cache_internal_names & {value.name for value in graph.graph.output}
@@ -183,7 +193,7 @@ def test_real_streamed_graph_matches_standard_export(tmp_path, monkeypatch, sequ
             assert writer.op_type == "KVcache"
             assert types[name] == types[writer.input[3]]
         onnx.checker.check_model(str(path))
-        actual = _replay_graph(path, native, config, sample, sequence_length)
+        actual = _replay_graph(path, native, config, sample, sequence_length, context_length)
         if label == "streamed":
             expected = actual
         else:
@@ -211,7 +221,7 @@ def test_real_streamed_graph_matches_standard_export(tmp_path, monkeypatch, sequ
     )
 
 
-def _replay_graph(path, native, config, sample, sequence_length):
+def _replay_graph(path, native, config, sample, sequence_length, context_length):
     from xhmodel_merak.exec_backends import HMONNXInferenceConfig
     from xhmodel_merak.xh_llm.models.qwen4_exp.cache_contract import (
         Qwen4ExpCacheContract,
@@ -255,7 +265,7 @@ def _replay_graph(path, native, config, sample, sequence_length):
             sequence_length,
         )
         controls = build_qsa_host_controls(
-            past, sequence_length, sequence_length, 8, 1, device="cpu", dtype=torch.float16
+            past, sequence_length, sequence_length, context_length, 1, device="cpu", dtype=torch.float16
         )
         feeds = {
             "inputs_embeds": native.model.embed_tokens(ids.long()).detach(),

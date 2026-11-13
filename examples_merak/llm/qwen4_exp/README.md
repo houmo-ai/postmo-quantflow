@@ -75,6 +75,11 @@ prefill、decode、verify 和两张草稿图复用同一固定量化 head，保�
 256K cache 容量保持原值。该实现没有启用 GPTQModel 量化阶段的 `offload_to_disk`。
 
 `export_manifest.json` 记录 `export_mode`，resume 必须保持原来的导出模式。
+
+发布时复用既有流式权重共享器，将目标 prefill/decode 中同类型、同形状、同内容的外置张量
+合并为同一份物理数据。两个目录各保留 `weights.bin`，通过硬链接共享；图文件名、算子、
+张量身份和内容保持原样。根目录 `ple/` 资源继续只保存一份。该步骤只整理外置存储，
+MTP 的图输出、验证长度、接受与重放策略、草稿加载和续导流程沿用本实现。
 文本模型与 GLM5.3 使用相同的静态 wrap → TorchFX frontend → quant → HMONNX 生命周期。
 普通、分块以及 MTP 导出都捕获模型 wrapper；RMSNorm、RoPE 和缓存更新由 wrapper
 直接表达，不再保留独立 Dynamo 导出器、内联恢复和全局捕获补丁。
@@ -92,7 +97,7 @@ prefill、decode、verify 和两张草稿图复用同一固定量化 head，保�
 图上的缓存算子统一为 `KVcache`（与 DeepSeek 的 XH2 导出一致），沿 axis=2 更新缓存；
 Python 模块仍为 SDK `LLMCache`，runtime 通过共享 `CacheTensor` 启用原地更新。
 `llm_cache_inplace_v1` 接口标识保持兼容，已有 `LLMCache` 节点的包仍可加载；
-prefill、decode 及可选 verify 共用主模型缓存，MTP 草稿另有独立缓存。
+prefill 与 decode 共用主模型缓存；MTP 的 decode 同时用于 verify，草稿另有独立缓存。
 正式发布的图保留 K/V、indexer cache 输入和图内 `KVcache` 输出，但不再将
 `present_past_key_cache_*`、`present_past_value_cache_*`、
 `present_qsa_indexer_key_cache_*`、`present_qsa_indexer_pool_cache_*` 暴露为整图输出。
@@ -138,10 +143,11 @@ prefill chunk 为 256，仅生成 `prefill/` 和 `decode/`。低内存模式复�
 仅供捕获使用的输入返回槽在 ONNX 序列化前移除。旧 `decode_validation` workflow 已移除。
 图和 `golden_meta_info.json` 直接写入输出根目录；Golden 通过 `dump_golden` 单独执行。
 
-新构建的 MTP 包使用运行契约 v4：`mtp_prefill/` 是与目标 prefill chunk 等长的独立草稿图，
-`mtp_decode/` 是单 token 草稿图，`decode_m5/` 是默认五 token 的目标 verify 图。
-加上目标 prefill/decode，共五张语言图。保留独立 decode1，以便拒绝后按原生 recurrent
-语义重放；Qwen4 的 HC、QSA、PLE、MRoPE 和草稿输入结构保持原生语义。
+full 与 MTP 按 Qwen3.5 的图集合分别导出。full 只有目标 `prefill/` 和单 token `decode/`。
+新构建的 MTP 包使用运行契约 v5：目标 `decode/` 默认宽度 5，同时用于 verify 和
+拒绝后的有效前缀重放；`mtp_prefill/` 与目标 prefill chunk 等长，`mtp_decode/` 为单 token。
+MTP 共四张语言图，不额外保留单步目标 decode 或 `decode_m5/`。
+Qwen4 的 HC、QSA、PLE、MRoPE 和草稿输入结构保持原生语义。
 
 草稿 prefill 按提示词的下一 token embedding 与前一位置的目标 HC 对齐，保留全部
 hyper-connection 流。目标每完成一个提示词块即预热对应草稿块，只保留跨块所需的最后一个
@@ -151,8 +157,8 @@ HC，不积累整段提示词 HC。prefill 和 decode 共用草稿自己的 K/V�
 每轮递归生成最多 `num_draft_tokens=N` 个候选；验证图默认宽度为 `N+1`，一次处理
 待提交 token 和所有候选。`export.model.verify_length` 可显式设为大于等于 `N+1` 的值，
 未使用槽由有效长度屏蔽。候选数受剩余输出长度和 EOS 限制；上下文尾部放不下完整
-验证图时切回单 token decode。需要新导出 m2 时同时设置 `num_draft_tokens: 1`；
-运行时继续加载旧 v2 单步草稿包和 v3 单候选 m2/m4 包。
+验证图时在同一 decode 图中只执行一个有效 token。需要两位置 decode 时设置
+`num_draft_tokens: 1`；运行时继续按旧包自身的图集合加载。
 verify 的 GDR 按 token 串联 recurrent 更新并显式返回状态，使缓存提交遵循单 token decode 的计算路径；
 主 prefill 继续使用 chunk 计算。导出、resume 和产物加载都会校验 verify 的这一约束。
 验证事务只备份本轮静态图宽度可能覆盖的 K/V 和压缩 QSA indexer 缓存区间；
@@ -244,15 +250,15 @@ output_ids = model.generate(**inputs, max_new_tokens=8, do_sample=False)
 
 `full` 变体选择 `visual prefill decode`；普通推理省略 `--golden`。
 Golden 采集实际 SDK 执行的输入、输出、中间张量，以及 K/V、recurrent、PLE 和 QSA 缓冲的执行前后状态。
-v3/v4 的 `--golden mtp` 同时要求实际执行三图，默认分别保存到 Golden 根目录的
-`mtp_prefill/step_N/`、`mtp_decode/step_N/`、`decode_m5/step_N/`；旧包沿用自身 verify 档位。
+`--golden mtp` 同时要求实际执行三图，分别保存到 Golden 根目录的
+`mtp_prefill/step_N/`、`mtp_decode/step_N/`、`decode/step_N/`；旧包沿用自身 verify 档位。
 三图的输入、输出及执行前后缓存各自记录，不能用单步草稿结果替代 prefill 或 verify。
 视觉采集本次媒体实际执行的 stem、block、merger 会话，并保留全部档位的完整容量基线。
 采集目录及完成状态记录在 `qwen4_golden_capture.json`；选定组件未执行时明确失败，
 例如提示词没有可对齐的 token 对，或生成立即遇到 EOS，无法采到所选图时应调整输入后重试。
 Golden 为运行输出，不作为源码提交或自动混入构建产物 Manifest。
 
-产物包含 prefill/decode、visual_m*、可选 mtp_prefill/mtp_decode/decode_m5 图、token embedding、tokenizer/processor、
+产物包含 prefill/decode、visual_m*、可选 mtp_prefill/mtp_decode 图、token embedding、tokenizer/processor、
 运行 metadata 和 `export_meta_info.json`；整体搬移后仍可加载。
 推理当前为 batch=1、greedy，使用 SDK V2；大型目标图启用自动 offload。
 NGram PLE 查表权重在 HMONNX 导出时默认使用 SEFP4：每 64 个元素共享指数，
@@ -261,8 +267,8 @@ NGram PLE 查表权重在 HMONNX 导出时默认使用 SEFP4：每 64 个元素�
 `ple_embeddings_<层号>` 输入接收 `[batch, sequence, ngram_heads, embedding_dim]`。
 NGram 哈希、Gather 和 SEFP4 解包反量化在 host 预处理执行；新图中没有
 `Qwen4PLESEFP4Gather`，也没有 PLE 查表或反量化节点。图内保留 PLE 后续计算和历史状态更新。
-v3/v4 的 verify 图沿用相同 Host PLE 输入契约，根 metadata 的 `qwen4_exp_ple`
-分别登记 `prefill`、`decode` 和实际 verify 档位（默认 `decode_m5`）的压缩资源。
+压缩表和指数只在包根 `ple/` 保存一份，根 metadata 的 `qwen4_exp_ple.manifest`
+指向 `ple/manifest.json`。prefill 与 decode 共用这个 manifest 和同一个 Host PLE 对象。
 运行时以 mmap 打开压缩表，先 Gather 压缩行，再仅反量化命中的行，结果传给图。
 Flash Next 的 `[320001536, 160]` 表按 192 列填充后约 30.4 GiB，FP16 原表约 95.37 GiB。
 `export.model.ple_quant_type: fp16` 可用于高精度对比；默认值为 `sefp4`。
@@ -286,9 +292,9 @@ Python 构建入口是 `xhmodel_merak.xh_llm.models.qwen4_exp.build_entry.build_
 `xhmodel_merak/model_integrations/qwen4_exp/`。
 
 独立 workflow 入口仍是 `qwen4_exp_workflow.py`，默认使用 RTN unified YAML，
-普通配置使用模型静态导出入口；MTP 配置显式选择 `export.model.export_mode: serving`。
-历史 AutoRound YAML 也通过静态模型入口导出 prefill/decode。
-`debug_scripts/export_qwen4_exp_serving_hmonnx.py` 是复用同一 serving 导出的诊断入口。
+普通和 MTP 配置均复用公共 workflow 和模型导出入口，MTP 由 `spec_decode_mode: mtp` 选择。
+普通图、verify、draft 和流式 block 使用公共模型生命周期完成量化与导出。
+`debug_scripts/export_qwen4_exp_serving_hmonnx.py` 通过同一模型入口导出诊断产物。
 
 构建与推理使用共同的 PyTorch 2.8 依赖；运行时需安装与 Python/PyTorch ABI 匹配的
 hsum 扩展。视频文件依赖现有 PyAV 包。旧视觉 Dynamo 路径的 PyTorch 2.11 限制

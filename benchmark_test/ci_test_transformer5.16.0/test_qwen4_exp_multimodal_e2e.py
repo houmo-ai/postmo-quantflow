@@ -277,7 +277,7 @@ def _export_package(root, *, mtp):
         quant_device="cpu",
         dtype="float16",
         use_fused_gdr=True,
-        ple_quant_type="fp16",
+        ple_quant_type="sefp4",
         visual_config=visual,
     )
     output = root / "export"
@@ -285,26 +285,16 @@ def _export_package(root, *, mtp):
         patch.setenv("HUGE_MODEL_EXPORT_ENABLED", "0")
         patch.setenv("TORCH_COMPILE_DISABLE", "0")
         if mtp:
-            from xhmodel_merak.xh_llm.models.qwen4_exp.serving_workflow import export_qwen4_exp_serving_package
-
             shared_head = {**QUANT, "nodes": {"lm_head": {"quant_type": "w8a16h1_sefp"}}}
             config.update(
                 spec_decode_mode="mtp",
                 quant_scheme=shared_head,
                 mtp_config={"quant_scheme": shared_head},
             )
-            export_qwen4_exp_serving_package(
-                model_dir=source.path,
-                output_dir=output,
-                model_config=config,
-                device="cpu",
-                low_memory=False,
-            )
-        else:
-            from xhmodel_merak.xh_llm.models.qwen4_exp.configuration_qwen4_exp import XHQwen4ExpModelConfig
-            from xhmodel_merak.xh_llm.models.qwen4_exp.qwen4_exp_model import XHQwen4ExpModel
+        from xhmodel_merak.xh_llm.models.qwen4_exp.configuration_qwen4_exp import XHQwen4ExpModelConfig
+        from xhmodel_merak.xh_llm.models.qwen4_exp.qwen4_exp_model import XHQwen4ExpModel
 
-            XHQwen4ExpModel(XHQwen4ExpModelConfig(**config)).export_hmonnx(str(output))
+        XHQwen4ExpModel(XHQwen4ExpModelConfig(**config)).export_hmonnx(str(output))
     meta = json.loads((output / "golden_meta_info.json").read_text())
     assert meta["qwen4_exp_vision"]["abi_version"] == 2
     assert meta["qwen4_exp_vision"]["layout"] == "components"

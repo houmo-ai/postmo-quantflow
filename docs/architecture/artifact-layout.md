@@ -29,18 +29,28 @@ Qwen4-Exp 视觉 ABI 2 在每个 `visual_m<token档位>/` 中保存 `stem.onnx`�
 `visual_gears.json` 逐组件登记包内相对路径、摘要与输入输出；公开清单使用
 `visual_m<档位>_<组件>` 键，逐一列出真实 HMONNX 及其外置资源。
 
-Qwen4-Exp 的 MTP 运行契约 v3 使用三张独立图：`mtp_prefill/` 的序列长度与目标
-prefill chunk 一致，`mtp_decode/` 的序列长度为 1，`decode_m2/` 的目标 verify
-长度为 2，对应每轮一个候选。运行 metadata 的 `spec_decode.draft` 声明两张草稿图与
-档位，`spec_decode.target` 声明 verify 图与档位；不能把同一单步图登记成三个角色。
-目标主模型的 `prefill/`、`decode/` 仍独立交付。三张目标图的外置 PLE 资源分别在
-`qwen4_exp_ple.prefill`、`decode`、`decode_m2` 登记，所有引用都相对发布根目录。
-草稿图不携带目标的 PLE 表。旧 v2 的单步 MTP 包按原契约读取，不伪报为 v3。
+Qwen4-Exp 按 Qwen3.5 的模式交付图集合：full 只有 `prefill/`、`decode/`；
+MTP 运行契约 v5 使用这两张目标图及 `mtp_prefill/`、`mtp_decode/`，共四张语言图。
+MTP 默认每轮四个候选，目标 `decode/` 的长度为候选数加一（默认 5），同时用于
+verify 和拒绝后的有效前缀重放，不再额外交付单步目标 decode 或 `decode_m5/`。
+草稿 prefill 与目标 prefill chunk 一致，草稿 decode 长度为 1。
+`spec_decode.draft` 和 `spec_decode.target` 分别声明草稿和目标图，head 量化参数一致。
+新导出直接生成原地 LLMCache ABI，不经 raw 图改写；旧包仍按自身运行契约读取。
 
-DeepSeek V4 和 GLM5.3 Flash 的统一导出将主模型 prefill/decode 中同类型、同形状、
+Host PLE 在包根的 `ple/` 中只保存一份压缩表和指数，`ple/manifest.json` 描述
+图末尾的 PLE embedding 输入、哈希参数及包内相对资源路径。表在前端捕获前按
+SEFP4 编码一次，所有目标阶段复用。根 `qwen4_exp_ple.manifest` 指向这个 JSON，
+草稿图不含目标 PLE 表。
+流式导出复用 Qwen3.5 的公共 placeholder 组装与清理，成功后组件内不保留
+`placeholders/`、逐 block 子图或 `*_raw/`。PLE manifest 是随包运行 JSON，须登记到
+公开清单与构建 Manifest。
+
+DeepSeek V4、GLM5.3 Flash 和 Qwen4-Exp 的统一导出将主模型 prefill/decode 中同类型、同形状、
 同内容的外部张量流式合并。两个阶段各保留 `weights.bin`，通过硬链接共享磁盘数据；
 图只引用阶段内的文件，不引入根目录权重或专用加载协议。DeepSeek 的 DSpark 组件
-保持独立，不参加这次整理。其他模型不自动启用该步骤。
+保持独立，不参加这次整理。Qwen4-Exp 的直接导出也执行该步骤，保持图文件名、
+算子与张量身份不变，并将相同的 Host PLE packed/exponent 表链接为同一份物理数据；
+草稿图保持独立。其他模型不自动启用该步骤。
 交付使用 `tar -cf model.tar -C <父目录> <产物目录>`，解包用 `tar -xf model.tar`；
 不要使用 `--hard-dereference`。普通 ZIP 不能保留这份硬链接共享关系。
 
@@ -62,11 +72,11 @@ DeepSeek V4 和 GLM5.3 Flash 的统一导出将主模型 prefill/decode 中同�
 无运行用途的浮点参考图不进入交付。保留必要 Host 常量；不要把 voice pack、归一化统计或
 lm_head 权重伪装成 tokenizer/embedding，它们仍在运行元数据与 Manifest 中登记。
 
-Qwen4-Exp v3 的 MTP Golden 沿真实运行分别保存 `mtp_prefill/step_N/`、
-`mtp_decode/step_N/` 和 `decode_m2/step_N/`，每步包含该图实际输入、输出及执行前后
+Qwen4-Exp v5 的 MTP Golden 沿真实运行分别保存 `mtp_prefill/step_N/`、
+`mtp_decode/step_N/` 和 `decode/step_N/`，每步包含该图实际输入、输出及执行前后
 缓存状态。选中 MTP 采集时，三图都执行后才能记录完成；缺少图或使用其他阶段的
 数据不能作为该角色的 Golden。Host PLE 的 packed/指数二进制、索引样本和 NumPy
-重放脚本随 Golden 一起保存，verify 对应 `decode_m2` 的 PLE 资源与输入样本。
+重放脚本随 Golden 一起保存，所有阶段共用根 `ple/` 的一份二进制资源。
 
 ## export_meta_info.json
 

@@ -51,7 +51,9 @@ class GoldenCapture:
         self._ple_manifests = copy_ple_resources(
             self.root, {
                 phase: host for phase, host in phases.items()
-                if phase in self.components or (_is_verify_phase(phase) and "mtp" in self.components)
+                if phase in self.components or (
+                    (phase == "decode" or _is_verify_phase(phase)) and "mtp" in self.components
+                )
             },
         )
         if self._ple_manifests:
@@ -151,7 +153,7 @@ def copy_ple_resources(root: Path, phases: Mapping[str, Any]) -> dict:
     """Package unmodified compressed rows for both serving and direct Golden."""
     from . import ple_demo
 
-    entries = {}
+    entries, copied = {}, set()
     for phase, host in phases.items():
         if host is None:
             continue
@@ -162,8 +164,10 @@ def copy_ple_resources(root: Path, phases: Mapping[str, Any]) -> dict:
         for spec in manifest["layers"]:
             for kind in ("packed", "exponent"):
                 source = host.root / spec[kind]["path"]
-                relative = Path(phase) / f"layer_{spec['layer_idx']}.{kind}.bin"
-                _link_or_copy(source, root / "ple" / relative)
+                relative = Path(f"layer_{spec['layer_idx']}.{kind}.bin")
+                if relative not in copied:
+                    _link_or_copy(source, root / "ple" / relative)
+                    copied.add(relative)
                 spec[kind]["path"] = relative.as_posix()
         filename = "manifest.json" if not entries else f"{phase}_manifest.json"
         entries[phase] = {"path": f"ple/{filename}", "manifest": manifest}

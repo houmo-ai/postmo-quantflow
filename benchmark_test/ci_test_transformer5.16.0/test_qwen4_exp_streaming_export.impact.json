@@ -8,12 +8,13 @@
         "xhmodel_merak/xh_llm/models/qwen4_exp/modeling.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/checkpoint.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/static_export.py",
-        "xhmodel_merak/xh_llm/models/qwen4_exp/serving_graph.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/golden_runtime.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/qwen4_exp_model.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/configuration_qwen4_exp.py",
         "xhmodel_merak/xh_llm/models/qwen4_exp/cache_contract.py",
-        "xhmodel_merak/xh_llm/big_hf_model_helper.py"
+        "xhmodel_merak/xh_llm/big_hf_model_helper.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/host_ple_inputs.py",
+        "xhmodel_merak/xh_llm/models/qwen4_exp/streaming_ple.py"
       ]
     }
   ]

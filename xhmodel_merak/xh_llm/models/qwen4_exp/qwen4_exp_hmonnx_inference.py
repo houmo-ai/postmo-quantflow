@@ -231,8 +231,8 @@ class Qwen4ExpServingDataPreprocess(BaseLLMInputProcessor):
             positions = torch.arange(past_seq_length, past_seq_length + seq_length).view(1, 1, -1).expand(3, 1, -1)
         if tuple(positions.shape) != (3, 1, seq_length):
             raise ValueError("Qwen4 position_ids must have shape [3, 1, supplied_sequence_length]")
-        if past_seq_length + self.input_sequence_length > self.state.context_length:
-            raise ValueError("Padded graph positions exceed context capacity")
+        if past_seq_length + current_input_length > self.state.context_length:
+            raise ValueError("Valid graph positions exceed context capacity")
         from ...mrope import prepare_mrope_position_inputs
 
         current_positions, pool_positions, next_group_start = prepare_mrope_position_inputs(
@@ -285,6 +285,8 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
         self.verify_model = None
         super().__init__(meta_info, **kwargs)
         self.embed_tokens.to(self.device)
+        if getattr(self, "_qwen4_shared_verify", False):
+            self.verify_model = self.decode_model
         if getattr(self, "_qwen4_verify_graph", None) is not None:
             self.verify_model = Qwen4ExpServingGraphModel(
                 self._qwen4_verify_path, onnx_graph=self._qwen4_verify_graph,
@@ -433,17 +435,19 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
 
     def _load_hmonnx_graphs(self, prefill_hmonnx, decode_hmonnx):
         self._backend = qwen4_exp_execution_backend(self._backend)
+        from pathlib import Path
+
         from .host_ple_inputs import HostPLEInputs
 
+        prefill_ple = HostPLEInputs.from_graph(prefill_hmonnx)
+        shared_ple = (Path(prefill_hmonnx).parent.parent / "ple" / "manifest.json").is_file()
         self.external_ple = {
-            "prefill": HostPLEInputs.from_graph(prefill_hmonnx),
-            "decode": HostPLEInputs.from_graph(decode_hmonnx),
+            "prefill": prefill_ple,
+            "decode": prefill_ple if shared_ple else HostPLEInputs.from_graph(decode_hmonnx),
         }
         spec = self._qwen4_spec
         if spec is None or spec.get("mode") != "mtp":
             return super()._load_hmonnx_graphs(prefill_hmonnx, decode_hmonnx)
-        from pathlib import Path
-
         from xhmodel_merak.exec_backends import MultiHMONNXLoader
 
         draft_path = Path(spec["draft"]["decode_hmonnx"])
@@ -461,11 +465,17 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
                 {"verify_length": spec["target"]["verify_chunk_length"],
                  "num_draft_tokens": spec.get("num_draft_tokens", default_count)}
             )
-            self._qwen4_verify_phase = spec.get("target_verify_graph", mtp_verify_phase(self._qwen4_verify_length))
-            if self._qwen4_verify_phase != mtp_verify_phase(self._qwen4_verify_length):
+            self._qwen4_verify_phase = spec.get("target_verify_graph", mtp_verify_phase(
+                self._qwen4_verify_length, runtime_version=spec.get("runtime_contract_version", 2),
+            ))
+            if self._qwen4_verify_phase != mtp_verify_phase(
+                self._qwen4_verify_length, runtime_version=spec.get("runtime_contract_version", 2),
+            ):
                 raise ValueError("Qwen4 target verify role disagrees with its graph length")
-            paths["verify"] = self._qwen4_verify_path
-            self.external_ple[self._qwen4_verify_phase] = HostPLEInputs.from_graph(self._qwen4_verify_path)
+            self._qwen4_shared_verify = self._qwen4_verify_path == paths["decode"]
+            if not self._qwen4_shared_verify:
+                paths["verify"] = self._qwen4_verify_path
+                self.external_ple[self._qwen4_verify_phase] = HostPLEInputs.from_graph(self._qwen4_verify_path)
         loader = MultiHMONNXLoader(paths)
         self._qwen4_mtp_graph = loader.graphs.pop("mtp")
         self._qwen4_mtp_prefill_graph = loader.graphs.pop("mtp_prefill", None)
@@ -491,16 +501,20 @@ class XHQwen4ExpHMONNXModel(TextLLMHMONNXModel):
     def set_decode(self):
         self._verify_active = False
         super().set_decode()
+        if getattr(self, "_qwen4_shared_verify", False):
+            self.set_input_sequence_length(self._qwen4_verify_length)
 
     def set_verify(self):
         if self.verify_model is None:
-            raise ValueError("Package has no independent target verify graph")
+            raise ValueError("Package has no target verify graph")
         self._llm_prefill = False
         self._verify_active = True
         self.set_input_sequence_length(self._qwen4_verify_length)
 
     def get_input_sequence_length(self):
-        if getattr(self, "_verify_active", False):
+        if getattr(self, "_verify_active", False) or (
+            not self.is_prefill() and getattr(self, "_qwen4_shared_verify", False)
+        ):
             return self._qwen4_verify_length
         return super().get_input_sequence_length()
 

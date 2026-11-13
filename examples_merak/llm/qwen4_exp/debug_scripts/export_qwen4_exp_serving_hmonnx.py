@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from xhmodel_merak.xh_llm.models.qwen4_exp.serving_workflow import export_qwen4_exp_serving_package
+from xhmodel_merak.xh_llm.models.qwen4_exp.package_export import export_qwen4_exp_serving_package
 
 
 def _parse_args() -> argparse.Namespace:

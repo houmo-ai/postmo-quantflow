@@ -164,7 +164,8 @@ def test_static_prefill_decode_retains_real_gdr_qsa_ple_states():
             return wrapper(*processor({"input_ids": ids, "past_seq_length": past}))
 
     prefill = stage(native, 5, cache, prompt, 0)
-    names = ["logits", *(f"present_{spec.name}" for spec in contract.tensors)]
+    names = ["logits", *(f"present_{spec.name}" for spec in contract.tensors
+                         if spec.state_kind not in {"kv_key", "kv_value", "qsa_indexer_key"})]
     cache.commit(prefill, names)
     for spec in contract.tensors:
         assert torch.count_nonzero(cache.tensors[spec.name]) > 0, spec.name
@@ -192,8 +193,8 @@ def test_static_decode_rejects_exhausted_context_before_cache_allocation(capacit
     assert not state._cache_initialized
 
 
-@pytest.mark.parametrize("export_mode", ["static", "serving"])
-def test_ordinary_workflow_uses_real_model_entry_and_root_metadata(monkeypatch, tmp_path, export_mode):
+@pytest.mark.parametrize("spec_decode_mode", [None, "mtp"])
+def test_workflow_uses_real_model_entry_and_root_metadata(monkeypatch, tmp_path, spec_decode_mode):
     import json
 
     from xhmodel_merak.xh_llm.models.qwen4_exp.configuration_qwen4_exp import XHQwen4ExpModelConfig
@@ -207,7 +208,7 @@ def test_ordinary_workflow_uses_real_model_entry_and_root_metadata(monkeypatch, 
     native.config.save_pretrained(checkpoint)
     workflow = Qwen4ExpWorkflow.from_config(str(source), str(CONFIG))
     workflow.workflow_config.export["model"].update(
-        context_max_length=8, prefill_chunk_length=4, visual_config=None, export_mode=export_mode,
+        context_max_length=8, prefill_chunk_length=4, visual_config=None, spec_decode_mode=spec_decode_mode,
     )
     observed = []
 
@@ -221,6 +222,8 @@ def test_ordinary_workflow_uses_real_model_entry_and_root_metadata(monkeypatch, 
         assert model.config.context_max_length == 8
         assert model.config.prefill_chunk_length == 4
         assert model.config.ple_quant_type == "sefp4"
+        assert model.config.spec_decode_mode == spec_decode_mode
+        assert model.config.mtp_source_dir == str(source)
         observed.append(model)
         metadata = {"model_config": model.config.to_dict(), "qwen4_exp_serving": {}}
         Path(directory, "golden_meta_info.json").write_text(json.dumps(metadata))
@@ -238,16 +241,6 @@ def test_ordinary_workflow_uses_real_model_entry_and_root_metadata(monkeypatch, 
     assert json.loads((output / "merak_config.json").read_text())["disable_prefix_caching"] is True
     assert not list(output.glob("hmquant*"))
     assert not (output / "golden").exists()
-
-
-def test_removed_decode_validation_mode_fails_without_creating_output(tmp_path):
-    source, output = tmp_path / "source", tmp_path / "export"
-    source.mkdir()
-    workflow = Qwen4ExpWorkflow.from_config(str(source), str(CONFIG))
-    workflow.workflow_config.export["model"]["export_mode"] = "decode_validation"
-    with pytest.raises(ValueError, match="Unknown.*decode_validation"):
-        workflow.export(QuantResult(raw_model_dir=str(source), skipped=True), str(output), "cpu")
-    assert not output.exists()
 
 
 @pytest.mark.parametrize("algorithm, method", [

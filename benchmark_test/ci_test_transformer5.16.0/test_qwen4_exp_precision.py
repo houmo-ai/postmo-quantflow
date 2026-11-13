@@ -57,6 +57,24 @@ def _match(name: str):
     return None
 
 
+@pytest.mark.parametrize("qwen4", [False, True])
+def test_model_config_does_not_mutate_reused_quant_scheme(qwen4):
+    import copy
+
+    from xhmodel_merak.xh_llm.models.qwen4_exp.configuration_qwen4_exp import XHQwen4ExpModelConfig
+    from xhmodel_merak.xh_llm.types import BaseLLMModelConfig
+
+    scheme = {"quant_type": "w8a8h1_sefp", "ops": {"MoeBlock": {"quant_type": "w4a8h0_ssfp"}}}
+    original = copy.deepcopy(scheme)
+    cls = XHQwen4ExpModelConfig if qwen4 else BaseLLMModelConfig
+    first = cls(model_name="config_ownership", quant_scheme=scheme)
+    second = cls(model_name="config_ownership", quant_scheme=scheme)
+    assert scheme == original
+    assert first.quant_scheme.to_dict() == second.quant_scheme.to_dict()
+    if qwen4:
+        assert first._export_quant_config == second._export_quant_config == original
+
+
 def test_precision_contract_matches_qwen35_like_target():
     assert QWEN4_EXP_PROFILE.base_bits == 8
     assert QWEN4_EXP_PROFILE.expert_bits == 4

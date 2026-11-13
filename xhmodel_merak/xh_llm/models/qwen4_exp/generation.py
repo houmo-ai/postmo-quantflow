@@ -188,7 +188,9 @@ def create_mtp_runtime(model, *, meta_file=None, device_map=None, capture=None):
     if version >= 3 and capture is not None and "mtp" in capture.components:
         from .mtp_contract import mtp_verify_phase
 
-        verify_phase = spec.get("target_verify_graph", mtp_verify_phase(model._qwen4_verify_length))
+        verify_phase = spec.get("target_verify_graph", mtp_verify_phase(
+            model._qwen4_verify_length, runtime_version=version,
+        ))
         capture.required_graphs.update({"mtp_prefill", "mtp_decode", verify_phase})
     existing = getattr(model, "_qwen4_mtp_runtime", None)
     if existing is not None and getattr(existing, "session", True) is not None:

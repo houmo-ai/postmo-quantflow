@@ -165,7 +165,6 @@ def test_gdr_merged_projection_feeds_convolution_without_qkv_roundtrip(length, v
 
     from test_qwen4_exp_workflow_quant_adapter import _tiny_stateful_model
 
-    from xhmodel_merak.xh_llm.models.qwen3_5._hybrid_gated_delta_net import HybridGatedDeltaNetMixin
     from xhmodel_merak.xh_llm.models.qwen4_exp.modeling import adapt_qwen4_exp_rms_norms
     from xhquant.api import FrontendType, to_frontend_graph
     from xhquant.core import CacheTensor
@@ -195,16 +194,6 @@ def test_gdr_merged_projection_feeds_convolution_without_qkv_roundtrip(length, v
         CacheTensor(torch.zeros(1, 2 * value_head_repeat, 4, 4)),
         torch.tensor([length], dtype=torch.int32), torch.ones(1, length),
     )
-    with torch.no_grad():
-        expected = HybridGatedDeltaNetMixin.forward(
-            layer, args[0], args[1].clone(), args[2].clone(), args[4], args[3],
-        )
-        actual = layer._forward_merged(args[0], args[1].clone(), args[2].clone(), args[4], args[3])
-    for observed, reference in zip(actual, expected, strict=True):
-        if reference is None:
-            assert observed is None
-        else:
-            torch.testing.assert_close(observed, reference)
     with qwen4_exp_xhquant_extension_scope():
         frontend = to_frontend_graph(Step().eval(), FrontendType.TorchFX, args)
     projection, = [node for node in frontend.graph.nodes
@@ -296,15 +285,20 @@ def test_static_wrapper_torchfx_preserves_logits_and_every_state(assistant, leng
             return (*[value.clone() for value in fixed], (*caches, *[value.clone() for value in controls]))
 
         with torch.no_grad():
-            expected = tuple(value.detach().clone() for value in wrapper(*inputs()))
+            eager_inputs, traced_inputs = inputs(), inputs()
+            expected = tuple(value.detach().clone() for value in wrapper(*eager_inputs))
             with qwen4_exp_xhquant_extension_scope():
                 frontend = to_frontend_graph(wrapper, FrontendType.TorchFX, inputs())
-            actual = frontend(*unfold_args(inputs()))
-        assert len(actual) == len(expected) == len(wrapper.cache_contract.tensors) + (2 if assistant else 1)
+            actual = frontend(*unfold_args(traced_inputs))
+        core = wrapper.core if assistant else wrapper
+        assert len(actual) == len(expected) == len(core.output_cache_specs()) + (2 if assistant else 1)
         for output, reference in zip(actual, expected, strict=True):
             # Frontend affine/constant fusion changes FP32 rounding slightly;
             # integer history and cache dtypes still have to agree exactly.
             torch.testing.assert_close(output, reference, rtol=1e-5, atol=3e-6)
+        for index, spec in enumerate(wrapper.cache_contract.tensors):
+            if spec.state_kind in {"kv_key", "kv_value", "qsa_indexer_key"}:
+                torch.testing.assert_close(traced_inputs[-1][index], eager_inputs[-1][index], rtol=1e-5, atol=3e-6)
 
 
 def test_packed_moe_uses_standard_frontend_without_capture_adapter(tmp_path):

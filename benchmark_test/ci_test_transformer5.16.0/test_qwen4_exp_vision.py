@@ -197,19 +197,9 @@ def test_native_image_processor_preserves_normalization_and_respects_exported_ca
     assert (inputs["input_ids"] == 1).sum() == inputs["image_grid_thw"].prod() // 4
 
 
-def test_real_visual_component_export_cpu_matches_native_and_flat_gears(tmp_path, monkeypatch):
-    from xhmodel_merak.xh_llm.models.qwen4_exp import vision_export
-
+def test_real_visual_component_export_matches_native_and_flat_gears(tmp_path, monkeypatch):
     monkeypatch.setenv("ENABLE_HMINFERENCE_V2", "1")
     native = _tiny_checkpoint(tmp_path / "source")
-    devices = []
-    original_ptq = vision_export.ptq_quantize
-
-    def tracked_ptq(graph, data, precision, execution_devices, **kwargs):
-        devices.append([torch.device(device).type for device in execution_devices])
-        return original_ptq(graph, data, precision, execution_devices, **kwargs)
-
-    monkeypatch.setattr(vision_export, "ptq_quantize", tracked_ptq)
     result = export_qwen4_exp_visual(
         str(tmp_path / "source"),
         tmp_path / "export",
@@ -224,7 +214,6 @@ def test_real_visual_component_export_cpu_matches_native_and_flat_gears(tmp_path
     assert result["abi_version"] == 2
     assert result["layout"] == "components"
     assert result["hmonnx"] is None
-    assert devices == [["cpu"]] * 6
     assert result["input_names"] == [
         "pixel_values",
         "position_ids",
@@ -377,8 +366,6 @@ def test_legacy_whole_gear_loader_preserves_sdk_execution_and_request_capture(tm
 
 
 def test_standard_model_visual_export_translates_legacy_geometry_and_metadata(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     from xhmodel_merak.xh_llm.models.qwen4_exp.configuration_qwen4_exp import XHQwen4ExpModelConfig
     from xhmodel_merak.xh_llm.models.qwen4_exp.qwen4_exp_model import XHQwen4ExpModel
 
@@ -407,9 +394,7 @@ def test_standard_model_visual_export_translates_legacy_geometry_and_metadata(tm
     model = XHQwen4ExpModel(config)
     output = tmp_path / "export"
     monkeypatch.chdir(tmp_path)
-    info = SimpleNamespace(exported_dir="export", meta=SimpleNamespace())
-    model._export_visual_hmonnx_impl(info)
-    visual = info.meta.qwen4_exp_vision
+    visual = model.visual.export_hmonnx("export", write_standalone_metadata=False)
     assert visual.gear_manifest == "visual_gears.json"
     assert visual.hmonnx is None
     assert not (output / "visual_meta_info.json").exists()

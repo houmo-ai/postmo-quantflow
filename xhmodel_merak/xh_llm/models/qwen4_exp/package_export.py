@@ -1,4 +1,7 @@
-"""Reusable Qwen4-Exp serving export orchestration."""
+"""Model-owned phase scheduling and resumable Qwen4 package publication.
+
+Components use the common XHSubModel frontend, PTQ and HMONNX lifecycle.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +28,6 @@ from .cache_contract import QWEN4_EXP_LLM_CACHE_ABI, QWEN4_EXP_PAGE_CACHE_ABI, r
 from .checkpoint import load_qwen4_exp_model_for_export
 from .mtp_contract import mtp_verify_phase, resolve_mtp_num_draft_tokens, resolve_mtp_verify_length
 from .precision import DEFAULT_PLE_QUANT_TYPE, resolve_ple_quant_type
-from .serving_graph import convert_qwen4_exp_kv_to_llm_cache, convert_qwen4_exp_kv_to_page_cache
 from .static_export import build_qwen4_exp_serving_sample_inputs, export_qwen4_exp_hmonnx
 
 
@@ -39,7 +41,7 @@ def _graph_summary(path: str | Path) -> dict[str, int]:
     return counts
 
 
-def _validate_page_graph(
+def _validate_graph(
     path: str | Path,
     *,
     expected_attention_layers: int,
@@ -47,7 +49,7 @@ def _validate_page_graph(
     expected_hc_width: int | None = None,
     expected_recurrent_layers: int | None = None,
     require_fused_recurrent: bool = True,
-    cache_abi: str = QWEN4_EXP_PAGE_CACHE_ABI,
+    cache_abi: str = QWEN4_EXP_LLM_CACHE_ABI,
 ) -> dict[str, int]:
     import onnx
 
@@ -257,7 +259,7 @@ def _load_fixed_head_checkpoint(root, record, bindings):
     return head
 
 
-def export_qwen4_exp_serving_package(
+def _export_qwen4_exp_package(
     *,
     model_dir: str | Path,
     output_dir: str | Path,
@@ -280,6 +282,8 @@ def export_qwen4_exp_serving_package(
     if low_memory is None:
         low_memory = is_huge_model_export_enabled(os.environ.get(HUGE_MODEL_EXPORT_ENABLED_ENV, "1"))
     export_mode = "low_memory" if low_memory else "standard"
+    if model_config.get("cache_abi", QWEN4_EXP_LLM_CACHE_ABI) != QWEN4_EXP_LLM_CACHE_ABI:
+        raise ValueError("Qwen4 export uses llm_cache_inplace_v1; PageKV lowering belongs to the serving backend")
 
     ple_quant_type = resolve_ple_quant_type(model_config.get("ple_quant_type", DEFAULT_PLE_QUANT_TYPE))
     if low_memory and ple_quant_type != "sefp4":
@@ -302,39 +306,6 @@ def export_qwen4_exp_serving_package(
         raise ValueError("Require 4 <= context_max_length and 1 <= prefill_chunk_length <= context_max_length")
     if enable_mtp and context_length < verify_length:
         raise ValueError(f"Qwen4 MTP requires context_max_length >= verify length {verify_length}")
-    if not enable_mtp and phase == "both" and not resume and cache_abi == QWEN4_EXP_LLM_CACHE_ABI:
-        from xhmodel_merak._environment import scoped_environment
-
-        from .configuration_qwen4_exp import XHQwen4ExpModelConfig
-        from .qwen4_exp_model import XHQwen4ExpModel
-
-        root = Path(output_dir).expanduser().resolve()
-        if root.exists() and (not root.is_dir() or any(root.iterdir())):
-            raise FileExistsError(f"refusing to overwrite existing output: {root}")
-        config = dict(model_config)
-        config.update(hf_model=str(model_dir), model_name=model_name or config.get("model_name", "qwen3_8_flash_next"))
-        config.pop("export_mode", None)
-        if device_map is not None:
-            config["device_map"] = device_map
-        model_entry = XHQwen4ExpModel(XHQwen4ExpModelConfig(**config))
-        model_entry.to(device=device)
-        with scoped_environment({HUGE_MODEL_EXPORT_ENABLED_ENV: "1" if low_memory else "0"}):
-            model_entry.export_hmonnx(str(root))
-        meta = json.loads((root / "golden_meta_info.json").read_text())
-        manifest = {
-            "status": "complete",
-            "export_mode": export_mode,
-            "source_model": str(Path(model_dir).resolve()),
-            "output_dir": str(root),
-            "meta": str(root / "golden_meta_info.json"),
-            "context_length": context_length,
-            "prefill_chunk_length": prefill_length,
-            "ple_quant_type": ple_quant_type,
-            "cache_abi": cache_abi,
-            "graphs": {name: {"page_hmonnx": str(root / meta[name + "_hmonnx"])} for name in ("prefill", "decode")},
-        }
-        _write_manifest(root / "export_manifest.json", manifest)
-        return manifest
 
     args = SimpleNamespace(
         model_dir=model_dir,
@@ -348,9 +319,10 @@ def export_qwen4_exp_serving_package(
         resume=resume,
     )
     output_dir = Path(args.output_dir).expanduser().resolve()
-    if output_dir.exists() and not args.resume and (not output_dir.is_dir() or any(output_dir.iterdir())):
-        raise FileExistsError(f"refusing to overwrite existing output: {output_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
+    from .streaming_ple import PLEExportResources
+
+    ple_resources = PLEExportResources(output_dir, resume=resume)
     started = time.time()
     manifest_path = output_dir / "export_manifest.json"
     previous_manifest: dict = {}
@@ -438,26 +410,23 @@ def export_qwen4_exp_serving_package(
             model.cpu()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
         text_model = extract_qwen4_exp_text_model(model)
         text_config = extract_qwen4_exp_text_config(model)
         graph_manifest: dict[str, dict] = dict(previous_manifest.get("graphs", {}))
-        expected_page_layers = sum(
+        expected_attention_layers = sum(
             str(layer_type) in {"qwen_sparse_attention", "full_attention"} for layer_type in text_config.layer_types
         )
         requested_phases = ("prefill", "decode") if args.phase == "both" else (args.phase,)
-        if enable_mtp and args.phase in {"decode", "both"}:
-            requested_phases += (verify_phase,)
-        phase_lengths = {"prefill": int(args.prefill_chunk_length), "decode": 1}
-        if enable_mtp:
-            phase_lengths[verify_phase] = verify_length
+        phase_lengths = {"prefill": int(args.prefill_chunk_length), "decode": verify_length if enable_mtp else 1}
 
         for phase in requested_phases:
             sequence_length = phase_lengths[phase]
             previous_phase = graph_manifest.get(phase)
             if args.resume and previous_phase is not None:
-                counts = _validate_page_graph(
-                    previous_phase["page_hmonnx"],
-                    expected_attention_layers=expected_page_layers,
+                counts = _validate_graph(
+                    previous_phase["hmonnx"],
+                    expected_attention_layers=expected_attention_layers,
                     cache_abi=cache_abi,
                     expected_sequence_length=sequence_length,
                     expected_hc_width=int(text_config.hidden_size * text_config.hc_count) if enable_mtp else None,
@@ -470,11 +439,11 @@ def export_qwen4_exp_serving_package(
                 )
                 previous_phase["op_counts"] = counts
                 previous_phase["resume_validation"] = "passed"
-                print(f"reusing validated {phase} artifact: {previous_phase['page_hmonnx']}", flush=True)
+                print(f"reusing validated {phase} artifact: {previous_phase['hmonnx']}", flush=True)
                 continue
 
             phase_started = time.time()
-            raw_dir = output_dir / f"{phase}_raw"
+            phase_dir = output_dir / phase
             phase_options = dict(
                 quant_config=quant_config,
                 ple_quant_type=ple_quant_type,
@@ -484,6 +453,7 @@ def export_qwen4_exp_serving_package(
                 use_fused_gdr=bool(export_config.get("use_fused_gdr", False)),
                 linear_attention_mode="recurrent" if phase == verify_phase else None,
                 return_hidden_states=bool(export_config.get("return_hidden_states", False)),
+                ple_resources=ple_resources,
             )
             if enable_mtp:
                 phase_options.update(
@@ -493,7 +463,7 @@ def export_qwen4_exp_serving_package(
             if low_memory:
                 from .streaming_export import export_qwen4_exp_streamed_phase
 
-                result = export_qwen4_exp_streamed_phase(loader, raw_dir, **phase_options)
+                result = export_qwen4_exp_streamed_phase(loader, phase_dir, **phase_options)
             else:
                 _, _, sample_inputs = build_qwen4_exp_serving_sample_inputs(
                     model,
@@ -503,7 +473,7 @@ def export_qwen4_exp_serving_package(
                 )
                 result = export_qwen4_exp_hmonnx(
                     model,
-                    raw_dir,
+                    phase_dir,
                     text_config=text_config,
                     sample_inputs=sample_inputs,
                     batch_size=1,
@@ -514,24 +484,10 @@ def export_qwen4_exp_serving_package(
                     raise ValueError("MTP source tensors changed during target head export")
                 fixed_quantized_head = result.fixed_quantized_head
                 fixed_head_record = _save_fixed_head_checkpoint(output_dir, fixed_quantized_head, head_bindings)
-            page_dir = output_dir / phase
-            suffix = "llm_cache" if cache_abi == QWEN4_EXP_LLM_CACHE_ABI else "page_kv"
-            page_path = page_dir / f"qwen4_exp_{phase}_{suffix}.onnx"
-            converter = (
-                convert_qwen4_exp_kv_to_llm_cache
-                if cache_abi == QWEN4_EXP_LLM_CACHE_ABI
-                else convert_qwen4_exp_kv_to_page_cache
-            )
-            converter(
-                result.hmonnx_path,
-                page_path,
-                context_length=int(args.context_length),
-                num_kv_heads=int(text_config.num_key_value_heads),
-                head_dim=int(text_config.head_dim),
-            )
-            counts = _validate_page_graph(
-                page_path,
-                expected_attention_layers=expected_page_layers,
+            graph_path = Path(result.hmonnx_path)
+            counts = _validate_graph(
+                graph_path,
+                expected_attention_layers=expected_attention_layers,
                 cache_abi=cache_abi,
                 expected_sequence_length=sequence_length,
                 expected_hc_width=int(text_config.hidden_size * text_config.hc_count) if enable_mtp else None,
@@ -543,12 +499,12 @@ def export_qwen4_exp_serving_package(
                 require_fused_recurrent=bool(export_config.get("use_fused_gdr", False)),
             )
             graph_manifest[phase] = {
-                "raw_hmonnx": result.hmonnx_path,
-                "page_hmonnx": str(page_path),
+                "hmonnx": str(graph_path),
                 "op_counts": counts,
                 "elapsed_seconds": time.time() - phase_started,
                 "input_sequence_length": sequence_length,
             }
+            Path(result.io_manifest_path).unlink()
             partial_manifest = {
                 "status": "partial",
                 "export_mode": export_mode,
@@ -607,9 +563,9 @@ def export_qwen4_exp_serving_package(
             return partial_manifest
 
         for phase in sorted(required_phases):
-            graph_manifest[phase]["op_counts"] = _validate_page_graph(
-                graph_manifest[phase]["page_hmonnx"],
-                expected_attention_layers=expected_page_layers,
+            graph_manifest[phase]["op_counts"] = _validate_graph(
+                graph_manifest[phase]["hmonnx"],
+                expected_attention_layers=expected_attention_layers,
                 cache_abi=cache_abi,
                 expected_sequence_length=phase_lengths[phase],
                 expected_hc_width=int(text_config.hidden_size * text_config.hc_count) if enable_mtp else None,
@@ -662,7 +618,7 @@ def export_qwen4_exp_serving_package(
                         source = Path(mtp_source_dir or args.model_dir)
                         source_config = json.loads((source / "config.json").read_text())
                         config = mtp_text_config(source_config.get("text_config", source_config))
-                        _validate_page_graph(published, expected_attention_layers=1, cache_abi=cache_abi)
+                        _validate_graph(published, expected_attention_layers=1, cache_abi=cache_abi)
                         graph = onnx.load(published, load_external_data=False).graph
                         ports = {
                             value.name: [dim.dim_value for dim in value.type.tensor_type.shape.dim]
@@ -725,14 +681,14 @@ def export_qwen4_exp_serving_package(
             hf_model_dir=args.model_dir,
             text_config=text_config,
             model_config=export_config,
-            prefill_hmonnx=graph_manifest["prefill"]["page_hmonnx"],
-            decode_hmonnx=graph_manifest["decode"]["page_hmonnx"],
+            prefill_hmonnx=graph_manifest["prefill"]["hmonnx"],
+            decode_hmonnx=graph_manifest["decode"]["hmonnx"],
             embedding_state=embedding,
             pad_token_id=getattr(text_config, "pad_token_id", None),
             enable_page_attention=cache_abi == QWEN4_EXP_PAGE_CACHE_ABI,
             visual_metadata=visual_metadata,
             mtp_metadata=mtp_metadata,
-            verify_hmonnx=graph_manifest[verify_phase]["page_hmonnx"] if enable_mtp else None,
+            verify_hmonnx=graph_manifest[verify_phase]["hmonnx"] if enable_mtp else None,
         )
         manifest = {
             "status": "complete",
@@ -759,10 +715,38 @@ def export_qwen4_exp_serving_package(
             "elapsed_seconds": time.time() - started,
         }
         _write_manifest(manifest_path, manifest)
-        return manifest
+        from .shared_weights import publish_qwen4_exp_shared_weights
+
+        publish_qwen4_exp_shared_weights(output_dir)
+        return json.loads(manifest_path.read_text())
 
     finally:
         del model
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+
+def export_qwen4_exp_serving_package(
+    *, model_dir, output_dir, model_config, device, device_map=None,
+    model_name=None, mtp_source_dir=None, phase="both", resume=False, low_memory=None,
+):
+    """CLI adapter to the same model entry used by BaseLLMWorkflow."""
+    from .configuration_qwen4_exp import XHQwen4ExpModelConfig
+    from .qwen4_exp_model import XHQwen4ExpModel
+
+    root = Path(output_dir).expanduser().resolve()
+    if root.exists() and not resume and (not root.is_dir() or any(root.iterdir())):
+        raise FileExistsError(f"refusing to overwrite existing output: {root}")
+    config = dict(model_config)
+    config.update(
+        hf_model=str(model_dir), quant_device=device,
+        model_name=model_name or config.get("model_name", "qwen3_8_flash_next"),
+    )
+    if device_map is not None:
+        config["device_map"] = device_map
+    if mtp_source_dir is not None:
+        config["mtp_source_dir"] = str(mtp_source_dir)
+    model = XHQwen4ExpModel(XHQwen4ExpModelConfig(**config))
+    model.export_hmonnx(str(root), phase=phase, resume=resume, low_memory=low_memory)
+    return json.loads((root / "export_manifest.json").read_text())

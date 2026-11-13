@@ -40,7 +40,6 @@ export:
     # Host PLE table precision is independent of the W8A8 graph scheme.
     ple_quant_type: sefp4
     model_name: qwen3_8_flash_next
-    export_mode: serving
     device_map: cpu
     batch_size: 1
     context_max_length: 262144

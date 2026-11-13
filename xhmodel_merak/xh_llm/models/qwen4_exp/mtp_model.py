@@ -137,7 +137,8 @@ class Qwen4ExpMTPModel(Qwen4ExpPreTrainedModel):
 class Qwen4ExpMTPExportWrapper(nn.Module):
     """Draft ABI: embedding, target HC, lengths, and its own cache.
 
-    Outputs are logits, assistant HC, then cache tensors in contract order.
+    Outputs are logits, assistant HC, then functional state in contract order.
+    K/V and compressed-index caches remain in-place inputs.
     The assistant configuration never creates a PLE layer.
     """
 

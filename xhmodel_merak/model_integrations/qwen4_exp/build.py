@@ -14,7 +14,9 @@ from xhmodel_merak.model_catalog.registry import get_recipe
 from xhmodel_merak.model_integrations.autoregressive.build import (
     _validate_speculative_assets,
     package_runtime,
-    sanitize_artifact,
+)
+from xhmodel_merak.model_integrations.autoregressive.build import (
+    sanitize_artifact as sanitize_autoregressive_artifact,
 )
 from xhmodel_merak.model_integrations.autoregressive.build import (
     validate_artifact as validate_autoregressive_artifact,
@@ -94,13 +96,28 @@ def normalize_export(stage_path: Path, export_result: Any, plan: BuildPlan) -> N
             "Qwen4 serving export must publish its metadata at the build staging root",
             model=plan.model_id,
         )
+    from xhmodel_merak.xh_llm.models.qwen4_exp.shared_weights import publish_qwen4_exp_shared_weights
+
+    publish_qwen4_exp_shared_weights(stage_path)
+
+
+def sanitize_artifact(stage_path: Path, plan: BuildPlan) -> None:
+    metadata_path = stage_path / "golden_meta_info.json"
+    metadata = json.loads(metadata_path.read_text())
+    resources = validate_external_ple_contract(stage_path, metadata)
+    if resources:
+        # The shared publisher retains files referenced by runtime metadata.
+        # Resolve Qwen4's Host PLE manifest here, without extending that API.
+        metadata["qwen4_exp_runtime_assets"] = sorted({entry["path"] for entry in resources.values()})
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    sanitize_autoregressive_artifact(stage_path, plan)
 
 
 def validate_artifact(stage_path: Path, plan: BuildPlan) -> dict[str, Any]:
     def speculative_validator(root, metadata, resolved_plan):
         spec = metadata.get("spec_decode")
-        if isinstance(spec, dict) and spec.get("runtime_contract_version") in (3, 4):
-            default_count = 4 if spec["runtime_contract_version"] == 4 else 1
+        if isinstance(spec, dict) and spec.get("runtime_contract_version") in (3, 4, 5):
+            default_count = 4 if spec["runtime_contract_version"] >= 4 else 1
             requested = resolved_plan.config_overrides.get("export.model.num_draft_tokens", default_count)
             if ("mtp" not in resolved_plan.components
                     or requested != spec.get("num_draft_tokens")):

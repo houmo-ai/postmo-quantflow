@@ -9,7 +9,6 @@ from xhmodel_merak.xh_llm.models.qwen4_exp.mtp_model import (
     Qwen4ExpMTPModel,
     mtp_text_config,
 )
-from xhmodel_merak.xh_llm.models.qwen4_exp.serving_graph import convert_qwen4_exp_kv_to_llm_cache
 from xhquant.core.cache_tensor import CacheTensor
 
 
@@ -30,9 +29,9 @@ def test_mtp_candidate_and_verify_export_dimensions(settings, candidates, width)
 
     assert resolve_mtp_num_draft_tokens(settings) == candidates
     assert resolve_mtp_verify_length(settings) == width
-    # A graph role describes a physical width, including existing width-2/4 graphs.
-    assert mtp_verify_phase(2) == "decode_m2"
-    assert mtp_verify_phase(4) == "decode_m4"
+    assert mtp_verify_phase(width) == "decode"
+    assert mtp_verify_phase(2, runtime_version=3) == "decode_m2"
+    assert mtp_verify_phase(4, runtime_version=4) == "decode_m4"
 
 
 @pytest.mark.parametrize(
@@ -51,7 +50,7 @@ def test_fixed_head_checkpoint_reuses_quantization_across_static_phases(tmp_path
     import onnx
     from onnx import numpy_helper
 
-    from xhmodel_merak.xh_llm.models.qwen4_exp.serving_workflow import (
+    from xhmodel_merak.xh_llm.models.qwen4_exp.package_export import (
         _load_fixed_head_checkpoint,
         _save_fixed_head_checkpoint,
     )
@@ -426,9 +425,10 @@ def test_mtp_qsa_prefill_and_decode_share_pool_and_tail(tmp_path, monkeypatch):
                 (*state, *controls),
             )
             expected.append(output[:2])
+            updates = dict(zip((spec.name for spec in reference.core.output_cache_specs()), output[2:], strict=True))
             for j, spec in enumerate(specs):
-                if spec.state_kind not in {"kv_key", "kv_value", "qsa_indexer_key"}:
-                    state[j] = output[2 + j]
+                if spec.name in updates:
+                    state[j] = updates[spec.name]
         actual = [runtime.prefill(embeddings[:, :2], hidden[:, :2], position_ids=positions[:, :, :2])]
         for i in (2, 3):
             actual.append(
@@ -505,7 +505,7 @@ def test_target_verify_exports_padded_tokens_with_unmixed_hc(tmp_path, monkeypat
     )
     result = export_qwen4_exp_hmonnx(
         native,
-        tmp_path / "raw",
+        tmp_path / f"decode_m{verify_width}",
         text_config=c,
         sample_inputs=sample,
         input_sequence_length=verify_width,
@@ -516,13 +516,7 @@ def test_target_verify_exports_padded_tokens_with_unmixed_hc(tmp_path, monkeypat
         linear_attention_mode="recurrent",
         return_hidden_states=True,
     )
-    graph_path = convert_qwen4_exp_kv_to_llm_cache(
-        result.hmonnx_path,
-        tmp_path / f"decode_m{verify_width}/model.onnx",
-        context_length=8,
-        num_kv_heads=1,
-        head_dim=8,
-    )
+    graph_path = result.hmonnx_path
     graph = onnx.load(graph_path, load_external_data=False).graph
     onnx.checker.check_model(str(graph_path))
 
@@ -592,7 +586,7 @@ def test_target_verify_exports_padded_tokens_with_unmixed_hc(tmp_path, monkeypat
     )
     decode_result = export_qwen4_exp_hmonnx(
         native,
-        tmp_path / "decode_raw",
+        tmp_path / "decode",
         text_config=c,
         sample_inputs=decode_sample,
         input_sequence_length=1,
@@ -603,13 +597,7 @@ def test_target_verify_exports_padded_tokens_with_unmixed_hc(tmp_path, monkeypat
         return_hidden_states=True,
         linear_attention_mode="recurrent",
     )
-    decode_path = convert_qwen4_exp_kv_to_llm_cache(
-        decode_result.hmonnx_path,
-        tmp_path / "decode/model.onnx",
-        context_length=8,
-        num_kv_heads=1,
-        head_dim=8,
-    )
+    decode_path = decode_result.hmonnx_path
 
     # Exercise two valid positions in the legacy width-four graph, followed by
     # another call, so padding must preserve every HC/QSA/PLE state.

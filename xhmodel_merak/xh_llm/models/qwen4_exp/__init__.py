@@ -19,15 +19,12 @@ from .qwen4_exp_hmonnx_inference import XHQwen4ExpHMONNXModel
 from .qwen4_exp_model import XHQwen4ExpModel
 from .selected_kv_attention import Qwen4ExpQSAConfig
 from .serving_export import build_qwen4_exp_serving_metadata
-from .serving_graph import convert_qwen4_exp_kv_to_llm_cache, convert_qwen4_exp_kv_to_page_cache
 from .workflow import Qwen4ExpWorkflow
 
 
 __all__ = [
     "load_qwen4_exp_model_for_export",
     "run_qwen4_exp_hmonnx_golden",
-    "convert_qwen4_exp_kv_to_llm_cache",
-    "convert_qwen4_exp_kv_to_page_cache",
     "PrecisionRule",
     "QWEN4_EXP_PRECISION_RULES",
     "QWEN4_EXP_PROFILE",
