@@ -26,6 +26,7 @@ _LING3 = "configs_merak/workflows/xh2a/llm_models/ling_3_flash"
 def _recipe() -> ModelRecipe:
     return ModelRecipe(
         dependencies=runtime_dependencies(
+            common=("fla-core==0.5.2",),
             quantization=(("autoround", AUTOROUND_REQUIREMENTS),),
             checkpoint_build=GPTQ_REQUIREMENTS,
         ),

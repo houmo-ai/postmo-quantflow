@@ -43,6 +43,7 @@ def register(catalog: ModelCatalog) -> None:
     catalog.register_recipe(
         ModelRecipe(
             dependencies=runtime_dependencies(
+                common=("fla-core==0.5.2",),
                 quantization=(("autoround", AUTOROUND_REQUIREMENTS),),
                 checkpoint_build=GPTQ_REQUIREMENTS,
             ),
