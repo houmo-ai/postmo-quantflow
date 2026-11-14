@@ -60,6 +60,16 @@ class Qwen4ExpServingState:
         self.reset()
 
     def reset(self) -> None:
+        if self.tensors:
+            # Sessions retain their last input references. Reuse caller-owned
+            # storage so a new request does not leave another full KV cache
+            # resident in the other phase's session.
+            for spec in self.contract.tensors:
+                tensor = self.tensors.get(spec.name)
+                if tensor is not None:
+                    tensor.fill_(self.ple_eos_token_id if spec.state_kind == "ple_ngram_history" else 0)
+            self.group_start_position.zero_()
+            return
         tensors: dict[str, torch.Tensor] = {}
         for spec in self.contract.tensors:
             if _is_external_page_kv(spec) and not self.own_kv:

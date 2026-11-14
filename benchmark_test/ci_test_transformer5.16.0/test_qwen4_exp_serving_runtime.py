@@ -476,10 +476,16 @@ def test_explicit_cache_state_owns_full_capacity_kv_and_preserves_storage():
             assert isinstance(value, CacheTensor)
             assert value.shape == (1, 2, 9, 4)
     owner = state.tensors["key_cache_1"]
+    owned_storage = {name: tensor.untyped_storage().data_ptr() for name, tensor in state.tensors.items()}
+    position_storage = state.group_start_position.untyped_storage().data_ptr()
     owner[:, :, :2].fill_(3)
     state.commit_outputs((torch.zeros(1), owner[:, :, :2]), ("logits", "present_past_key_cache_0"))
     assert state.tensors["key_cache_1"] is owner
     assert owner[:, :, :2].sum() == 48
+    state.reset()
+    assert owned_storage == {name: tensor.untyped_storage().data_ptr() for name, tensor in state.tensors.items()}
+    assert state.group_start_position.untyped_storage().data_ptr() == position_storage
+    assert state.tensors["key_cache_1"] is owner and owner.count_nonzero().item() == 0
     assert resolve_qwen4_exp_cache_abi() == "page_kv_v1"
     assert resolve_qwen4_exp_cache_abi("llm_cache_inplace_v1") == "llm_cache_inplace_v1"
     import pytest

@@ -10,6 +10,8 @@ from typing import Any, Sequence
 
 import torch
 
+from .serial import SerialHMONNXProposer
+
 DSPARK_PROPOSER = "vllm_merak.spec_decode.dspark.DeepSeekV4DSparkProposer"
 
 
@@ -183,7 +185,7 @@ class DSparkServingState:
             self.owner, self.past = None, 0
 
 
-class DeepSeekV4DSparkProposer:
+class DeepSeekV4DSparkProposer(SerialHMONNXProposer):
     """vLLM custom proposer using the target package's four DSpark graphs."""
 
     def __init__(self, vllm_config: Any) -> None:
@@ -211,39 +213,6 @@ class DeepSeekV4DSparkProposer:
         device = torch.device(f"cuda:{device}") if isinstance(device, int) else torch.device(device)
         engine = runtime.build_dspark_engine(device=str(device))
         self.runner, self.state = runner, DSparkServingState(engine)
-
-    def forward_target(self, *, input_ids: torch.Tensor, positions: torch.Tensor | None,
-                       request_id: str, **kwargs: Any) -> torch.Tensor:
-        assert self.runner is not None and self.state is not None
-        if kwargs.get("inputs_embeds") is not None:
-            raise ValueError("DSpark serving currently requires token IDs")
-        model = self.runner.model
-        flat = model._flatten_input_ids(input_ids)
-        metadata = self.runner._get_attn_metadata()
-        if metadata is None:
-            past = int(positions.reshape(-1)[0]) if positions is not None else 0
-            start, end = 0, flat.numel()
-        else:
-            if metadata.past_lens.numel() != 1:
-                raise RuntimeError("DSpark requires exactly one scheduled request")
-            past = int(metadata.past_lens[0])
-            start, end = map(int, metadata.subsequence_begins.tolist())
-        phase = ("verify" if request_id in self.runner._merak_verify_req_ids
-                 else "prefill" if past == 0 or end - start > 1 else "decode")
-        logits = self.state.forward_target(request_id, flat[start:end], past=past, phase=phase)
-        output = torch.zeros(flat.numel(), logits.shape[-1], device=self.runner.device, dtype=logits.dtype)
-        output[start:end].copy_(logits[0].to(output))
-        model._cache_owner_request_id = request_id
-        model._cache_owner_next_past_len = self.state.past
-        if phase == "verify":
-            self.runner._merak_pending_verify_req_ids.add(request_id)
-        return output
-
-    def on_target_accept(self, *, req_id: str, accepted_steps: int,
-                         sampled_token_ids: torch.Tensor | Sequence[int]) -> None:
-        assert self.state is not None and self.runner is not None
-        self.state.commit(req_id, accepted_steps, torch.as_tensor(sampled_token_ids))
-        self.runner.model._cache_owner_next_past_len = self.state.past
 
     def propose(self, sampled_token_ids: list[list[int]], num_tokens_no_spec: Any,
                 token_ids_cpu: Any, *, slot_mappings: Any = None) -> list[list[int]]:

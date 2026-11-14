@@ -105,7 +105,9 @@ prefill 与 decode 共用主模型缓存；MTP 的 decode 同时用于 verify，
 中保存这些缓存。该约定同时适用于目标模型和 MTP 两张草稿图。
 新图不含 `PageKVCache`，旧 PageKV 包仍可加载。
 SelectedKV 直接接收独立的 K/V cache，分别输出选中的 K/V；不再打包整份 cache。
-K/V 各用一次 int32 Gather 取回尾部，再分别与选中数据 Concat，不再压紧搬运。
+K/V 尾部由独立三行缓存与当前特征拼接、切片形成，再分别与选中数据 Concat。
+SelectedKV 的 CUDA 路径共用选取索引，按 K/V cache 的实际 stride 联合读取并直写最终输出；
+不再逐 query 保留 Gather/Where 结果后整体拼接。
 attention 使用 grouped MatMul、MaskedAdd、Softmax、MatMul，计算保留16位精度；
 分段位置 mask 分别屏蔽选择区和尾部区的无效槽位，允许两区之间保留 padding。
 GDR 和 PLE 的一维卷积通过 SDK 转为等价的 Conv2d。
@@ -261,6 +263,7 @@ Golden 为运行输出，不作为源码提交或自动混入构建产物 Manife
 产物包含 prefill/decode、visual_m*、可选 mtp_prefill/mtp_decode 图、token embedding、tokenizer/processor、
 运行 metadata 和 `export_meta_info.json`；整体搬移后仍可加载。
 推理当前为 batch=1、greedy，使用 SDK V2；大型目标图启用自动 offload。
+请求间原地清零并复用 K/V、GDR、PLE、QSA 与位置状态，保持会话输入缓存的存储地址稳定。
 NGram PLE 查表权重在 HMONNX 导出时默认使用 SEFP4：每 64 个元素共享指数，
 尾数按两个 4-bit 数打包。原始 checkpoint 保持高精度，不交给 AutoRound 量化此表。
 默认 SEFP4 导出将压缩表和指数保存为独立资源，主图通过四维
@@ -349,3 +352,79 @@ result = build_qwen4_exp_model(
 专用入口在进程内安装临时函数替换，应在独立构建进程使用；不要与其他模型的构建
 混在同一进程并发执行，也不要在补丁作用域中 fork 构建子进程。
 推理仍使用公共 `inference_model()`，已有 HMONNX／Golden 的运行方式不变。
+
+## vLLM Merak 文本推理
+
+vLLM 使用本仓库的 Qwen4 加载器，复用 GLM/DeepSeek 的单请求调度与 Qwen4 原有
+HMONNX runtime。启用 Inference V2、packed W4，目标和草稿共用量化权重；
+PLE 表仍在 Host。运行环境需要兼容的 vLLM/Torch 二进制及支持 `qwen4_exp` 的 Transformers。
+本次实测为 vLLM 0.24.0、Torch 2.11.0+cu129、Transformers 5.16.1。
+在已配置好这些运行依赖的独立服务环境中，从 ModelZoo 根目录安装插件：
+
+```bash
+python -m pip install --no-deps -e ./vllm_merak
+```
+
+量化/导出环境和 ModelZoo CI 不需要安装 vLLM；环境说明见
+[插件 README](../../../vllm_merak/README.md)。当前插件入口支持文本、单请求、greedy sampling。
+
+### 准备产物与配置
+
+full 使用包含 target prefill/decode 的完整产物目录；MTP 使用包含 target prefill/verify
+及 `mtp_prefill`、`mtp_decode` 的完整产物目录。两者均保留根目录 `ple/`、
+`golden_meta_info.json`、`quant_embedding.pt` 和 `hf_config/`。
+在选用的产物根目录保存以下 `merak_config.json`，路径均相对此目录解析：
+
+```json
+{
+  "architectures": ["MerakForCausalLM"],
+  "model_type": "merak_llm",
+  "config_format": "merak_llm",
+  "load_format": "merak_llm",
+  "xh_model": {
+    "model_type": "hmonnx",
+    "meta_info": "golden_meta_info.json"
+  },
+  "enable_page_attention": false,
+  "max_num_seqs": 1,
+  "disable_prefix_caching": true
+}
+```
+
+加载器根据 `hf_config/config.json` 的源模型架构选择 Qwen4 实现。
+
+### 启动 full 或 MTP
+
+从 ModelZoo 根目录使用公共 Merak 服务入口：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 VLLM_WORKER_MULTIPROC_METHOD=spawn \
+VLLM_PLUGINS=merak XHQUANT_PACKED_W4=1 TORCH_COMPILE_DISABLE=1 \
+python vllm_merak/examples/vllm_chat_server.py \
+  --model /path/to/qwen38_full --tokenizer /path/to/qwen38_full/hf_config \
+  --config-format merak_llm --load-format merak_llm --dtype float16 \
+  --use-v2 --auto-offload \
+  --max-model-len 262144 --max-num-batched-tokens 256 --max-num-seqs 1 \
+  --kv-cache-memory-bytes 2097152 \
+  --enforce-eager --no-async-scheduling --no-enable-prefix-caching
+```
+
+MTP 改用 MTP 包并增加
+`--speculative-config '{"method":"custom_class","model":"vllm_merak.spec_decode.qwen4.Qwen4MTPProposer","num_speculative_tokens":4,"draft_sample_method":"greedy","rejection_sample_method":"standard"}'`。
+两种模式均设置 `--max-num-seqs 1`，关闭 prefix caching 和 async scheduling，
+请求的 `temperature` 设为 `0`。`--max-model-len` 不超过产物导出的上下文容量。
+这里的 2 MiB KV 预算仅用于 vLLM 调度占位；实际 GDN/QSA/PLE 状态由 HMONNX runtime 管理。
+纯文本直接回答时，chat 请求可设置 `chat_template_kwargs={"enable_thinking": false}`。
+
+拒绝时复用模型的局部快照，恢复 target 和 draft 的全部状态，
+再执行已接受前缀；四候选全部接受时只补齐最后一个移位的草稿输入。
+新请求原地清零并复用已有缓存，保持会话引用的存储地址稳定。
+
+### 实测结果
+
+完整 48 层模型使用单张 A100 80 GiB、chunk 256、导出上下文容量 262144 验证。
+unified API 的 full/MTP 均正确回答短题和跨 chunk 输入；MTP 与逐 token target 相同，
+强制拒绝后的回退重放也与顺序执行相同。
+vLLM full/MTP 对同一份 9303-token 文本输入均生成 826 token，逐 token 完全一致，
+8 条指定记录及校验码全部正确。MTP 执行 190 次 verify、142 个 target token 重放，
+draft 接受率为 637/760（83.82%）；分母为参与 verify 的 draft token 数，包含最后一组 verify。
